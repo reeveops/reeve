@@ -165,7 +165,7 @@ func evalGateBase(g GateID, cfg Config, in Inputs) GateResult {
 	switch g {
 	case GateFork:
 		if in.PRIsFork && !in.ForkOptInAllowed {
-			return fail(g, "fork PR - apply denied by default; see docs/auth-fork-prs.md to opt in")
+			return fail(g, "fork PR - apply denied by default; see docs/auth.md#fork-pr-policy to opt in")
 		}
 		if !in.PRIsFork {
 			return GateResult{Gate: g, Outcome: OutcomeSkipped, Reason: "not a fork PR"}
