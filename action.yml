@@ -96,8 +96,9 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
-        # Shared with edge-build.yml so the cache key / edge-asset hash can
-        # never drift from the hash the edge builds were named with.
+        # Canonical source hash (see .github/scripts/source-hash.sh): keyed on
+        # content AND repo-relative path, so the same tree hashes identically
+        # wherever it is checked out. Used only as the binary cache key.
         echo "hash=$("$ACTION_PATH/.github/scripts/source-hash.sh" "$ACTION_PATH")" >> "$GITHUB_OUTPUT"
 
     - name: Restore reeve binary cache
@@ -121,7 +122,6 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         REEVE_REF: ${{ github.action_ref }}
         REEVE_REPO: ${{ github.action_repository }}
-        REEVE_SRCHASH: ${{ steps.reeve-hash.outputs.hash }}
         REEVE_OS: ${{ runner.os }}
         REEVE_ARCH: ${{ runner.arch }}
         REEVE_DEST: ${{ runner.temp }}/reeve-bin/reeve

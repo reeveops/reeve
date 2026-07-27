@@ -5,8 +5,8 @@ name: edge-build
 # OWN prerelease tagged <branch>-<shortsha> (e.g. next-5993c47) - one release
 # per commit, never a rolling dumping ground. The action, when pinned @master
 # or @next, resolves the newest <branch>-* prerelease and downloads its asset.
-# These builds are unsigned; hand-cut v*.*.* (and vX.Y.Z-rc) tags remain the
-# signed distribution and are entirely the maintainer's call.
+# Hand-cut v*.*.* (and vX.Y.Z-rc) tags remain the primary distribution and are
+# entirely the maintainer's call.
 #
 # The <branch>-<sha> tags do NOT match the release workflow's v*.*.* trigger,
 # so publishing here never starts the goreleaser pipeline.

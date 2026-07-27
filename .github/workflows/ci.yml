@@ -27,6 +27,16 @@ jobs:
       - name: go test (race)
         run: go test -race ./...
 
+      # The reeve_minimal build excludes the interactive `reeve init` wizard
+      # (charmbracelet/huh + its TUI tree). Nothing else compiles it, so
+      # without this step init_wizard_minimal.go rots silently and only
+      # breaks when someone cuts a minimal artifact.
+      - name: go build (reeve_minimal)
+        run: go build -tags reeve_minimal ./...
+
+      - name: go test (reeve_minimal)
+        run: go test -tags reeve_minimal ./cmd/reeve/...
+
   lint:
     runs-on: ubuntu-latest
     steps:
