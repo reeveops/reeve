@@ -10,11 +10,11 @@
 ├── observability.yaml
 ├── drift.yaml
 ├── pulumi.yaml           # engine: pulumi
-└── terraform.yaml        # engine: terraform (future)
+└── terraform.yaml        # engine: terraform (or tofu.yaml, engine: tofu)
 ```
 
-Single-file `reeve.yaml` at repo root supported for simple cases. If
-`.reeve/` exists, root `reeve.yaml` is ignored (ambiguity error in lint).
+Config always lives in the `.reeve/` directory. There is no root-level
+single-file `reeve.yaml` form.
 
 ## File convention
 
