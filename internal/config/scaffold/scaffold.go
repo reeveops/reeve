@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -340,6 +339,15 @@ func ExistingTypes(dir string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Scoped to dir for the same reason as the config loader: entries here
+	// may be symlinks committed by a PR, and a DirEntry name being
+	// separator-free says nothing about where the link points.
+	dirRoot, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer dirRoot.Close()
+
 	out := map[string]string{}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -349,8 +357,7 @@ func ExistingTypes(dir string) (map[string]string, error) {
 		if !strings.HasSuffix(n, ".yaml") && !strings.HasSuffix(n, ".yml") {
 			continue
 		}
-		// #nosec G304 -- n is a DirEntry name from reading dir, so it cannot contain a separator
-		data, err := os.ReadFile(filepath.Join(dir, n))
+		data, err := dirRoot.ReadFile(n)
 		if err != nil {
 			return nil, err
 		}

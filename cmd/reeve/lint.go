@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -109,9 +108,15 @@ func newLintCmd() *cobra.Command {
 // at evaluation time). Same candidate paths as the VCS adapter's
 // FetchCodeowners.
 func lintCodeownersEmails(root string) {
+	// Scoped to the repo root: CODEOWNERS is read from the PR HEAD, where it
+	// could be a symlink out of the tree.
+	repo, err := os.OpenRoot(root)
+	if err != nil {
+		return
+	}
+	defer repo.Close()
 	for _, rel := range []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"} {
-		// #nosec G304 -- rel is from the fixed CODEOWNERS literal list on the line above
-		f, err := os.Open(filepath.Join(root, rel))
+		f, err := repo.Open(rel)
 		if err != nil {
 			continue
 		}
