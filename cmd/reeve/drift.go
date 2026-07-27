@@ -230,6 +230,8 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	// and the runner writes it as the workflow user; tighter perms break
 	// the runner's own reader.
 	if p := os.Getenv("GITHUB_STEP_SUMMARY"); p != "" {
+		// #nosec G703 -- p is $GITHUB_STEP_SUMMARY, provided by the Actions runner; see the G306 note
+		// above for the mode
 		_ = os.WriteFile(p, []byte(report), 0o644) // #nosec G306
 	}
 

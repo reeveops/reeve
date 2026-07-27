@@ -74,6 +74,11 @@ func Run(ctx context.Context, h Hook, tc Context, r *redact.Redactor) Result {
 
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	// #nosec G204 -- DELIBERATE: a policy hook IS an operator-supplied command from engine config.
+	// It is argv-form (no shell) and reached only from run.Apply, AFTER every
+	// approval gate - never on the preview path, so an unapproved PR cannot reach
+	// it. Note cmd.Env below inherits the full credential environment: a hook is
+	// trusted code
 	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

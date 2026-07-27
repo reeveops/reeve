@@ -181,6 +181,8 @@ func (m *Migrator) MigrateDirectory(dir string, dryRun bool) error {
 }
 
 func (m *Migrator) migrateOne(path string, dryRun bool) error {
+	// #nosec G304 -- path is a .reeve config file this CLI itself enumerated under the operator-
+	// supplied root; not reachable from PR content
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -242,6 +244,9 @@ func (m *Migrator) migrateOne(path string, dryRun bool) error {
 		return nil
 	}
 	backup := path + ".bak"
+	// #nosec G703 -- backup is <path>.bak; path is a .reeve config file this CLI itself enumerated
+	// under the operator-supplied root; not reachable from PR content, and a suffix
+	// cannot leave the directory the source file is already in
 	if err := os.WriteFile(backup, data, 0o600); err != nil {
 		return fmt.Errorf("backup: %w", err)
 	}

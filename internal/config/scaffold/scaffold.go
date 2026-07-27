@@ -349,6 +349,7 @@ func ExistingTypes(dir string) (map[string]string, error) {
 		if !strings.HasSuffix(n, ".yaml") && !strings.HasSuffix(n, ".yml") {
 			continue
 		}
+		// #nosec G304 -- n is a DirEntry name from reading dir, so it cannot contain a separator
 		data, err := os.ReadFile(filepath.Join(dir, n))
 		if err != nil {
 			return nil, err

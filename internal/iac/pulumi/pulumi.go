@@ -115,6 +115,7 @@ func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.
 }
 
 func readProjectName(path string) (string, error) {
+	// #nosec G304 -- path is a Pulumi.yaml found by this package's own walk beneath the repo root
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -188,6 +189,8 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// #nosec G204 -- e.Binary is engine.binary.path from operator config; args are built by this
+	// adapter and passed as argv with no shell
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
@@ -261,6 +264,8 @@ func (e *Engine) previewDiff(ctx context.Context, stack discovery.Stack, opts ia
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// #nosec G204 -- e.Binary is engine.binary.path from operator config; args are built by this
+	// adapter and passed as argv with no shell
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd

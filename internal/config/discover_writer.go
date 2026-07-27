@@ -22,6 +22,8 @@ import (
 //   - A `.bak` copy of the original file is written alongside.
 //   - dryRun=true returns the new YAML bytes without touching disk.
 func WriteClusteredStacks(path string, decls []discovery.Declaration, dryRun bool) ([]byte, error) {
+	// #nosec G304 -- path is a .reeve config file this CLI itself enumerated under the operator-
+	// supplied root; not reachable from PR content
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -34,9 +36,15 @@ func WriteClusteredStacks(path string, decls []discovery.Declaration, dryRun boo
 	if dryRun {
 		return out, nil
 	}
+	// #nosec G703 -- backup beside the engine config `reeve stacks discover --write` just read;
+	// path is a .reeve config file this CLI itself enumerated under the operator-
+	// supplied root; not reachable from PR content
 	if err := os.WriteFile(path+".bak", data, 0o600); err != nil {
 		return nil, fmt.Errorf("backup: %w", err)
 	}
+	// #nosec G703 -- rewrites the same operator-supplied engine config that was read above; path
+	// is a .reeve config file this CLI itself enumerated under the operator-
+	// supplied root; not reachable from PR content
 	if err := os.WriteFile(path, out, 0o600); err != nil {
 		return nil, err
 	}
@@ -158,6 +166,8 @@ func replaceMapChild(m *yaml.Node, key string, newVal *yaml.Node) bool {
 // DryRunDiff produces a unified diff between the current and proposed
 // contents. Small shim used by `reeve stacks discover --diff`.
 func DryRunDiff(path string, proposed []byte) (string, error) {
+	// #nosec G304 -- path is a .reeve config file this CLI itself enumerated under the operator-
+	// supplied root; not reachable from PR content
 	cur, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

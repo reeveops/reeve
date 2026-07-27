@@ -51,6 +51,8 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metad
 	if err != nil {
 		return nil, nil, err
 	}
+	// #nosec G304 -- p comes from Store.path, which rejects keys starting with / or .., containing
+	// /../ or ending /.., then re-verifies the joined path is still under root
 	f, err := os.Open(p)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -187,6 +189,8 @@ func (s *Store) writeAtomic(target string, r io.Reader) (*blob.Metadata, error) 
 // --- helpers ---
 
 func hashFile(path string) (string, error) {
+	// #nosec G304 -- callers pass a path already validated by Store.path (see the containment
+	// check there)
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -224,6 +228,7 @@ func acquireLock(target string) (*fileLock, error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
 		return nil, err
 	}
+	// #nosec G304 -- lockPath is <target>.lock where target was already validated by Store.path
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err

@@ -195,7 +195,10 @@ func writeScaffold(dir string, files []scaffold.File, existing map[string]string
 		// With --force, an existing file of the same config_type may live
 		// under a different name; back up and replace the same-named file,
 		// which is the conventional location.
+		// #nosec G304 -- path is filepath.Join(dir, f.Name) where f.Name is a scaffold-package constant
 		if old, readErr := os.ReadFile(path); readErr == nil {
+			// #nosec G703 -- path is filepath.Join(dir, f.Name) where f.Name is a scaffold-package
+			// constant, not user input
 			if err := os.WriteFile(path+".bak", old, 0o600); err != nil {
 				return nil, nil, fmt.Errorf("backup %s: %w", path, err)
 			}

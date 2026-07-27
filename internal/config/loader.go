@@ -82,6 +82,7 @@ func Load(root string) (*Config, error) {
 	seenEngine := map[string]string{}
 
 	for _, f := range files {
+		// #nosec G304 -- f comes from the .reeve directory listing above, not from a caller
 		data, err := os.ReadFile(f)
 		if err != nil {
 			return nil, err

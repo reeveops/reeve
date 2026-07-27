@@ -110,6 +110,7 @@ func newLintCmd() *cobra.Command {
 // FetchCodeowners.
 func lintCodeownersEmails(root string) {
 	for _, rel := range []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"} {
+		// #nosec G304 -- rel is from the fixed CODEOWNERS literal list on the line above
 		f, err := os.Open(filepath.Join(root, rel))
 		if err != nil {
 			continue
