@@ -46,6 +46,14 @@ description = "Build reeve binary to bin/reeve"
 run = "go build -trimpath -ldflags='-s -w -X main.version=$(git describe --tags --always --dirty)' -o bin/reeve ./cmd/reeve"
 description = "Build optimized release binary (trimpath + stripped)"
 
+[tasks.build-minimal]
+run = "go build -tags reeve_minimal -o bin/reeve-minimal ./cmd/reeve"
+description = "Build without the interactive init wizard (no huh/bubbletea TUI tree)"
+
+[tasks."test:minimal"]
+run = "go test -tags reeve_minimal ./cmd/reeve/..."
+description = "Run the cmd/reeve tests against the reeve_minimal build"
+
 # ── run ────────────────────────────────────────────────────────────────
 
 [tasks.run]
