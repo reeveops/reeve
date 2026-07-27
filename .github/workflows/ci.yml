@@ -58,8 +58,9 @@ jobs:
         uses: jdx/mise-action@v4
 
       - name: gosec
-        # Non-zero exit on findings; text output goes to the job log.
-        run: gosec -quiet -fmt=text -exclude=G104,G115,G204,G304,G703,G704 -exclude-dir=openspec -exclude-dir=docs -exclude-dir=examples ./...
+        # Non-zero exit on findings; text output goes to the job log. The rule
+        # set lives in mise.toml's `sec` task so CI and local runs cannot drift.
+        run: mise run sec
 
   govet-extended:
     # Catches issues golangci-lint's vet settings sometimes miss.

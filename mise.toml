@@ -83,7 +83,24 @@ run = "govulncheck ./..."
 description = "Go vulnerability scanner (Go standard library + dependencies)"
 
 [tasks.sec]
-run = "gosec -quiet -fmt=text -exclude=G104,G115,G204,G304,G703,G704 -exclude-dir=openspec -exclude-dir=docs -exclude-dir=examples ./..."
+# Canonical gosec invocation - CI (ci.yml `sec`, security.yml `vuln-scan`)
+# calls this task so the rule set is defined once.
+#
+# Only two rules are excluded, and both are justified:
+#   G104 "Audit errors not checked" - golangci-lint runs errcheck with a
+#        curated exclude list; this is a strictly noisier duplicate.
+#   G115 "Type conversion which leads to integer overflow" - reeve parses no
+#        binary formats and has one narrowing conversion in the tree
+#        (awsoidc int32(duration.Seconds()), where an overflow yields a
+#        negative DurationSeconds that STS rejects).
+#
+# The taint rules (G7xx) and the exec/file rules (G204, G304) are ON. They
+# fire on code that is correct by design - reeve's whole job is shelling out
+# to an IaC CLI and POSTing to operator-configured endpoints - so those sites
+# carry `#nosec <rule> -- <reason>`. The point is not the existing findings,
+# it is that a NEW exec site, config-derived path, or outbound sink cannot be
+# added without someone writing down why it is safe.
+run = "gosec -quiet -fmt=text -exclude=G104,G115 -exclude-dir=openspec -exclude-dir=docs -exclude-dir=examples ./..."
 description = "Static security analyzer for Go (gosec)"
 
 [tasks.check]
