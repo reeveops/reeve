@@ -61,9 +61,6 @@ func resolveEngineBinary(t *testing.T) (string, Variant) {
 const (
 	fixtureProject   = "demo"
 	fixtureStackPath = "stacks/demo"
-	// resourceAddress must stay stable across intents so an input change is
-	// reported as an update rather than a delete+create pair.
-	resourceAddress = "terraform_data.canary"
 )
 
 // tfFixture is a real root module on disk backed by the local backend.

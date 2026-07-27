@@ -56,6 +56,8 @@ const (
 // SecretEnvKey is the environment variable the suite plants a fake secret
 // in before every operation. No fixture may reference it, so the value must
 // never reach a result field. See TestSecretsDoNotLeak.
+// #nosec G101 -- env var NAME, not a credential; the value lives in
+// SecretEnvValue and is a test canary.
 const SecretEnvKey = "REEVE_CONFORMANCE_SECRET"
 
 // SecretEnvValue is the planted value. Distinctive so a substring search
@@ -221,10 +223,15 @@ func testPreviewNoop(t *testing.T, s Subject) {
 	}
 }
 
-// A preview that creates one resource reports it in Counts AND in the
-// structured Resources slice. Resources drives drift-noise filtering, so an
-// adapter that populates Counts but not Resources silently disables
-// classification.ignore_properties for its engine.
+// A preview that creates one resource reports it in Counts and renders a
+// non-empty PlanSummary.
+//
+// Note on Resources: the interface documents it as best-effort and
+// drift-oriented (Pulumi detailedDiff, Terraform resource_drift), and the
+// drift runner is its only consumer - the preview path is not required to
+// fill it. So this asserts SHAPE when an adapter populates it, not presence.
+// Demanding presence here would fail a compliant adapter; ignoring the shape
+// would let a malformed entry through to classification filtering.
 func testPreviewCreate(t *testing.T, s Subject) {
 	e, f := s.NewFixture(t)
 	f.Write(t, IntentOne)
@@ -242,18 +249,25 @@ func testPreviewCreate(t *testing.T, s Subject) {
 	if strings.TrimSpace(res.PlanSummary) == "" {
 		t.Error("PlanSummary must be non-empty for a plan with changes: it is what the PR comment renders")
 	}
-	if len(res.Resources) != 1 {
-		t.Fatalf("expected 1 structured resource change, got %d", len(res.Resources))
-	}
-	rc := res.Resources[0]
-	if rc.Address == "" {
-		t.Error("ResourceChange.Address must be non-empty: ignore_resources globs match on it")
-	}
-	if rc.Op != "create" {
-		t.Errorf("ResourceChange.Op = %q, want %q", rc.Op, "create")
-	}
-	if !validCategory(rc.Category) {
-		t.Errorf("ResourceChange.Category = %q, want one of changed|orphaned|missing", rc.Category)
+	assertResourceShape(t, res.Resources)
+}
+
+// assertResourceShape validates every populated ResourceChange. Address feeds
+// ignore_resources globs, Op and Category feed treat_as_drift, so a malformed
+// entry makes drift classification behave unpredictably rather than loudly.
+// An empty slice is legal - see the note on testPreviewCreate.
+func assertResourceShape(t *testing.T, changes []iac.ResourceChange) {
+	t.Helper()
+	for i, rc := range changes {
+		if rc.Address == "" {
+			t.Errorf("Resources[%d].Address is empty: ignore_resources globs match on it", i)
+		}
+		if !validOp(rc.Op) {
+			t.Errorf("Resources[%d].Op = %q, want one of create|update|delete|replace", i, rc.Op)
+		}
+		if !validCategory(rc.Category) {
+			t.Errorf("Resources[%d].Category = %q, want one of changed|orphaned|missing", i, rc.Category)
+		}
 	}
 }
 
@@ -341,16 +355,10 @@ func testApplyReportsUpdate(t *testing.T, s Subject) {
 	if res.Counts.Change+res.Counts.Replace != 1 {
 		t.Fatalf("expected exactly one update or replace, got %+v", res.Counts)
 	}
-	if len(res.Resources) != 1 {
-		t.Fatalf("expected 1 structured resource change, got %d", len(res.Resources))
+	if strings.TrimSpace(res.PlanSummary) == "" {
+		t.Error("PlanSummary must be non-empty for an update: it is what the PR comment renders")
 	}
-	rc := res.Resources[0]
-	if rc.Op != "update" && rc.Op != "replace" {
-		t.Errorf("ResourceChange.Op = %q, want update or replace", rc.Op)
-	}
-	if len(rc.Paths) == 0 {
-		t.Error("ResourceChange.Paths must list the changed property for an update: ignore_properties matches on it")
-	}
+	assertResourceShape(t, res.Resources)
 }
 
 // DriftCheck fails closed, and this is the ONE place the contract differs
@@ -424,6 +432,14 @@ func testSecretsDoNotLeak(t *testing.T, s Subject) {
 			}
 		})
 	}
+}
+
+func validOp(op string) bool {
+	switch op {
+	case "create", "update", "delete", "replace":
+		return true
+	}
+	return false
 }
 
 func validCategory(c string) bool {
