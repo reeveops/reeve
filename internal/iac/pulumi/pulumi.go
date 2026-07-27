@@ -140,7 +140,15 @@ func readProjectName(repoRoot *os.Root, rel string) (string, error) {
 		return "", err
 	}
 	if p.Name == "" {
-		return filepath.Base(filepath.Dir(path)), nil
+		// Fall back to the containing directory's name. rel is repo-relative,
+		// so a Pulumi.yaml at the repo root has dir "." - resolve that to the
+		// repo directory's own name, which is what the absolute path used to
+		// produce.
+		dir := filepath.Dir(rel)
+		if dir == "." || dir == "" {
+			return filepath.Base(repoRoot.Name()), nil
+		}
+		return filepath.Base(dir), nil
 	}
 	return p.Name, nil
 }

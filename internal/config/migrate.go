@@ -164,6 +164,15 @@ func (m *Migrator) MigrateDirectory(dir string, dryRun bool) error {
 	if err != nil {
 		return err
 	}
+	// Scoped to dir: these files come from the checked-out tree, where an
+	// entry can be a symlink pointing outside it. Rewriting a config in
+	// place must not follow one out.
+	dirRoot, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer dirRoot.Close()
+
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -172,18 +181,18 @@ func (m *Migrator) MigrateDirectory(dir string, dryRun bool) error {
 		if !strings.HasSuffix(n, ".yaml") && !strings.HasSuffix(n, ".yml") {
 			continue
 		}
-		path := filepath.Join(dir, n)
-		if err := m.migrateOne(path, dryRun); err != nil {
+		path := filepath.Join(dir, n) // for messages only
+		if err := m.migrateOne(dirRoot, n, path, dryRun); err != nil {
 			return fmt.Errorf("%s: %w", n, err)
 		}
 	}
 	return nil
 }
 
-func (m *Migrator) migrateOne(path string, dryRun bool) error {
-	// #nosec G304 -- path is a .reeve config file this CLI itself enumerated under the operator-
-	// supplied root; not reachable from PR content
-	data, err := os.ReadFile(path)
+// migrateOne migrates the file named name inside dirRoot. path is the same
+// file's display path, used only in messages.
+func (m *Migrator) migrateOne(dirRoot *os.Root, name, path string, dryRun bool) error {
+	data, err := dirRoot.ReadFile(name)
 	if err != nil {
 		return err
 	}
@@ -243,14 +252,10 @@ func (m *Migrator) migrateOne(path string, dryRun bool) error {
 		fmt.Printf("--- would migrate %s (v%d → v%d) ---\n%s\n", path, fromVer, cur, string(out))
 		return nil
 	}
-	backup := path + ".bak"
-	// #nosec G703 -- backup is <path>.bak; path is a .reeve config file this CLI itself enumerated
-	// under the operator-supplied root; not reachable from PR content, and a suffix
-	// cannot leave the directory the source file is already in
-	if err := os.WriteFile(backup, data, 0o600); err != nil {
+	if err := dirRoot.WriteFile(name+".bak", data, 0o600); err != nil {
 		return fmt.Errorf("backup: %w", err)
 	}
-	return os.WriteFile(path, out, 0o600)
+	return dirRoot.WriteFile(name, out, 0o600)
 }
 
 // Header matchers tolerate what the strict loader accepts: optional quotes
