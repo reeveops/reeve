@@ -119,6 +119,6 @@ require (
 	google.golang.org/genproto v0.0.0-20260713224248-f5fc221cf8c4 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260715201247-33e454440029 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260715201247-33e454440029 // indirect
-	google.golang.org/grpc v1.82.0 // indirect
+	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
