@@ -183,6 +183,12 @@ func suggestEngine(pulumiEnum, tfEnum []discovery.Stack) string {
 // config_type already exists (unless force). With force, overwritten files
 // are first copied to *.bak.
 func writeScaffold(dir string, files []scaffold.File, existing map[string]string, force bool) (written, skipped []string, err error) {
+	var root *os.Root
+	defer func() {
+		if root != nil {
+			_ = root.Close()
+		}
+	}()
 	for _, f := range files {
 		if prev, ok := existing[f.ConfigType]; ok && !force {
 			skipped = append(skipped, fmt.Sprintf("%s (config_type %s already declared there)", filepath.Join(".reeve", prev), f.ConfigType))
@@ -191,19 +197,27 @@ func writeScaffold(dir string, files []scaffold.File, existing map[string]string
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, nil, err
 		}
-		path := filepath.Join(dir, f.Name)
+		// Opened lazily, on the first file actually written, so a run where
+		// every config_type is skipped still leaves no .reeve/ behind.
+		// Scoped so a symlink planted at .reeve/<name> cannot redirect the
+		// write (or its .bak) outside the directory.
+		if root == nil {
+			r, err := os.OpenRoot(dir)
+			if err != nil {
+				return nil, nil, err
+			}
+			root = r
+		}
+		path := filepath.Join(dir, f.Name) // for messages only
 		// With --force, an existing file of the same config_type may live
 		// under a different name; back up and replace the same-named file,
 		// which is the conventional location.
-		// #nosec G304 -- path is filepath.Join(dir, f.Name) where f.Name is a scaffold-package constant
-		if old, readErr := os.ReadFile(path); readErr == nil {
-			// #nosec G703 -- path is filepath.Join(dir, f.Name) where f.Name is a scaffold-package
-			// constant, not user input
-			if err := os.WriteFile(path+".bak", old, 0o600); err != nil {
+		if old, readErr := root.ReadFile(f.Name); readErr == nil {
+			if err := root.WriteFile(f.Name+".bak", old, 0o600); err != nil {
 				return nil, nil, fmt.Errorf("backup %s: %w", path, err)
 			}
 		}
-		if err := os.WriteFile(path, f.Content, 0o600); err != nil {
+		if err := root.WriteFile(f.Name, f.Content, 0o600); err != nil {
 			return nil, nil, err
 		}
 		written = append(written, f.Name)

@@ -66,8 +66,14 @@ type projectYAML struct {
 // it records (project=<name>, path=<dir>) and enumerates stacks from
 // sibling Pulumi.<stack>.yaml files.
 func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.Stack, error) {
+	repoRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer repoRoot.Close()
+
 	var out []discovery.Stack
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -89,7 +95,15 @@ func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.
 		}
 		rel = filepath.ToSlash(rel)
 
-		project, err := readProjectName(path)
+		// Read the project file through a root on the repo. WalkDir matches
+		// entries with Lstat, so a Pulumi.yaml committed as a symlink is
+		// matched by name and then followed by a plain read; os.Root refuses
+		// to traverse out of the repo instead.
+		relFile, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		project, err := readProjectName(repoRoot, relFile)
 		if err != nil {
 			return err
 		}
@@ -114,9 +128,10 @@ func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.
 	return out, nil
 }
 
-func readProjectName(path string) (string, error) {
-	// #nosec G304 -- path is a Pulumi.yaml found by this package's own walk beneath the repo root
-	data, err := os.ReadFile(path)
+// readProjectName reads a Pulumi.yaml through repoRoot; rel is its path
+// relative to the repo root.
+func readProjectName(repoRoot *os.Root, rel string) (string, error) {
+	data, err := repoRoot.ReadFile(rel)
 	if err != nil {
 		return "", err
 	}
