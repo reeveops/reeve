@@ -61,6 +61,30 @@ jobs:
         # Non-zero exit on findings; text output goes to the job log.
         run: gosec -quiet -fmt=text -exclude=G104,G115,G204,G304,G703,G704 -exclude-dir=openspec -exclude-dir=docs -exclude-dir=examples ./...
 
+  engine-conformance:
+    # Drives the iac.Engine contract suite (internal/iac/enginetest) against a
+    # REAL engine binary: real argv, real process, real `show -json` parsing.
+    # Cloud-free and network-free after `init` - the local backend keeps state
+    # in the stack dir and terraform_data is builtin, so no provider is pulled.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up mise
+        uses: jdx/mise-action@v4
+        with:
+          experimental: true
+
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          # The wrapper is a shell shim that rewrites stdout; the adapter
+          # parses stdout, so it must exec the real binary.
+          tofu_wrapper: false
+
+      - name: Engine contract conformance
+        run: go test -run TestContract -v ./internal/iac/...
+
   govet-extended:
     # Catches issues golangci-lint's vet settings sometimes miss.
     runs-on: ubuntu-latest
