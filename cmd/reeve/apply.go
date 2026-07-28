@@ -209,7 +209,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 // commenter. Only consulted when approvals.sources enables pr_comment.
 func commentApprovalConfig() vcs.CommentApprovalConfig {
 	return vcs.CommentApprovalConfig{
-		CommandPrefixes:     splitCSV(envOrDefault("REEVE_COMMAND_PREFIXES", "/reeve,@reeve")),
+		CommandPrefixes:     splitCSV(envOrDefault("REEVE_COMMAND_PREFIXES", "/reeve")),
 		AllowedAssociations: splitCSV(envOrDefault("REEVE_ALLOWED_ASSOCIATIONS", "OWNER,MEMBER,COLLABORATOR")),
 	}
 }

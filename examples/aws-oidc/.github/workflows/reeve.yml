@@ -42,8 +42,7 @@ jobs:
     if: |
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
-      (startsWith(github.event.comment.body, '/reeve apply') ||
-       startsWith(github.event.comment.body, '@reeve apply'))
+      startsWith(github.event.comment.body, '/reeve apply')
     runs-on: ubuntu-latest
     steps:
       - name: Resolve PR head ref

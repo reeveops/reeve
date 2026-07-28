@@ -158,8 +158,9 @@ func parseCommentTrigger(cfg vcs.CommentApprovalConfig) (prefixes []string, verb
 		}
 	}
 	if len(set) == 0 {
+		// Slash style only. "@reeve" is a real GitHub account, so accepting it
+		// by default made every mention-style command notify a stranger.
 		set["/reeve"] = struct{}{}
-		set["@reeve"] = struct{}{}
 	}
 	for p := range set {
 		prefixes = append(prefixes, p)

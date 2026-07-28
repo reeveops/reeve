@@ -201,9 +201,12 @@ green):
 | `0`  | Every targeted stack applied cleanly or was a no-op — or every stack was **blocked** by preconditions/locks. Blocked is a deliberate non-failure: the gates held the apply back, nothing was attempted, and a later re-run can proceed. |
 | `1`  | One or more stacks **failed** to apply (engine, auth, or lock-storage error), the run was cancelled by a signal, post-apply persistence failed, or the run errored before applying (config, VCS, storage). The error message names the failed stacks. A failed apply never renders as a green check. |
 
-Every comment command also works mention-style: `@reeve apply`, `@reeve plan`,
-etc. The accepted prefixes are configurable via the `command-prefix` input
-(default `"/reeve,@reeve"`). Comments authored by bots (user type `Bot` or a
+Accepted comment prefixes are configurable via the `command-prefix` input
+(default `"/reeve"`). Mention style (`@reeve apply`) is **not** accepted by
+default: `github.com/reeve` is a real person's account, so every such comment
+pinged someone with no connection to your repo. You can add `@reeve` back —
+`command-prefix: "/reeve,@reeve"` — but a handle your org actually owns is the
+better answer. Comments authored by bots (user type `Bot` or a
 login ending in `[bot]`) are always skipped, so reeve's own PR comments can
 never re-trigger a run.
 

@@ -133,7 +133,7 @@ force an apply.
 
 | Value | Behavior |
 | --- | --- |
-| `comment` (default) | **Apply-then-merge.** Apply runs only from a `/reeve apply` (or `@reeve apply` / `@reeve up`) PR comment, before the PR is merged. A merge event is a no-op. |
+| `comment` (default) | **Apply-then-merge.** Apply runs only from a `/reeve apply` (or `/reeve up`) PR comment, before the PR is merged. A merge event is a no-op. |
 | `merge` | **Merge-then-apply (continuous delivery).** Apply runs automatically the moment the PR is **merged**. A `/reeve apply` comment is a no-op. |
 
 Break-glass (`/reeve breakglass "<reason>" apply`) is exempt from the trigger
@@ -297,8 +297,8 @@ approvals:
 only when every condition holds:
 
 - Its first line is `<prefix> approve`, where `<prefix>` exactly matches a
-  configured command prefix (the action's `command-prefix`, default `/reeve`
-  and `@reeve`) — parsed the same way as every other `/reeve` command.
+  configured command prefix (the action's `command-prefix`, default `/reeve`)
+  — parsed the same way as every other `/reeve` command.
 - The commenter's `author_association` is in the same allowlist that gates
   command dispatch (the action's `allowed-associations`, default `OWNER`,
   `MEMBER`, `COLLABORATOR`). reeve **re-checks this at apply time** because it

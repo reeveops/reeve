@@ -153,8 +153,11 @@ the run never breaks because a binary wasn't available.
 | `/reeve unlock [project/stack]` | Frees this PR's stack locks (all, or just one)               |
 | `/reeve help`                | Posts a comment listing available commands                      |
 
-Commands also work mention-style (`@reeve apply`); accepted prefixes are set
-by the `command-prefix` input (default `"/reeve,@reeve"`). Other
+Accepted comment prefixes are set by the `command-prefix` input (default
+`"/reeve"`). Mention style is no longer accepted by default —
+[github.com/reeve](https://github.com/reeve) belongs to a real person, and
+`@reeve apply` notified them every time. Add it back if you want it, but
+prefer a handle your org controls. Other
 `pull_request` actions (labels, assignees, edits) and all bot-authored
 comments are ignored, so reeve's own comments never re-trigger a run.
 Review approvals don't trigger runs unless you opt in with

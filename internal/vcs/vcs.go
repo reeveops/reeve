@@ -42,7 +42,7 @@ type CommentApprovalConfig struct {
 	// its remaining tokens form the verb that must follow the prefix.
 	Command string
 	// CommandPrefixes is the set of accepted comment prefixes (default
-	// "/reeve" and "@reeve"), mirroring the action's command-prefix input.
+	// "/reeve"), mirroring the action's command-prefix input.
 	CommandPrefixes []string
 	// AllowedAssociations is the author_association allowlist (e.g. OWNER,
 	// MEMBER, COLLABORATOR). Values are compared case-insensitively. A comment
