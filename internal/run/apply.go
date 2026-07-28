@@ -94,6 +94,12 @@ type ApplyInput struct {
 	// Force re-applies even when this commit is already recorded as applied,
 	// bypassing the already-applied guard.
 	Force bool
+	// Refresh reconciles engine state with live infrastructure before
+	// applying (`/reeve apply --refresh`). It is incompatible with plan
+	// locking by construction - a refresh can change the diff, which is the
+	// one thing a locked plan forbids - so requesting it turns locking off
+	// for this run and says so on the timeline.
+	Refresh bool
 	// CommentApproval configures the opt-in pr_comment approval source
 	// (approvals.sources). It carries the command prefixes and
 	// author_association allowlist from the action inputs so the source can
@@ -529,6 +535,20 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 	}
 
+	// Plan locking is on when config asks for it AND the engine can execute
+	// a saved plan AND there is a bucket to have stored one in. Resolved
+	// once: a per-stack answer would let one stack apply a locked plan while
+	// another silently re-planned.
+	planLocking := in.Blob != nil && !in.Refresh && PlanLockingEnabled(in.Config) && EngineSupportsSavedPlans(in.Engine)
+	if !planLocking && !in.Refresh && PlanLockingEnabled(in.Config) && in.Blob != nil {
+		slog.Info("plan locking requested but the engine cannot execute a saved plan; applies will re-plan",
+			"engine", in.Engine.Name())
+	}
+	if in.Refresh {
+		timeline.add(ctx, "🔄", "refresh requested",
+			"state is reconciled with live infrastructure before this apply; the applied change set is computed after the refresh, so it is not the plan the PR previewed")
+	}
+
 	// 3. Per-stack: acquire lock → eval gates → apply or block.
 	summaries := make([]summary.StackSummary, 0, len(target))
 	anyBlocked := false
@@ -718,6 +738,39 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		for _, v := range authEnv {
 			redactor.AddSecret(v)
 		}
+
+		// Plan locking: execute the plan artifact this commit's preview
+		// saved, so the engine cannot compute a wider change set at apply
+		// time. Scope binding above already fixed WHICH stacks apply; this
+		// fixes WHAT each apply does.
+		//
+		// A missing artifact does not block: manifests written before plan
+		// locking existed have no PlanKey, and an operator can turn locking
+		// off. It is reported on the timeline instead, because "this apply
+		// re-planned" is exactly the thing an operator must not have to
+		// infer.
+		lockedPlan := ""
+		planCleanup := func() {}
+		if planLocking && (prev.Plan == nil || prev.Plan.PlanKey == "") {
+			slog.Info("plan locking: no saved plan for this stack; applying a fresh plan",
+				"stack", s.Ref(), "sha", in.CommitSHA)
+			timeline.add(ctx, "⚠️", "plan lock unavailable", fmt.Sprintf(
+				"%s: the preview for %s stored no plan artifact; this apply computed a new plan",
+				s.Ref(), shortSHA(in.CommitSHA)))
+		} else if planLocking {
+			path, cleanup, ferr := FetchPlanArtifact(ctx, in.Blob, prev.Plan.PlanKey)
+			if ferr != nil {
+				slog.Warn("plan locking: saved plan could not be fetched; applying a fresh plan",
+					"stack", s.Ref(), "key", prev.Plan.PlanKey, "err", ferr)
+				timeline.add(ctx, "⚠️", "plan lock unavailable", fmt.Sprintf(
+					"%s: saved plan %s could not be read (%v); this apply computed a new plan",
+					s.Ref(), prev.Plan.PlanKey, ferr))
+			} else {
+				lockedPlan = path
+				planCleanup = cleanup
+			}
+		}
+
 		stackCtx, endStack := in.OTEL.StartStackSpan(ctx, s.Project, s.Name, s.Env, "apply")
 		stackStart := time.Now()
 		// Lease heartbeat: an apply longer than locking.ttl must not have
@@ -726,9 +779,19 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		stopHeartbeat := in.Locks.StartHeartbeat(stackCtx, s.Project, s.Name, corelocks.Holder{
 			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
 		}, ttl)
-		res, aerr := in.Engine.Apply(stackCtx, s, iac.ApplyOpts{Cwd: absJoin(in.RepoRoot, s.Path), Env: authEnv, TimeoutSec: ApplyTimeoutSec(in.Config)})
+		res, aerr := in.Engine.Apply(stackCtx, s, iac.ApplyOpts{
+			Cwd:        absJoin(in.RepoRoot, s.Path),
+			Env:        authEnv,
+			TimeoutSec: ApplyTimeoutSec(in.Config),
+			PlanPath:   lockedPlan,
+			Refresh:    in.Refresh,
+		})
 		stopHeartbeat()
 		authCleanup()
+		// The plan file is a copy of the engine's change set on the runner's
+		// disk; drop it as soon as the engine is done with it rather than at
+		// the end of the run.
+		planCleanup()
 		stackOutcome := "success"
 		if aerr != nil {
 			ss.Status = summary.StatusError

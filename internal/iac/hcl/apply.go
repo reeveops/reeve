@@ -15,11 +15,19 @@ import (
 //	init → workspace select → plan -detailed-exitcode -out=<file>
 //	→ apply -input=false <file>
 //
-// The apply consumes the exact plan file the plan step produced
-// (plan-what-you-apply parity - SupportsSavedPlans). reeve's pipeline
-// re-plans at apply time, so saving-then-applying inside this call keeps
-// the executed change set identical to what was just planned. A plan with
-// no changes (exit 0) skips the apply entirely.
+// The apply always consumes a plan file rather than deciding for itself
+// (SupportsSavedPlans). Which plan depends on the caller:
+//
+//   - ApplyOpts.PlanPath set (plan locking on): that artifact is applied
+//     verbatim and NO plan runs here. The CLI itself refuses a plan whose
+//     state lineage or serial has moved on, so an apply raced by another
+//     merge fails instead of quietly shipping a different change set.
+//   - PlanPath empty: a plan is computed here and applied immediately. The
+//     executed change set matches what this call just planned - but not
+//     necessarily what the PR previewed, which is exactly the "last apply
+//     wins" gap plan locking closes.
+//
+// A plan with no changes (exit 0) skips the apply entirely.
 func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.ApplyOpts) (iac.ApplyResult, error) {
 	cwd := opts.Cwd
 	if cwd == "" {
@@ -37,6 +45,12 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 		}, nil
 	}
 
+	// A refresh recomputes the diff, which is the one thing a locked plan
+	// forbids. Refuse the combination rather than silently dropping one.
+	if opts.PlanPath != "" && opts.Refresh {
+		return fail("refresh cannot be combined with a locked plan: a refresh would change the diff the saved plan pins", "")
+	}
+
 	if res, err := e.tfInit(runCtx, cwd, opts.Env); err != nil {
 		return fail(err.Error(), string(res.Stderr)+string(res.Stdout))
 	}
@@ -44,24 +58,32 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 		return fail(err.Error(), "")
 	}
 
-	planPath, err := e.planFile()
-	if err != nil {
-		return fail("create plan file: "+err.Error(), "")
-	}
-	defer os.Remove(planPath)
+	planPath := opts.PlanPath
+	planOut := ""
+	if planPath == "" {
+		p, err := e.planFile()
+		if err != nil {
+			return fail("create plan file: "+err.Error(), "")
+		}
+		planPath = p
+		defer os.Remove(planPath)
 
-	args := []string{"plan", "-input=false", "-no-color", "-detailed-exitcode", "-out=" + planPath}
-	args = append(args, opts.ExtraArgs...)
-	plan, runErr := e.run(runCtx, cwd, opts.Env, e.Binary, args...)
-	planOut := string(plan.Stderr) + string(plan.Stdout)
-	if runErr != nil || (plan.ExitCode != exitNoChanges && plan.ExitCode != exitChanges) {
-		return fail(e.dialect.Display+" plan failed: "+failureMessage(string(plan.Stderr), runErr), planOut)
-	}
-	if plan.ExitCode == exitNoChanges {
-		return iac.ApplyResult{
-			Output:     planOut,
-			DurationMS: time.Since(start).Milliseconds(),
-		}, nil
+		args := []string{"plan", "-input=false", "-no-color", "-detailed-exitcode", "-out=" + planPath}
+		if opts.Refresh {
+			args = append(args, "-refresh=true")
+		}
+		args = append(args, opts.ExtraArgs...)
+		plan, runErr := e.run(runCtx, cwd, opts.Env, e.Binary, args...)
+		planOut = string(plan.Stderr) + string(plan.Stdout)
+		if runErr != nil || (plan.ExitCode != exitNoChanges && plan.ExitCode != exitChanges) {
+			return fail(e.dialect.Display+" plan failed: "+failureMessage(string(plan.Stderr), runErr), planOut)
+		}
+		if plan.ExitCode == exitNoChanges {
+			return iac.ApplyResult{
+				Output:     planOut,
+				DurationMS: time.Since(start).Milliseconds(),
+			}, nil
+		}
 	}
 
 	// Counts come from the saved plan (what WILL be applied) - parsed

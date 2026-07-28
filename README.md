@@ -149,6 +149,8 @@ the run never breaks because a binary wasn't available.
 | `/reeve preview` or `/reeve plan` | Re-runs plan for this PR                               |
 | `/reeve ready`               | Marks PR ready for approval, posts comment, notifies Slack      |
 | `/reeve apply` or `/reeve up` | Applies all planned stacks (subject to approval gates)         |
+| `/reeve apply --refresh`     | Reconciles state with live infrastructure, then applies. Turns plan locking off for that run |
+| `/reeve refresh [--dry-run] [--all]` | Reconciles state with live infrastructure. Changes no infrastructure — a "delete" means the resource was already gone and was dropped from state |
 | `/reeve breakglass "<justification>" apply` | Emergency apply: overrides approvals (and freeze unless disabled), never locks/checks; loudly audited. Requires `break_glass:` config |
 | `/reeve unlock [project/stack]` | Frees this PR's stack locks (all, or just one)               |
 | `/reeve help`                | Posts a comment listing available commands                      |

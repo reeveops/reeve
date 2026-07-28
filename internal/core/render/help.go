@@ -13,6 +13,8 @@ func BuildHelpComment(autoReady bool) string {
 	b.WriteString("| `/reeve preview` or `/reeve plan` | Re-run plan for this PR |\n")
 	b.WriteString("| `/reeve apply` or `/reeve up` | Apply all planned stacks for this PR |\n")
 	b.WriteString("| `/reeve apply --force` | Re-apply even if this commit was already applied |\n")
+	b.WriteString("| `/reeve apply --refresh` | Reconcile state with live infrastructure, then apply. Turns plan locking off for that run: the change set is computed after the refresh, so it is not the plan reviewed here |\n")
+	b.WriteString("| `/reeve refresh [--dry-run] [--all]` | Reconcile state with live infrastructure. Changes no infrastructure - a \"delete\" means the resource was already gone and was dropped from state. `--dry-run` reports without writing; `--all` covers every declared stack, not just this PR's |\n")
 	b.WriteString("| `/reeve ready` | Mark PR as ready for approval, notify Slack |\n")
 	b.WriteString("| `/reeve breakglass \"<justification>\" apply` | Emergency apply: overrides approvals (and freeze unless disabled); never bypasses locks or checks. Requires `break_glass:` config; loudly audited |\n")
 	b.WriteString("| `/reeve unlock [project/stack] [--force]` | Free this PR's stack locks; --force if it holds one mid-apply |\n")

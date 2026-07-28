@@ -3,6 +3,11 @@
 // (pulumi); other config_types scaffold with version+config_type only.
 package schemas
 
+import (
+	"strings"
+	"time"
+)
+
 // Header is common to every config file.
 type Header struct {
 	Version    int    `yaml:"version"`
@@ -92,10 +97,40 @@ type ApprovalRuleYAML struct {
 }
 
 type PreconditionsYAML struct {
-	RequireUpToDate         *bool  `yaml:"require_up_to_date,omitempty"`
-	RequireChecksPassing    *bool  `yaml:"require_checks_passing,omitempty"`
-	PreviewFreshness        string `yaml:"preview_freshness,omitempty"` // e.g. "2h"
+	RequireUpToDate      *bool `yaml:"require_up_to_date,omitempty"`
+	RequireChecksPassing *bool `yaml:"require_checks_passing,omitempty"`
+	// PreviewFreshness bounds how old the plan behind an apply may be, as a
+	// Go duration ("4h", "45m"). Omitted means DefaultPreviewFreshness;
+	// "0" disables the gate deliberately.
+	//
+	// The window exists because a plan proves what THIS PR intended, not
+	// that the world still matches it - another PR merging in between can
+	// change a resource this plan touches, so an old plan can apply cleanly
+	// and still be wrong. See docs/configuration.md#preview-freshness.
+	PreviewFreshness        string `yaml:"preview_freshness,omitempty"`
 	PreviewMaxCommitsBehind int    `yaml:"preview_max_commits_behind"`
+}
+
+// DefaultPreviewFreshness is the window applied when preconditions.
+// preview_freshness is omitted. Four hours is roughly "planned this working
+// session": long enough that a normal review cycle does not force a re-plan,
+// short enough that a plan cannot survive a day of other merges.
+const DefaultPreviewFreshness = 4 * time.Hour
+
+// ResolvedPreviewFreshness returns the effective window and whether the gate
+// is enabled. An empty value takes the default; an explicit "0" disables the
+// gate; anything unparseable also reports disabled, which cannot happen in
+// practice because Config.Validate rejects it first.
+func (p PreconditionsYAML) ResolvedPreviewFreshness() (time.Duration, bool) {
+	v := strings.TrimSpace(p.PreviewFreshness)
+	if v == "" {
+		return DefaultPreviewFreshness, true
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 // BreakGlassYAML is the opt-in `break_glass:` block in shared.yaml.
@@ -215,7 +250,27 @@ type EngineBody struct {
 	ChangeMapping ChangeMap        `yaml:"change_mapping"`
 	Execution     Execution        `yaml:"execution"`
 	PolicyHooks   []PolicyHookYAML `yaml:"policy_hooks,omitempty"`
+	// PlanLocking binds an apply to the plan artifact its preview produced,
+	// instead of letting the engine compute a fresh change set at apply
+	// time. nil (omitted) means TRUE.
+	//
+	// Off, both engines re-plan inside the apply call, so what ships is
+	// whatever the world looks like at apply time - "last apply wins". On,
+	// the preview's plan is stored alongside the run manifest and handed
+	// back to the engine (`terraform apply <plan>`, `pulumi up --plan`), and
+	// an apply the world has moved out from under FAILS instead of silently
+	// applying something else.
+	//
+	// Two reasons an operator turns it off: Pulumi's update-plan flags are
+	// still experimental, and the stored plan artifact contains resource
+	// attribute values (see docs/configuration.md#plan-locking).
+	PlanLocking *bool `yaml:"plan_locking,omitempty"`
 }
+
+// PlanLockingEnabled resolves the default: an omitted `plan_locking:` means
+// locked. Callers still check the engine's SupportsSavedPlans - config asks
+// for locking, capability decides whether it can happen.
+func (b EngineBody) PlanLockingEnabled() bool { return b.PlanLocking == nil || *b.PlanLocking }
 
 // EngineState describes the engine's own state backend. reeve does not
 // manage state - it configures the engine (e.g. `pulumi login`) before

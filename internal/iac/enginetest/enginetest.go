@@ -23,6 +23,7 @@ package enginetest
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,6 +106,10 @@ func RunContract(t *testing.T, s Subject) {
 	t.Run("ApplyReportsUpdate", func(t *testing.T) { testApplyReportsUpdate(t, s) })
 	t.Run("DriftCheckFailsClosed", func(t *testing.T) { testDriftFailsClosed(t, s) })
 	t.Run("DriftCheckDoesNotWriteState", func(t *testing.T) { testDriftReadOnly(t, s) })
+	t.Run("SavedPlanIsWrittenAndApplied", func(t *testing.T) { testSavedPlanRoundTrip(t, s) })
+	t.Run("SavedPlanIgnoredWithoutCapability", func(t *testing.T) { testSavedPlanOptional(t, s) })
+	t.Run("RefreshDryRunDoesNotWriteState", func(t *testing.T) { testRefreshDryRun(t, s) })
+	t.Run("RefreshConverges", func(t *testing.T) { testRefreshConverges(t, s) })
 	t.Run("SecretsDoNotLeak", func(t *testing.T) { testSecretsDoNotLeak(t, s) })
 }
 
@@ -400,6 +405,169 @@ func testDriftReadOnly(t *testing.T, s Subject) {
 	}
 	if after := f.StateDigest(t); after != before {
 		t.Error("DriftCheck mutated engine state; a drift check must be read-only")
+	}
+}
+
+// Plan locking round-trip: a preview asked to save a plan produces a real
+// artifact, and an apply handed that artifact executes it. This is the whole
+// promise of SupportsSavedPlans - without it, apply re-plans and what ships
+// is whatever the world looks like at apply time rather than what was
+// reviewed.
+func testSavedPlanRoundTrip(t *testing.T, s Subject) {
+	e, f := s.NewFixture(t)
+	if !e.Capabilities().SupportsSavedPlans {
+		t.Skip("engine does not support saved plans")
+	}
+	ctx := context.Background()
+	f.Write(t, IntentOne)
+
+	planPath := filepath.Join(t.TempDir(), "saved.plan")
+	popts := previewOpts(f)
+	popts.SavePlanPath = planPath
+	res, err := e.Preview(ctx, f.Stack(), popts)
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("Preview failed on a valid stack: %s", res.Error)
+	}
+	if res.PlanPath == "" {
+		t.Fatal("SupportsSavedPlans is true but Preview reported no PlanPath; plan locking would silently degrade to a re-plan")
+	}
+	if res.PlanPath != planPath {
+		t.Errorf("PlanPath = %q, want the requested %q", res.PlanPath, planPath)
+	}
+	fi, statErr := os.Stat(res.PlanPath)
+	if statErr != nil {
+		t.Fatalf("PlanPath does not exist: %v", statErr)
+	}
+	if fi.Size() == 0 {
+		t.Fatal("saved plan is empty; an apply locked to it could not execute anything")
+	}
+
+	aopts := applyOpts(f)
+	aopts.PlanPath = res.PlanPath
+	ares, err := e.Apply(ctx, f.Stack(), aopts)
+	if err != nil {
+		t.Fatalf("Apply with a saved plan: %v", err)
+	}
+	if ares.Error != "" {
+		t.Fatalf("Apply of a freshly saved plan failed: %s\n%s", ares.Error, ares.Output)
+	}
+	if ares.Counts.Add != 1 {
+		t.Errorf("the locked apply must execute the saved change set, got %+v", ares.Counts)
+	}
+
+	// And it converged: the plan was applied, not merely accepted.
+	after, err := e.Preview(ctx, f.Stack(), previewOpts(f))
+	if err != nil {
+		t.Fatalf("Preview after locked Apply: %v", err)
+	}
+	if total := after.Counts.Add + after.Counts.Change + after.Counts.Delete + after.Counts.Replace; total != 0 {
+		t.Errorf("locked apply did not converge: next preview reports %+v", after.Counts)
+	}
+}
+
+// SavePlanPath is a request, not a demand: an engine that cannot save plans
+// must ignore it and still produce a normal preview. Failing the preview
+// instead would take plan locking from "degrades to a re-plan" to "breaks
+// every PR the moment it is enabled".
+func testSavedPlanOptional(t *testing.T, s Subject) {
+	e, f := s.NewFixture(t)
+	if e.Capabilities().SupportsSavedPlans {
+		t.Skip("engine supports saved plans; covered by the round-trip assertion")
+	}
+	f.Write(t, IntentOne)
+
+	popts := previewOpts(f)
+	popts.SavePlanPath = filepath.Join(t.TempDir(), "saved.plan")
+	res, err := e.Preview(context.Background(), f.Stack(), popts)
+	if err != nil {
+		t.Fatalf("Preview with SavePlanPath on a non-saving engine must not error: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("Preview with SavePlanPath on a non-saving engine must still succeed: %s", res.Error)
+	}
+	if res.PlanPath != "" {
+		t.Errorf("PlanPath = %q, want empty: an engine without the capability must not claim a saved plan", res.PlanPath)
+	}
+}
+
+// A dry-run refresh writes no state. This is the same promise the drift
+// check makes, and for the same reason: `/reeve refresh --dry-run` is sold
+// as a read, so an adapter that quietly commits the reconciliation turns an
+// inspection into an unreviewed state rewrite.
+func testRefreshDryRun(t *testing.T, s Subject) {
+	e, f := s.NewFixture(t)
+	if !e.Capabilities().SupportsRefresh {
+		t.Skip("engine does not support refresh")
+	}
+	ctx := context.Background()
+
+	f.Write(t, IntentOne)
+	if ares, err := e.Apply(ctx, f.Stack(), applyOpts(f)); err != nil || ares.Error != "" {
+		t.Fatalf("seed Apply failed: err=%v result=%s", err, ares.Error)
+	}
+	before := f.StateDigest(t)
+	if before == "" {
+		t.Skip("fixture does not expose state; cannot assert read-only refresh")
+	}
+
+	res, err := e.Refresh(ctx, f.Stack(), iac.RefreshOpts{
+		Cwd: stackDir(f), Env: env(), TimeoutSec: 300, PreviewOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("Refresh --preview-only: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("Refresh --preview-only failed on a converged stack: %s\n%s", res.Error, res.Output)
+	}
+	if after := f.StateDigest(t); after != before {
+		t.Error("PreviewOnly refresh mutated engine state; it must be read-only")
+	}
+}
+
+// A real refresh on a converged stack reconciles nothing and reports
+// nothing. Counts here describe state reconciliation, so a converged stack
+// producing non-zero counts means the adapter is reporting the wrong thing -
+// and the refresh comment would tell operators resources changed when none
+// did.
+func testRefreshConverges(t *testing.T, s Subject) {
+	e, f := s.NewFixture(t)
+	if !e.Capabilities().SupportsRefresh {
+		t.Skip("engine does not support refresh")
+	}
+	ctx := context.Background()
+
+	f.Write(t, IntentOne)
+	if ares, err := e.Apply(ctx, f.Stack(), applyOpts(f)); err != nil || ares.Error != "" {
+		t.Fatalf("seed Apply failed: err=%v result=%s", err, ares.Error)
+	}
+
+	res, err := e.Refresh(ctx, f.Stack(), iac.RefreshOpts{
+		Cwd: stackDir(f), Env: env(), TimeoutSec: 300,
+	})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("Refresh failed on a converged stack: %s\n%s", res.Error, res.Output)
+	}
+	if total := res.Counts.Add + res.Counts.Change + res.Counts.Delete + res.Counts.Replace; total != 0 {
+		t.Errorf("refresh of a converged stack must reconcile nothing, got %+v", res.Counts)
+	}
+	if res.DurationMS <= 0 {
+		t.Error("RefreshResult.DurationMS must be populated")
+	}
+
+	// The next preview is still a no-op: a refresh changes reeve's record of
+	// infrastructure, never the infrastructure.
+	after, err := e.Preview(ctx, f.Stack(), previewOpts(f))
+	if err != nil {
+		t.Fatalf("Preview after Refresh: %v", err)
+	}
+	if total := after.Counts.Add + after.Counts.Change + after.Counts.Delete + after.Counts.Replace; total != 0 {
+		t.Errorf("refresh disturbed a converged stack: next preview reports %+v", after.Counts)
 	}
 }
 

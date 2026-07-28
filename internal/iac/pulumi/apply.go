@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -20,12 +19,32 @@ import (
 // final "summary" event from Pulumi's engine event stream to produce
 // counts; captures all stdout+stderr for the PR comment (redacted
 // upstream).
+//
+// With ApplyOpts.PlanPath set (plan locking on), `--plan <file>` constrains
+// the update to the change set the preview saved: Pulumi refuses to perform
+// any operation the plan does not contain, so an update raced by another
+// merge fails instead of shipping a wider change than the one reviewed.
+// Without it, `pulumi up` computes its own update at apply time - "last
+// apply wins".
 func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.ApplyOpts) (iac.ApplyResult, error) {
 	cwd := opts.Cwd
 	if cwd == "" {
 		cwd = stack.Path
 	}
+	start := time.Now()
+	if opts.PlanPath != "" && opts.Refresh {
+		return iac.ApplyResult{
+			Error:      "refresh cannot be combined with a locked plan: a refresh would change the update the saved plan pins",
+			DurationMS: time.Since(start).Milliseconds(),
+		}, nil
+	}
 	args := []string{"up", "--stack", stack.Name, "--yes", "--non-interactive", "--json"}
+	if opts.Refresh {
+		args = append(args, "--refresh=true")
+	}
+	if opts.PlanPath != "" {
+		args = append(args, "--plan="+opts.PlanPath)
+	}
 	args = append(args, opts.ExtraArgs...)
 
 	timeout := time.Duration(opts.TimeoutSec) * time.Second
@@ -35,15 +54,12 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	start := time.Now()
 	// #nosec G204 -- e.Binary is engine.binary.path from operator config; args are built by this
 	// adapter and passed as argv with no shell
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
-	if len(opts.Env) > 0 {
-		cmd.Env = append(os.Environ(), flattenEnv(opts.Env)...)
-	}
+	cmd.Env = commandEnv(opts.Env, opts.PlanPath != "")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
