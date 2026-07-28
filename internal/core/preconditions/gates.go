@@ -208,7 +208,14 @@ func evalGateBase(g GateID, cfg Config, in Inputs) GateResult {
 
 	case GatePreviewFresh:
 		if cfg.PreviewFreshness == 0 {
-			return GateResult{Gate: g, Outcome: OutcomeSkipped, Reason: "preview_freshness disabled"}
+			// Deliberately disabled. Say what is no longer being checked
+			// rather than just "disabled": a saved plan proves what THIS PR
+			// intended, not that the world still matches it. Another PR can
+			// have merged and changed a resource this plan touches, so an
+			// old plan can apply cleanly and still be wrong, or fail
+			// mid-apply on a conflict.
+			return GateResult{Gate: g, Outcome: OutcomeSkipped,
+				Reason: "preview_freshness disabled - a plan of any age may be applied; concurrent merges are not accounted for"}
 		}
 		if !in.HasFreshPreview {
 			return fail(g, "no preview on current HEAD")

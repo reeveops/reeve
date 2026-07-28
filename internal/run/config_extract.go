@@ -84,6 +84,10 @@ func toPreconditionsConfig(s *schemas.Shared) preconditions.Config {
 	if s.Preconditions.RequireChecksPassing != nil {
 		out.RequireChecksPassing = *s.Preconditions.RequireChecksPassing
 	}
+	// An unparseable value cannot reach here - Config.Validate rejects it, so
+	// a typo can no longer silently leave the gate at zero (= disabled).
+	// "0" and "" mean deliberately disabled; see docs/configuration.md for
+	// what that gives up.
 	if d, err := time.ParseDuration(s.Preconditions.PreviewFreshness); err == nil {
 		out.PreviewFreshness = d
 	}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -258,6 +259,14 @@ func (c *Config) Validate() error {
 	if t := c.Shared.Apply.Trigger; t != "" && t != schemas.ApplyTriggerComment && t != schemas.ApplyTriggerMerge {
 		return fmt.Errorf("shared.yaml: apply.trigger %q is invalid (want %q or %q)",
 			t, schemas.ApplyTriggerComment, schemas.ApplyTriggerMerge)
+	}
+	// preview_freshness, when set, must parse. An unparseable value used to
+	// leave the duration at zero, which DISABLES the gate - a typo silently
+	// turning off a safety check is exactly the failure mode this rejects.
+	if v := strings.TrimSpace(c.Shared.Preconditions.PreviewFreshness); v != "" && v != "0" {
+		if _, err := time.ParseDuration(v); err != nil {
+			return fmt.Errorf("shared.yaml: preconditions.preview_freshness %q is not a Go duration (e.g. 2h); use \"0\" to disable the gate deliberately", v)
+		}
 	}
 	if err := c.validateChannels(); err != nil {
 		return err

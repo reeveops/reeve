@@ -88,6 +88,12 @@ type AffectedResult struct {
 	// Unmapped lists changed files (post-skip) that matched no stack; only
 	// populated when Reason == ReasonBroadened, for the explanation header.
 	Unmapped []string
+	// Matched is the set of stacks whose paths (or extra triggers) actually
+	// matched a changed file, regardless of Reason. When Reason is
+	// ReasonBroadened, Stacks is every stack but Matched is still just these
+	// - so a caller can distinguish "might be affected" from "demonstrably
+	// affected". Apply uses this; preview uses Stacks.
+	Matched []Stack
 }
 
 // Resolve expands declarations into concrete stacks and applies filters.
@@ -212,9 +218,13 @@ func AffectedDetailed(stacks []Stack, changedFiles []string, cm ChangeMapping) A
 	}
 
 	if len(unmapped) > 0 && cm.Scope != ScopePulumiOnly {
-		return AffectedResult{Stacks: stacks, Reason: ReasonBroadened, Unmapped: unmapped}
+		// Broadening REPLACES the precise matches with every stack, which is
+		// right for "preview what might be affected" and wrong for deciding
+		// what to apply. Matched carries the precise set through so a caller
+		// that must not widen its blast radius (apply) can use it.
+		return AffectedResult{Stacks: stacks, Matched: out, Reason: ReasonBroadened, Unmapped: unmapped}
 	}
-	return AffectedResult{Stacks: out, Reason: ReasonMatched}
+	return AffectedResult{Stacks: out, Matched: out, Reason: ReasonMatched}
 }
 
 // markMatched records which filtered files caused stack s to be selected, so
