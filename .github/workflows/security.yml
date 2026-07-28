@@ -46,4 +46,5 @@ jobs:
       run: govulncheck ./...
 
     - name: gosec
-      run: gosec -quiet -fmt=text -exclude=G104,G115,G204,G304,G703,G704 -exclude-dir=openspec -exclude-dir=docs -exclude-dir=examples ./...
+      # Rule set lives in mise.toml's `sec` task - single definition.
+      run: mise run sec

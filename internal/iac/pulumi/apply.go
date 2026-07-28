@@ -36,6 +36,8 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 	defer cancel()
 
 	start := time.Now()
+	// #nosec G204 -- e.Binary is engine.binary.path from operator config; args are built by this
+	// adapter and passed as argv with no shell
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd

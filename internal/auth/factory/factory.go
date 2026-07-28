@@ -222,6 +222,8 @@ func loadPrivateKey(src string) ([]byte, error) {
 	}
 	// Try file.
 	if _, err := os.Stat(src); err == nil {
+		// #nosec G304 -- src is auth.yaml's private_key, which is documented as accepting a file
+		// path; reading an operator-named key file is the feature
 		return os.ReadFile(src)
 	}
 	// Fall back to base64.

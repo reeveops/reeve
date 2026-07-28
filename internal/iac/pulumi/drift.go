@@ -30,6 +30,8 @@ func (e *Engine) DriftCheck(ctx context.Context, stack discovery.Stack, opts iac
 		}
 		refCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+		// #nosec G204 -- e.Binary is engine.binary.path from operator config; the remaining args are
+		// literals
 		refresh := exec.CommandContext(refCtx, e.Binary, "refresh", "--stack", stack.Name, "--yes", "--non-interactive")
 		iac.SetupGracefulStop(refresh, 0)
 		refresh.Dir = cwd
@@ -63,6 +65,8 @@ func (e *Engine) DriftCheck(ctx context.Context, stack discovery.Stack, opts iac
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// #nosec G204 -- e.Binary is engine.binary.path from operator config; args are built by this
+	// adapter and passed as argv with no shell
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd

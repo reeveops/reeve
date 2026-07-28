@@ -230,7 +230,12 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	// and the runner writes it as the workflow user; tighter perms break
 	// the runner's own reader.
 	if p := os.Getenv("GITHUB_STEP_SUMMARY"); p != "" {
-		_ = os.WriteFile(p, []byte(report), 0o644) // #nosec G306
+		// Two rules are suppressed on the line below, space-separated in one
+		// directive: gosec honors a single rule list per node, so a second
+		// annotation on the same statement would silently replace the first.
+		// G306 is the deliberate 0644 explained above; G703 is the path,
+		// which is $GITHUB_STEP_SUMMARY as provided by the Actions runner.
+		_ = os.WriteFile(p, []byte(report), 0o644) // #nosec G306 G703 -- runner-provided path; 0644 required by the Actions UI reader
 	}
 
 	// Bootstrap is silent by design: state is recorded, no channels fire.
