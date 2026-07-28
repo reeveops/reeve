@@ -12,8 +12,8 @@ import (
 	"github.com/FynxLabs/reeve/internal/config"
 	"github.com/FynxLabs/reeve/internal/config/scaffold"
 	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/iac/hcl"
 	"github.com/FynxLabs/reeve/internal/iac/pulumi"
-	"github.com/FynxLabs/reeve/internal/iac/terraform"
 )
 
 // stdinIsTTY reports whether stdin is an interactive terminal. Package var so
@@ -92,7 +92,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	if scanErr != nil {
 		fmt.Fprintf(w, "warning: pulumi stack scan failed (%v); continuing with an empty stacks: block\n", scanErr)
 	}
-	tfEnum, tfScanErr := terraform.ScanStacks(root)
+	tfEnum, tfScanErr := hcl.ScanStacks(root)
 	if tfScanErr != nil {
 		fmt.Fprintf(w, "warning: terraform root-module scan failed (%v); continuing with an empty stacks: block\n", tfScanErr)
 	}

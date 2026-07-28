@@ -1,4 +1,4 @@
-package terraform
+package hcl
 
 import (
 	"context"
@@ -55,7 +55,7 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 	plan, runErr := e.run(runCtx, cwd, opts.Env, e.Binary, args...)
 	planOut := string(plan.Stderr) + string(plan.Stdout)
 	if runErr != nil || (plan.ExitCode != exitNoChanges && plan.ExitCode != exitChanges) {
-		return fail(e.variant.Display+" plan failed: "+failureMessage(string(plan.Stderr), runErr), planOut)
+		return fail(e.dialect.Display+" plan failed: "+failureMessage(string(plan.Stderr), runErr), planOut)
 	}
 	if plan.ExitCode == exitNoChanges {
 		return iac.ApplyResult{

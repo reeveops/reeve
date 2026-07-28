@@ -1,4 +1,4 @@
-package terraform
+package hcl
 
 import (
 	"context"
@@ -50,14 +50,14 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 	args = append(args, opts.ExtraArgs...)
 	plan, runErr := e.run(runCtx, cwd, opts.Env, e.Binary, args...)
 	if runErr != nil || (plan.ExitCode != exitNoChanges && plan.ExitCode != exitChanges) {
-		msg := e.variant.Display + " plan failed: " + failureMessage(string(plan.Stderr), runErr)
+		msg := e.dialect.Display + " plan failed: " + failureMessage(string(plan.Stderr), runErr)
 		return iac.PreviewResult{Error: msg, FullPlan: string(plan.Stderr) + string(plan.Stdout)}, nil
 	}
 
 	result, perr := e.readPlan(runCtx, cwd, opts.Env, planPath)
 	if perr != nil {
 		return iac.PreviewResult{
-			Error:    e.variant.Display + " show -json failed: " + perr.Error(),
+			Error:    e.dialect.Display + " show -json failed: " + perr.Error(),
 			FullPlan: string(plan.Stderr) + string(plan.Stdout),
 		}, nil
 	}

@@ -73,10 +73,17 @@ jobs:
         run: mise run sec
 
   engine-conformance:
-    # Drives the iac.Engine contract suite (internal/iac/enginetest) against a
-    # REAL engine binary: real argv, real process, real `show -json` parsing.
-    # Cloud-free and network-free after `init` - the local backend keeps state
-    # in the stack dir and terraform_data is builtin, so no provider is pulled.
+    # Drives the iac.Engine contract suite (internal/iac/enginetest) against
+    # REAL engine binaries: real argv, real process, real `show -json`
+    # parsing. Terraform and OpenTofu run as SEPARATE subjects, each through
+    # the binary and source extension it actually reads - proving one does
+    # not prove the other.
+    #
+    # Cloud-free and network-free after `init`: the local backend keeps state
+    # in the stack dir and terraform_data is builtin, so no provider is
+    # downloaded. A missing binary skips its subject rather than failing, so
+    # the suite still runs locally; CI installs both so neither is skipped
+    # here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -92,6 +99,18 @@ jobs:
           # The wrapper is a shell shim that rewrites stdout; the adapter
           # parses stdout, so it must exec the real binary.
           tofu_wrapper: false
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          # Same reason as tofu_wrapper: the adapter parses stdout.
+          terraform_wrapper: false
+
+      - name: Confirm both engines are present
+        run: |
+          set -euo pipefail
+          tofu version
+          terraform version
 
       - name: Engine contract conformance
         run: go test -run TestContract -v ./internal/iac/...
