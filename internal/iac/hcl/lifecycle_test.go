@@ -1,4 +1,4 @@
-package terraform
+package hcl
 
 import (
 	"context"
@@ -9,6 +9,20 @@ import (
 	"github.com/FynxLabs/reeve/internal/config/schemas"
 	"github.com/FynxLabs/reeve/internal/core/discovery"
 	"github.com/FynxLabs/reeve/internal/iac"
+)
+
+// The engine packages import hcl, so hcl's own tests cannot import them back.
+// These mirror the real dialects; terraform_test.go and tofu_test.go assert
+// the real ones match, so a drift between them fails there.
+var (
+	testTerraform = Dialect{
+		TypeName: "terraform", Display: "Terraform", Binary: "terraform",
+		SourceExts: []string{".tf"},
+	}
+	testTofu = Dialect{
+		TypeName: "tofu", Display: "OpenTofu", Binary: "tofu",
+		SourceExts: []string{".tf", ".tofu"},
+	}
 )
 
 // call records one faked CLI invocation.
@@ -55,7 +69,7 @@ func newFake(t *testing.T, results map[string]fakeResult) *fakeCLI {
 }
 
 func testEngine(fake *fakeCLI, decls ...schemas.StackDecl) *Engine {
-	e := New(Terraform, schemas.EngineBody{Stacks: decls})
+	e := New(testTerraform, schemas.EngineBody{Stacks: decls})
 	e.run = fake.run
 	return e
 }

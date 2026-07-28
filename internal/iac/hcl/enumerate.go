@@ -1,4 +1,4 @@
-package terraform
+package hcl
 
 import (
 	"context"
@@ -16,7 +16,13 @@ import (
 	"github.com/FynxLabs/reeve/internal/core/discovery"
 )
 
-const defaultWorkspace = "default"
+// DefaultWorkspace is the workspace every root module has without being
+// created. Exported so conformance fixtures can build a stack for it.
+const DefaultWorkspace = "default"
+
+// defaultWorkspace is the internal spelling, kept so the package body reads
+// unchanged.
+const defaultWorkspace = DefaultWorkspace
 
 // rootModuleMarker matches .tf content that marks a directory as a root
 // module: a terraform{} block (backend/required_providers live inside it)
@@ -37,7 +43,7 @@ var rootModuleMarker = regexp.MustCompile(`(?m)^\s*(terraform\s*\{|provider\s+")
 //     init for remote backends). If listing fails, the dir enumerates as
 //     <project>/default with a log line - never an opaque failure.
 func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.Stack, error) {
-	dirs, err := rootModuleDirs(root, e.variant.sourceExts())
+	dirs, err := rootModuleDirs(root, e.dialect.sourceExts())
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +77,7 @@ func ScanStacks(root string) ([]discovery.Stack, error) {
 	// Init-time discovery, before an engine.type is chosen: accept both
 	// extensions so a .tofu-only repo is found at all. Which engine the user
 	// ends up declaring is a separate decision.
-	dirs, err := rootModuleDirs(root, allSourceExts)
+	dirs, err := rootModuleDirs(root, AllSourceExts)
 	if err != nil {
 		return nil, err
 	}
@@ -97,17 +103,18 @@ const (
 	extTofu = ".tofu"
 )
 
-// allSourceExts is every extension any supported variant reads.
-var allSourceExts = []string{extTF, extTofu}
+// AllSourceExts is every extension any HCL engine reads. Used by init-time
+// discovery, which runs before an engine.type is chosen.
+var AllSourceExts = []string{extTF, extTofu}
 
-// sourceExts is the set of extensions this variant's binary actually reads.
-// Accepting .tofu under engine.type: terraform would enumerate a stack the
-// terraform CLI then refuses to plan.
-func (v Variant) sourceExts() []string {
-	if v.TypeName == OpenTofu.TypeName {
-		return allSourceExts
+// sourceExts is the set of extensions this dialect's binary actually reads.
+// A dialect that declares none falls back to .tf, so a new dialect cannot
+// silently enumerate nothing.
+func (d Dialect) sourceExts() []string {
+	if len(d.SourceExts) == 0 {
+		return []string{extTF}
 	}
-	return []string{extTF}
+	return d.SourceExts
 }
 
 func hasSourceExt(name string, exts []string) bool {
@@ -238,7 +245,7 @@ func (e *Engine) workspaceNames(ctx context.Context, cwd, rel string) []string {
 	res, err := e.run(ctx, cwd, nil, e.Binary, "workspace", "list")
 	if err != nil || res.ExitCode != 0 {
 		slog.Info("terraform workspace list unavailable; assuming the default workspace (declare stacks in engine config or run init to enumerate workspaces)",
-			"engine", e.variant.TypeName, "dir", rel, "reason", firstLine(failureMessage(string(res.Stderr), err)))
+			"engine", e.dialect.TypeName, "dir", rel, "reason", firstLine(failureMessage(string(res.Stderr), err)))
 		return []string{defaultWorkspace}
 	}
 	var names []string

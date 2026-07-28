@@ -1,4 +1,4 @@
-package terraform
+package hcl
 
 import (
 	"context"
@@ -35,7 +35,7 @@ func (e *Engine) DriftCheck(ctx context.Context, stack discovery.Stack, opts iac
 
 	failClosed := func(msg, fullPlan string) (iac.PreviewResult, error) {
 		return iac.PreviewResult{Error: msg, FullPlan: fullPlan},
-			fmt.Errorf("%s drift check produced no plan: %s", e.variant.Display, msg)
+			fmt.Errorf("%s drift check produced no plan: %s", e.dialect.Display, msg)
 	}
 
 	if res, err := e.tfInit(runCtx, cwd, opts.Env); err != nil {
@@ -56,14 +56,14 @@ func (e *Engine) DriftCheck(ctx context.Context, stack discovery.Stack, opts iac
 	plan, runErr := e.run(runCtx, cwd, opts.Env, e.Binary, args...)
 	if runErr != nil || (plan.ExitCode != exitNoChanges && plan.ExitCode != exitChanges) {
 		return failClosed(
-			e.variant.Display+" refresh-only plan failed: "+failureMessage(string(plan.Stderr), runErr),
+			e.dialect.Display+" refresh-only plan failed: "+failureMessage(string(plan.Stderr), runErr),
 			string(plan.Stderr)+string(plan.Stdout))
 	}
 
 	show, showErr := e.run(runCtx, cwd, opts.Env, e.Binary, "show", "-json", planPath)
 	if showErr != nil || show.ExitCode != 0 {
 		return failClosed(
-			e.variant.Display+" show -json failed: "+failureMessage(string(show.Stderr), showErr),
+			e.dialect.Display+" show -json failed: "+failureMessage(string(show.Stderr), showErr),
 			string(show.Stderr))
 	}
 	p, perr := parsePlan(show.Stdout)

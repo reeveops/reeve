@@ -1,4 +1,4 @@
-package terraform
+package hcl
 
 import (
 	"context"
@@ -44,7 +44,7 @@ resource "terraform_data" "touch" {
 	}
 	writeMain("rev-1")
 
-	e := New(Terraform, schemas.EngineBody{
+	e := New(testTerraform, schemas.EngineBody{
 		Binary: schemas.EngineBinary{Path: bin},
 		Stacks: []schemas.StackDecl{{Project: "demo", Path: "stacks/demo", Stacks: []string{"default", "alt"}}},
 	})

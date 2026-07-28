@@ -1,4 +1,4 @@
-package terraform
+package hcl
 
 import (
 	"context"
@@ -51,7 +51,7 @@ func TestEnumerateDeclaredStacksAuthoritative(t *testing.T) {
 	})
 
 	fake := newFake(t, nil)
-	e := New(Terraform, schemas.EngineBody{Stacks: []schemas.StackDecl{
+	e := New(testTerraform, schemas.EngineBody{Stacks: []schemas.StackDecl{
 		{Pattern: "envs/*", Stacks: []string{"dev", "prod"}},
 	}})
 	e.run = fake.run
@@ -87,7 +87,7 @@ func TestEnumerateExcludesNonRootModules(t *testing.T) {
 		"docs/notes.md":            "not terraform",
 	})
 	fake := newFake(t, nil)
-	e := New(Terraform, schemas.EngineBody{Stacks: []schemas.StackDecl{
+	e := New(testTerraform, schemas.EngineBody{Stacks: []schemas.StackDecl{
 		{Pattern: "**", Stacks: []string{"default"}},
 	}})
 	e.run = fake.run
@@ -110,7 +110,7 @@ func TestEnumerateWorkspaceListFallback(t *testing.T) {
 	fake := newFake(t, map[string]fakeResult{
 		"workspace list": {exit: -1, err: errors.New("executable file not found")},
 	})
-	e := New(Terraform, schemas.EngineBody{})
+	e := New(testTerraform, schemas.EngineBody{})
 	e.run = fake.run
 
 	got, err := e.EnumerateStacks(context.Background(), root)
@@ -129,7 +129,7 @@ func TestEnumerateWorkspaceList(t *testing.T) {
 	fake := newFake(t, map[string]fakeResult{
 		"workspace list": {stdout: "  default\n* staging\n  prod\n"},
 	})
-	e := New(Terraform, schemas.EngineBody{})
+	e := New(testTerraform, schemas.EngineBody{})
 	e.run = fake.run
 
 	got, err := e.EnumerateStacks(context.Background(), root)
@@ -151,7 +151,7 @@ func TestEnumerateProjectNameCollision(t *testing.T) {
 		"envs/prod/network/main.tf":  rootModuleTF,
 		"envs/stage/network/main.tf": rootModuleTF,
 	})
-	e := New(Terraform, schemas.EngineBody{Stacks: []schemas.StackDecl{
+	e := New(testTerraform, schemas.EngineBody{Stacks: []schemas.StackDecl{
 		{Pattern: "envs/**", Stacks: []string{"default"}},
 	}})
 	e.run = newFake(t, nil).run
@@ -182,7 +182,7 @@ func TestEnumerateTofuExtension(t *testing.T) {
 	}}
 
 	t.Run("tofu variant enumerates it", func(t *testing.T) {
-		e := New(OpenTofu, schemas.EngineBody{Type: OpenTofu.TypeName, Stacks: decls})
+		e := New(testTofu, schemas.EngineBody{Type: OpenTofu.TypeName, Stacks: decls})
 		got, err := e.EnumerateStacks(context.Background(), root)
 		if err != nil {
 			t.Fatal(err)
@@ -196,7 +196,7 @@ func TestEnumerateTofuExtension(t *testing.T) {
 	// engine.type: terraform would hand back a stack that terraform then
 	// refuses to plan, which is a worse failure than not finding it.
 	t.Run("terraform variant does not", func(t *testing.T) {
-		e := New(Terraform, schemas.EngineBody{Type: Terraform.TypeName, Stacks: decls})
+		e := New(testTerraform, schemas.EngineBody{Type: Terraform.TypeName, Stacks: decls})
 		got, err := e.EnumerateStacks(context.Background(), root)
 		if err != nil {
 			t.Fatal(err)
@@ -227,7 +227,7 @@ func TestEnumerateMixedExtensionsDeduped(t *testing.T) {
 		"stacks/mixed/main.tf":       rootModuleTF,
 		"stacks/mixed/override.tofu": rootModuleTF,
 	})
-	e := New(OpenTofu, schemas.EngineBody{Type: OpenTofu.TypeName, Stacks: []schemas.StackDecl{{
+	e := New(testTofu, schemas.EngineBody{Type: OpenTofu.TypeName, Stacks: []schemas.StackDecl{{
 		Project: "mixed", Path: "stacks/mixed", Stacks: []string{"default"},
 	}}})
 	got, err := e.EnumerateStacks(context.Background(), root)
