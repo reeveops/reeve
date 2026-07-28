@@ -48,9 +48,12 @@ func TestApplyCancelledMidRunReleasesLocksAndFails(t *testing.T) {
 			{Project: "worker", Path: "projects/worker", Stacks: []string{"prod"}},
 		},
 	}}
-	// Fresh successful preview for the second stack too, so its gates would
-	// have been green had the run not been cancelled.
+	// A real preview run writes ONE manifest covering every stack it
+	// previewed. Seed that shape: apply binds its scope to the newest
+	// manifest for the commit, so a fixture that split two stacks across two
+	// manifests would (correctly) apply only the stacks in the newer one.
 	if err := writeManifest(context.Background(), store, 18, "preview-2", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Env: "prod", Status: summary.StatusPlanned},
 		{Project: "worker", Stack: "prod", Env: "prod", Status: summary.StatusPlanned},
 	}, bgSHA); err != nil {
 		t.Fatal(err)

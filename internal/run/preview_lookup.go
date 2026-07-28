@@ -3,7 +3,6 @@ package run
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -83,48 +82,10 @@ func FindPreviewForStack(ctx context.Context, store blob.Store, prNumber int, co
 	if store == nil || prNumber == 0 {
 		return PreviewStatus{}, nil
 	}
-	prefix := fmt.Sprintf("runs/pr-%d/", prNumber)
-	keys, err := store.List(ctx, prefix)
-	if err != nil {
-		return PreviewStatus{}, err
-	}
-	// Keep only manifest.json entries.
-	var manifests []string
-	for _, k := range keys {
-		if strings.HasSuffix(k, "/manifest.json") {
-			manifests = append(manifests, k)
-		}
-	}
-	slog.Debug("preview lookup: scanning manifests", "pr", prNumber, "sha", commitSHA, "stack", stackRef, "manifest_count", len(manifests))
-	if len(manifests) == 0 {
-		slog.Debug("preview lookup: no manifests found", "pr", prNumber, "sha", commitSHA)
-		return PreviewStatus{}, nil
-	}
-
-	// Decode each, filter to preview + matching SHA, track newest by
-	// CreatedAt.
-	var best *manifest
-	for _, k := range manifests {
-		data, _, err := filesystem.ReadBytes(ctx, store, k)
-		if err != nil {
-			if errors.Is(err, blob.ErrNotFound) {
-				continue
-			}
-			return PreviewStatus{}, err
-		}
-		var m manifest
-		if err := json.Unmarshal(data, &m); err != nil {
-			continue // skip malformed
-		}
-		slog.Debug("preview lookup: manifest scanned", "key", k, "op", m.Op, "manifest_sha", m.CommitSHA, "want_sha", commitSHA, "match", m.Op == "preview" && m.CommitSHA == commitSHA)
-		if m.Op != "preview" || m.CommitSHA != commitSHA {
-			continue
-		}
-		if best == nil || m.CreatedAt > best.CreatedAt {
-			c := m
-			best = &c
-		}
-	}
+	// Same selection as PreviewedStackRefs, deliberately: if these two
+	// disagreed about which manifest is authoritative, apply could target a
+	// stack from one manifest and then gate it against another.
+	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
 	if best == nil {
 		slog.Debug("preview lookup: no matching preview manifest for sha", "pr", prNumber, "sha", commitSHA)
 		return PreviewStatus{}, nil
@@ -141,7 +102,6 @@ func FindPreviewForStack(ctx context.Context, store blob.Store, prNumber int, co
 		Succeeded: true,
 		RunID:     best.RunID,
 	}
-	// Look for the specific stack.
 	for _, ss := range best.Stacks {
 		if ss.Ref() != stackRef {
 			continue
@@ -210,7 +170,8 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 		if m.Op != "preview" || m.CommitSHA != commitSHA {
 			continue
 		}
-		if best == nil || m.CreatedAt > best.CreatedAt {
+		if best == nil || m.CreatedAt > best.CreatedAt ||
+			(m.CreatedAt == best.CreatedAt && m.RunID > best.RunID) {
 			c := m
 			best = &c
 		}
