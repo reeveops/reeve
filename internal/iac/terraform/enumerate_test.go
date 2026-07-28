@@ -167,3 +167,74 @@ func TestEnumerateProjectNameCollision(t *testing.T) {
 		t.Fatalf("colliding base names must disambiguate, got %q twice", got[0].Project)
 	}
 }
+
+// OpenTofu reads .tofu in addition to .tf, and where both exist for one base
+// name the .tofu file wins - so a repo written for OpenTofu can contain no
+// .tf at all. Matching only .tf made such a repo enumerate zero stacks with
+// no error, which looks identical to "no infrastructure here".
+func TestEnumerateTofuExtension(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"stacks/only-tofu/main.tofu": rootModuleTF,
+	})
+	decls := []schemas.StackDecl{{
+		Project: "only-tofu", Path: "stacks/only-tofu", Stacks: []string{"default"},
+	}}
+
+	t.Run("tofu variant enumerates it", func(t *testing.T) {
+		e := New(OpenTofu, schemas.EngineBody{Type: OpenTofu.TypeName, Stacks: decls})
+		got, err := e.EnumerateStacks(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Path != "stacks/only-tofu" {
+			t.Fatalf("expected the .tofu root module, got %+v", got)
+		}
+	})
+
+	// The terraform CLI does not read .tofu. Enumerating it under
+	// engine.type: terraform would hand back a stack that terraform then
+	// refuses to plan, which is a worse failure than not finding it.
+	t.Run("terraform variant does not", func(t *testing.T) {
+		e := New(Terraform, schemas.EngineBody{Type: Terraform.TypeName, Stacks: decls})
+		got, err := e.EnumerateStacks(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("terraform must not enumerate a .tofu-only module, got %+v", got)
+		}
+	})
+
+	// Init-time discovery runs before an engine.type exists, so it accepts
+	// both extensions; otherwise `reeve init` reports "no root modules found"
+	// in a perfectly valid OpenTofu repo.
+	t.Run("init scan finds it", func(t *testing.T) {
+		got, err := ScanStacks(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("ScanStacks must find the .tofu root module, got %+v", got)
+		}
+	})
+}
+
+// A repo carrying both extensions must not enumerate the directory twice.
+func TestEnumerateMixedExtensionsDeduped(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"stacks/mixed/main.tf":       rootModuleTF,
+		"stacks/mixed/override.tofu": rootModuleTF,
+	})
+	e := New(OpenTofu, schemas.EngineBody{Type: OpenTofu.TypeName, Stacks: []schemas.StackDecl{{
+		Project: "mixed", Path: "stacks/mixed", Stacks: []string{"default"},
+	}}})
+	got, err := e.EnumerateStacks(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("a dir with both .tf and .tofu must enumerate once, got %+v", got)
+	}
+}

@@ -37,7 +37,7 @@ var rootModuleMarker = regexp.MustCompile(`(?m)^\s*(terraform\s*\{|provider\s+")
 //     init for remote backends). If listing fails, the dir enumerates as
 //     <project>/default with a log line - never an opaque failure.
 func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.Stack, error) {
-	dirs, err := rootModuleDirs(root)
+	dirs, err := rootModuleDirs(root, e.variant.sourceExts())
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,10 @@ func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.
 // binary may be absent (the same scan-without-binary guarantee the pulumi
 // adapter's file-based enumeration gives init).
 func ScanStacks(root string) ([]discovery.Stack, error) {
-	dirs, err := rootModuleDirs(root)
+	// Init-time discovery, before an engine.type is chosen: accept both
+	// extensions so a .tofu-only repo is found at all. Which engine the user
+	// ends up declaring is a separate decision.
+	dirs, err := rootModuleDirs(root, allSourceExts)
 	if err != nil {
 		return nil, err
 	}
@@ -85,12 +88,43 @@ func ScanStacks(root string) ([]discovery.Stack, error) {
 	return out, nil
 }
 
+// Root-module source extensions. Terraform reads only .tf. OpenTofu reads
+// both .tf and .tofu, and where the same base name exists as both, the .tofu
+// file wins - so a repo written for OpenTofu may contain no .tf at all.
+// Matching only .tf made such a repo enumerate zero stacks, silently.
+const (
+	extTF   = ".tf"
+	extTofu = ".tofu"
+)
+
+// allSourceExts is every extension any supported variant reads.
+var allSourceExts = []string{extTF, extTofu}
+
+// sourceExts is the set of extensions this variant's binary actually reads.
+// Accepting .tofu under engine.type: terraform would enumerate a stack the
+// terraform CLI then refuses to plan.
+func (v Variant) sourceExts() []string {
+	if v.TypeName == OpenTofu.TypeName {
+		return allSourceExts
+	}
+	return []string{extTF}
+}
+
+func hasSourceExt(name string, exts []string) bool {
+	for _, e := range exts {
+		if strings.HasSuffix(name, e) {
+			return true
+		}
+	}
+	return false
+}
+
 // rootModuleDirs returns repo-relative directories that look like terraform
 // root modules. Directories named "modules" (shared child modules) and the
 // usual noise dirs are skipped entirely. The walk and reads go through a
 // root-scoped filesystem (os.Root) so a symlink swapped in mid-walk cannot
 // redirect a read outside the scan root (gosec G122 TOCTOU).
-func rootModuleDirs(root string) ([]string, error) {
+func rootModuleDirs(root string, exts []string) ([]string, error) {
 	r, err := os.OpenRoot(root)
 	if err != nil {
 		return nil, err
@@ -112,7 +146,7 @@ func rootModuleDirs(root string) ([]string, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(d.Name(), ".tf") {
+		if !hasSourceExt(d.Name(), exts) {
 			return nil
 		}
 		rel := path.Dir(p) // fs paths are already slash-separated and root-relative
