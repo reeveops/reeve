@@ -1,7 +1,9 @@
-// Package iac defines the engine-agnostic IaC interface. Adapters
-// (internal/iac/pulumi and internal/iac/terraform, which registers both
-// "terraform" and "tofu") implement it. Core never branches on engine
-// name; consumers use Capabilities() for capability detection.
+// Package iac defines the engine-agnostic IaC interface. Each engine is its
+// own package and registers itself: internal/iac/pulumi, internal/iac/terraform
+// and internal/iac/tofu. The latter two are siblings, not one inside the
+// other - they share an implementation in internal/iac/hcl but are separate
+// engines with separate capabilities. Core never branches on engine name;
+// consumers use Capabilities() for capability detection.
 package iac
 
 // Capabilities describes what an engine can do. Extended as new engines

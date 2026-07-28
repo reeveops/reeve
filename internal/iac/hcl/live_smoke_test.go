@@ -16,7 +16,7 @@ import (
 // (no provider downloads, no cloud creds). Skipped unless REEVE_TF_SMOKE_BIN
 // points at a terraform or tofu binary:
 //
-//	REEVE_TF_SMOKE_BIN=$(which tofu) go test ./internal/iac/terraform/ -run TestLiveSmoke -v
+//	REEVE_TF_SMOKE_BIN=$(which tofu) go test ./internal/iac/hcl/ -run TestLiveSmoke -v
 func TestLiveSmoke(t *testing.T) {
 	bin := os.Getenv("REEVE_TF_SMOKE_BIN")
 	if bin == "" {

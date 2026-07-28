@@ -182,7 +182,7 @@ func TestEnumerateTofuExtension(t *testing.T) {
 	}}
 
 	t.Run("tofu variant enumerates it", func(t *testing.T) {
-		e := New(testTofu, schemas.EngineBody{Type: OpenTofu.TypeName, Stacks: decls})
+		e := New(testTofu, schemas.EngineBody{Type: testTofu.TypeName, Stacks: decls})
 		got, err := e.EnumerateStacks(context.Background(), root)
 		if err != nil {
 			t.Fatal(err)
@@ -196,7 +196,7 @@ func TestEnumerateTofuExtension(t *testing.T) {
 	// engine.type: terraform would hand back a stack that terraform then
 	// refuses to plan, which is a worse failure than not finding it.
 	t.Run("terraform variant does not", func(t *testing.T) {
-		e := New(testTerraform, schemas.EngineBody{Type: Terraform.TypeName, Stacks: decls})
+		e := New(testTerraform, schemas.EngineBody{Type: testTerraform.TypeName, Stacks: decls})
 		got, err := e.EnumerateStacks(context.Background(), root)
 		if err != nil {
 			t.Fatal(err)
@@ -227,7 +227,7 @@ func TestEnumerateMixedExtensionsDeduped(t *testing.T) {
 		"stacks/mixed/main.tf":       rootModuleTF,
 		"stacks/mixed/override.tofu": rootModuleTF,
 	})
-	e := New(testTofu, schemas.EngineBody{Type: OpenTofu.TypeName, Stacks: []schemas.StackDecl{{
+	e := New(testTofu, schemas.EngineBody{Type: testTofu.TypeName, Stacks: []schemas.StackDecl{{
 		Project: "mixed", Path: "stacks/mixed", Stacks: []string{"default"},
 	}}})
 	got, err := e.EnumerateStacks(context.Background(), root)
