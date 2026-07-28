@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -83,6 +84,11 @@ type PreviewInput struct {
 	// Force re-runs even when this commit is already recorded as applied,
 	// bypassing the already-applied guard.
 	Force bool
+	// Refresh reconciles engine state with live infrastructure before
+	// planning, so the diff is against reality rather than against state
+	// that clickops may have invalidated. Off by default: a refresh costs a
+	// full provider read per stack on every push.
+	Refresh bool
 }
 
 // PreviewOutput bundles the artifacts from a preview run.
@@ -223,7 +229,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	appCfg := toApprovalsConfig(in.Shared)
 	summaries := make([]summary.StackSummary, 0, len(target))
 	for _, s := range target {
-		ss := runPreviewOne(ctx, in, otelProvider, s)
+		ss := runPreviewOne(ctx, in, otelProvider, s, runID)
 		rules := approvals.Resolve(appCfg, s.Ref())
 		ss.RequiredApprovers = rules.Approvers
 		summaries = append(summaries, ss)
@@ -318,7 +324,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}, nil
 }
 
-func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack) summary.StackSummary {
+func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string) summary.StackSummary {
 	redactor := BuildRedactor(in.Shared)
 
 	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview)
@@ -335,12 +341,29 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 		redactor.AddSecret(v)
 	}
 
+	// Plan locking: ask the engine to save the plan it is about to compute
+	// so apply can execute this exact change set instead of re-planning
+	// against a world that may have moved. Best-effort by design - if the
+	// temp file cannot be created the preview still runs, unlocked.
+	savePlanPath := ""
+	if in.Blob != nil && PlanLockingEnabled(in.Config) && EngineSupportsSavedPlans(in.Engine) {
+		if f, terr := os.CreateTemp("", "reeve-save-plan-*"); terr == nil {
+			savePlanPath = f.Name()
+			_ = f.Close()
+			defer os.Remove(savePlanPath)
+		} else {
+			slog.Warn("plan locking: temp file unavailable; preview will not save a plan", "stack", s.Ref(), "err", terr)
+		}
+	}
+
 	stackCtx, endStack := otelProvider.StartStackSpan(ctx, s.Project, s.Name, s.Env, "preview")
 	stackStart := time.Now()
 	res, err := in.Engine.Preview(stackCtx, s, iac.PreviewOpts{
-		Cwd:        absJoin(in.RepoRoot, s.Path),
-		Env:        authEnv,
-		TimeoutSec: PreviewTimeoutSec(in.Config),
+		Cwd:          absJoin(in.RepoRoot, s.Path),
+		Env:          authEnv,
+		TimeoutSec:   PreviewTimeoutSec(in.Config),
+		SavePlanPath: savePlanPath,
+		Refresh:      in.Refresh,
 	})
 	ss := summary.StackSummary{
 		Project: s.Project,
@@ -368,6 +391,19 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 		ss.Status = summary.StatusError
 		ss.Error = redactor.Redact(res.Error)
 		return ss
+	}
+	// Persist the saved plan next to the run manifest. A failure here is
+	// logged, not fatal: the preview itself is valid and apply falls back to
+	// re-planning, which is exactly the pre-plan-locking behavior.
+	if res.PlanPath != "" {
+		key, perr := PutPlanArtifact(ctx, in.Blob, in.PRNumber, runID, s.Ref(), res.PlanPath)
+		if perr != nil {
+			slog.Warn("plan locking: storing the saved plan failed; apply will re-plan for this stack",
+				"stack", s.Ref(), "err", perr)
+		} else {
+			ss.PlanKey = key
+			slog.Debug("plan locking: saved plan stored", "stack", s.Ref(), "key", key)
+		}
 	}
 	if ss.Counts.Total() == 0 {
 		ss.Status = summary.StatusNoOp

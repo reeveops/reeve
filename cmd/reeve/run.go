@@ -26,8 +26,10 @@ func newRunCmd() *cobra.Command {
 		RunE:  runPreview,
 	}
 	addPreviewFlags(preview)
+	preview.Flags().Bool("refresh", false,
+		"Reconcile state with live infrastructure before planning, so the diff is against reality rather than possibly-stale state")
 
-	cmd.AddCommand(preview, newApplyCmd(), newReadyCmd(), newApprovedCmd(), newHelpCmd())
+	cmd.AddCommand(preview, newApplyCmd(), newRefreshCmd(), newReadyCmd(), newApprovedCmd(), newHelpCmd())
 	return cmd
 }
 
@@ -144,6 +146,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		Blob:                     store,
 		Local:                    local,
 		Force:                    flagBool(cmd, "force"),
+		Refresh:                  flagBool(cmd, "refresh"),
 	}
 
 	if !local {

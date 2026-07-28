@@ -30,6 +30,9 @@ func (f *fakeEngine) Apply(context.Context, discovery.Stack, ApplyOpts) (ApplyRe
 func (f *fakeEngine) DriftCheck(context.Context, discovery.Stack, PreviewOpts, bool) (PreviewResult, error) {
 	return PreviewResult{}, nil
 }
+func (f *fakeEngine) Refresh(context.Context, discovery.Stack, RefreshOpts) (RefreshResult, error) {
+	return RefreshResult{}, nil
+}
 
 func TestRegisterAndNew(t *testing.T) {
 	Register("test-fake", func(cfg schemas.EngineBody) (Engine, error) {

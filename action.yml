@@ -19,8 +19,8 @@ branding:
 inputs:
   command:
     description: >-
-      reeve subcommand: "preview", "ready", "apply", "pr-help", "lint", "stacks", "drift run",
-      "locks list", etc. Omit to auto-detect from the GitHub event context.
+      reeve subcommand: "preview", "ready", "apply", "refresh", "pr-help", "lint", "stacks",
+      "drift run", "locks list", etc. Omit to auto-detect from the GitHub event context.
     required: false
     default: ""
   root:
@@ -329,6 +329,23 @@ runs:
                 if [[ " $REST " == *" --force "* || " $REST " == *" force "* ]]; then
                   EXTRA="$EXTRA --force"
                 fi
+                # Reconcile state with live infrastructure before applying.
+                # Only the explicit flag form: "refresh" as a bare word is
+                # ambiguous next to the /reeve refresh command.
+                if [[ " $REST " == *" --refresh "* ]]; then
+                  EXTRA="$EXTRA --refresh"
+                fi
+                ;;
+              refresh)
+                # State reconciliation, not a deploy: rewrites what the engine
+                # believes exists. Scoped to the PR's stacks unless --all.
+                CMD="refresh"
+                if [[ " $REST " == *" --dry-run "* || " $REST " == *" dry-run "* ]]; then
+                  EXTRA="$EXTRA --dry-run"
+                fi
+                if [[ " $REST " == *" --all "* || " $REST " == *" all "* ]]; then
+                  EXTRA="$EXTRA --all"
+                fi
                 ;;
               ready)         CMD="ready" ;;
               approve)
@@ -403,6 +420,10 @@ runs:
           apply|"run apply")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
             "$REEVE_BIN" run apply --pr "$PR_NUMBER" $EXTRA
+            ;;
+          refresh|"run refresh")
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" $EXTRA
             ;;
           unlock)
             # PR-scoped lock cleanup: removes this PR from lock holders and

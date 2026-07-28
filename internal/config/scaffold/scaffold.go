@@ -257,6 +257,13 @@ engine:
     max_parallel_stacks: 2
     preview_timeout: 10m
     apply_timeout: 30m
+
+  # Apply executes the plan its preview saved, rather than computing a new
+  # one at apply time. On by default. The stored plan carries resource
+  # attribute values - see docs/configuration.md#plan-locking before turning
+  # this off, or before deciding your bucket does not need to be treated as
+  # sensitive.
+  # plan_locking: false
 `)
 	default: // pulumi
 		base = []byte(`version: 1
@@ -287,6 +294,13 @@ engine:
     max_parallel_stacks: 2
     preview_timeout: 10m
     apply_timeout: 30m
+
+  # Apply executes the plan its preview saved, rather than computing a new
+  # one at apply time. On by default. The stored plan carries resource
+  # attribute values - see docs/configuration.md#plan-locking before turning
+  # this off, or before deciding your bucket does not need to be treated as
+  # sensitive.
+  # plan_locking: false
 `)
 	}
 	if len(opts.Stacks) == 0 {

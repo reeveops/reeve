@@ -861,20 +861,23 @@ plan sits waiting for a human.
 **Stale plans on busy repos.** A plan records what *your* PR intended against
 the state it saw. It does not record that the state still looks that way. On a
 repo where several PRs land in a day, another PR can merge and change a
-resource your plan touches — and what happens next depends on the engine:
+resource your plan touches — and what happens next depends on
+[plan locking](#plan-locking):
 
-- **Terraform / OpenTofu** (`SupportsSavedPlans: true`) apply the exact saved
-  plan file. If state moved since the plan was made, the engine *refuses* it
-  ("saved plan is stale"). Safe, but the failure arrives late: after the run
-  started, after the stack lock was taken, and on a queue where the next PR is
-  waiting behind it. Freshness turns that into an upfront block.
-- **Pulumi** (`SupportsSavedPlans: false`) has no saved plan — apply re-plans
-  against current state. Nothing errors. The apply simply executes something
-  other than what the reviewer read, and the wider the gap between preview and
-  apply, the more it can differ.
+- **Plan locking on** (the default): apply executes the plan artifact the
+  preview stored. If state moved since that plan was made, the engine
+  *refuses* it — Terraform says "saved plan is stale", Pulumi says the update
+  exceeds its plan. Safe, but the failure arrives late: after the run started,
+  after the stack lock was taken, and on a queue where the next PR is waiting
+  behind it. Freshness turns that into an upfront block.
+- **Plan locking off**: apply computes a new change set at apply time. Nothing
+  errors. The apply simply executes something other than what the reviewer
+  read, and the wider the gap between preview and apply, the more it can
+  differ.
 
-Saved-plan parity protects you from *reeve* applying something other than what
-it planned. Neither engine protects you from *reality* having changed.
+Plan locking protects you from *reeve* applying something other than what it
+planned. Neither setting protects you from *reality* having changed — that is
+what freshness is for.
 
 This is also the axis `require_up_to_date` and `preview_max_commits_behind`
 cannot cover. Those compare your branch to its base — code drift. Freshness
@@ -887,6 +890,18 @@ trigger later from a comment. A freshness window forces the plan to be
 re-derived against current state before that is allowed, so an apply reflects
 a recent decision rather than a stale one someone stumbled back onto.
 
+### Default
+
+```yaml
+preconditions:
+  preview_freshness: "4h"          # the default when the key is omitted
+```
+
+Omitting the key gives you **4 hours**. That is roughly "planned this working
+session": long enough that a normal review cycle does not force a re-plan,
+short enough that a plan cannot survive a day of other merges. Set your own
+window if your review cadence is faster or slower.
+
 ### Disabling it
 
 ```yaml
@@ -894,23 +909,92 @@ preconditions:
   preview_freshness: "0"           # deliberately disabled
 ```
 
-`"0"` (or omitting the key) disables the gate: a plan of any age may be
-applied. Reeve records this on the gate trace as *"preview_freshness disabled
-- a plan of any age may be applied; concurrent merges are not accounted for"*,
-so it stays visible in the PR comment rather than looking like the check
-passed.
+Only a literal `"0"` disables the gate; omitting the key no longer does.
+Disabled, a plan of any age may be applied, and reeve records that on the gate
+trace as *"preview_freshness disabled - a plan of any age may be applied;
+concurrent merges are not accounted for"*, so it stays visible in the PR
+comment rather than looking like the check passed.
 
 Disabling is a reasonable choice for a low-traffic repo, a single-owner
 environment, or where an external process already serialises changes. It is a
 poor choice on a shared repo with concurrent merges — that is precisely the
 case the gate is for.
 
-A value that is not a Go duration is now a load error rather than a silent
-disable. Previously `preview_freshness: 2hrs` parsed as nothing, left the
-window at zero, and turned the gate off without saying so.
+A value that is not a Go duration — or one that is not positive — is a load
+error rather than a silent disable. Previously `preview_freshness: 2hrs`
+parsed as nothing, left the window at zero, and turned the gate off without
+saying so.
 
 Note that disabling freshness does not disable the `preview_succeeded` gate: a
 stack with no plan at all for the current commit is still blocked.
+
+## Plan locking
+
+```yaml
+# .reeve/<engine>.yaml
+engine:
+  type: terraform
+  plan_locking: true          # default; omit to get this
+```
+
+Plan locking binds an apply to the plan its preview produced. With it on,
+reeve stores the engine's plan artifact next to the run manifest at preview
+time and hands that exact file back to the engine at apply time:
+
+| Engine | Preview | Apply |
+|---|---|---|
+| Terraform / OpenTofu | `plan -out=<file>` | `apply <file>` |
+| Pulumi | `preview --save-plan=<file>` | `up --plan=<file>` |
+
+With it off, both engines compute a fresh change set inside the apply call.
+That is not a small difference:
+
+```
+plan_locking: false                  plan_locking: true
+
+  preview  →  plan A  (reviewed)       preview  →  plan A  (reviewed, stored)
+     ⋮         someone merges             ⋮         someone merges
+  apply    →  plan B  → SHIPS          apply    →  plan A  → engine REFUSES
+                                                   (state moved under it)
+```
+
+Off, "last apply wins": what ships is whatever the world looks like at apply
+time, which is not necessarily what anyone approved. On, an apply the world
+moved out from under fails loudly instead.
+
+Reeve still re-derives nothing about *which* stacks apply — that is bound to
+the preview manifest independently of this setting.
+
+### When it degrades
+
+Locking is best-effort in one direction only: it never applies something
+unreviewed, but it can fall back to a re-plan. That happens when the preview
+stored no artifact (locking was off then, the upload failed, the manifest
+predates this feature) or the stored plan cannot be read back. The apply still
+runs, and the run's timeline says **"plan lock unavailable"** with the reason —
+"this apply re-planned" is never something you should have to infer.
+
+`/reeve apply --refresh` also turns locking off for that run, by construction:
+a refresh changes the diff, which is the one thing a locked plan pins.
+
+### Reasons to turn it off
+
+- **Pulumi's update-plan flags are still experimental.** `--save-plan` and
+  `--plan` are gated behind `PULUMI_EXPERIMENTAL`, which reeve sets on exactly
+  the two invocations that pass them. If your Pulumi version does not support
+  them, the apply fails rather than silently applying something else — set
+  `plan_locking: false`.
+- **The stored plan is sensitive.** A plan artifact is the engine's own
+  serialized change set: it contains resource attribute values, including
+  ones your state backend treats as secret. Pulumi's own docs say as much
+  about `--save-plan`. Unlike the plan *summary* in the run manifest, it
+  cannot be redacted — redacting it would make it unusable as a plan.
+
+  It lands in your own bucket, under `runs/pr-<n>/<run-id>/plans/`, and is
+  pruned by the same `retention.max_age` sweep as the rest of the run's
+  artifacts. If that bucket is not already treated as sensitive — object
+  encryption, access limited to the people who can already read state — treat
+  this as the reason to fix that, or turn plan locking off.
 
 ## Lint
 

@@ -25,6 +25,12 @@ const (
 // parsed show -json output is authoritative for counts and diffs; sensitive
 // values are masked before anything is stored. CLI failures populate
 // PreviewResult.Error (nil error), matching the pulumi adapter's shape.
+//
+// The lifecycle already writes a saved plan, so PreviewOpts.SavePlanPath
+// only redirects where it lands and keeps it: with the field set the plan
+// file is left on disk at that path and echoed back as PlanPath, for the
+// caller to persist and hand to a later Apply. Without it the file is a
+// temp that this call deletes.
 func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.PreviewOpts) (iac.PreviewResult, error) {
 	cwd := opts.Cwd
 	if cwd == "" {
@@ -40,13 +46,22 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 		return iac.PreviewResult{Error: err.Error()}, nil
 	}
 
-	planPath, err := e.planFile()
-	if err != nil {
-		return iac.PreviewResult{Error: "create plan file: " + err.Error()}, nil
+	planPath := opts.SavePlanPath
+	if planPath == "" {
+		p, err := e.planFile()
+		if err != nil {
+			return iac.PreviewResult{Error: "create plan file: " + err.Error()}, nil
+		}
+		planPath = p
+		defer os.Remove(planPath)
 	}
-	defer os.Remove(planPath)
 
 	args := []string{"plan", "-input=false", "-no-color", "-detailed-exitcode", "-out=" + planPath}
+	// -refresh defaults to true for plan, so this is explicit rather than
+	// new behavior; passing it keeps the argv honest about what was asked.
+	if opts.Refresh {
+		args = append(args, "-refresh=true")
+	}
 	args = append(args, opts.ExtraArgs...)
 	plan, runErr := e.run(runCtx, cwd, opts.Env, e.Binary, args...)
 	if runErr != nil || (plan.ExitCode != exitNoChanges && plan.ExitCode != exitChanges) {
@@ -62,6 +77,15 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 		}, nil
 	}
 	result.PlanDiff = e.humanPlan(runCtx, cwd, opts.Env, planPath)
+	// Only claim a saved plan once the plan succeeded AND left a non-empty
+	// file - PlanPath is the caller's signal that a locked apply is possible,
+	// and a caller that trusted the requested path would otherwise lock an
+	// apply to a file the plan step never wrote.
+	if opts.SavePlanPath != "" {
+		if fi, statErr := os.Stat(planPath); statErr == nil && fi.Size() > 0 {
+			result.PlanPath = planPath
+		}
+	}
 	return result, nil
 }
 

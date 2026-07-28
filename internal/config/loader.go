@@ -260,12 +260,18 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("shared.yaml: apply.trigger %q is invalid (want %q or %q)",
 			t, schemas.ApplyTriggerComment, schemas.ApplyTriggerMerge)
 	}
-	// preview_freshness, when set, must parse. An unparseable value used to
-	// leave the duration at zero, which DISABLES the gate - a typo silently
-	// turning off a safety check is exactly the failure mode this rejects.
+	// preview_freshness, when set, must parse to a POSITIVE duration. An
+	// unparseable or negative value leaves the duration at zero, which
+	// DISABLES the gate - a typo silently turning off a safety check is
+	// exactly the failure mode this rejects. Omitted takes the 4h default;
+	// only a literal "0" disables it, and that has to be written on purpose.
 	if v := strings.TrimSpace(c.Shared.Preconditions.PreviewFreshness); v != "" && v != "0" {
-		if _, err := time.ParseDuration(v); err != nil {
+		d, err := time.ParseDuration(v)
+		if err != nil {
 			return fmt.Errorf("shared.yaml: preconditions.preview_freshness %q is not a Go duration (e.g. 2h); use \"0\" to disable the gate deliberately", v)
+		}
+		if d <= 0 {
+			return fmt.Errorf("shared.yaml: preconditions.preview_freshness %q is not positive; use \"0\" to disable the gate deliberately", v)
 		}
 	}
 	if err := c.validateChannels(); err != nil {

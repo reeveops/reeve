@@ -45,10 +45,14 @@ func (e *Engine) Name() string { return "pulumi" }
 
 func (e *Engine) Capabilities() iac.Capabilities {
 	return iac.Capabilities{
-		// This adapter never saves or applies a plan file: Apply runs
-		// `pulumi up --yes` directly rather than `preview --save-plan` +
-		// `up --plan`. Flip only when the saved-plan lifecycle is wired.
-		SupportsSavedPlans:   false,
+		// `preview --save-plan` + `up --plan` (update plans). Pulumi still
+		// tags both flags experimental and hides them unless
+		// PULUMI_EXPERIMENTAL=true, which this adapter sets on exactly the
+		// invocations that pass them (see experimentalEnv). Capability is
+		// declared true because the lifecycle is wired; operators who do not
+		// want to ride an experimental Pulumi flag turn plan locking off in
+		// engine config.
+		SupportsSavedPlans:   true,
 		SupportsRefresh:      true,
 		SupportsPolicyNative: true,
 		// The secrets_provider types Pulumi accepts for stack-state
@@ -203,6 +207,12 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 	}
 
 	args := []string{"preview", "--stack", stack.Name, "--json", "--non-interactive"}
+	if opts.Refresh {
+		args = append(args, "--refresh=true")
+	}
+	if opts.SavePlanPath != "" {
+		args = append(args, "--save-plan="+opts.SavePlanPath)
+	}
 	args = append(args, opts.ExtraArgs...)
 
 	timeout := time.Duration(opts.TimeoutSec) * time.Second
@@ -217,9 +227,7 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
-	if len(opts.Env) > 0 {
-		cmd.Env = append(os.Environ(), flattenEnv(opts.Env)...)
-	}
+	cmd.Env = commandEnv(opts.Env, opts.SavePlanPath != "")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -252,6 +260,16 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 			// never shows their diff.
 			if res.Error != "" || counts.Total() > 0 {
 				res.PlanDiff = e.previewDiff(ctx, stack, opts)
+			}
+			// Claim the saved plan only when one was asked for, the preview
+			// is clean, and a non-empty file is actually there. Pulumi skips
+			// writing the plan on a failed preview, and a caller that trusted
+			// the requested path would then lock an apply to a file that does
+			// not exist.
+			if opts.SavePlanPath != "" && res.Error == "" {
+				if fi, statErr := os.Stat(opts.SavePlanPath); statErr == nil && fi.Size() > 0 {
+					res.PlanPath = opts.SavePlanPath
+				}
 			}
 			return res, nil
 		}
@@ -329,6 +347,23 @@ func flattenEnv(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k, v := range m {
 		out = append(out, fmt.Sprintf("%s=%s", k, v))
+	}
+	return out
+}
+
+// commandEnv builds the child environment. experimental is set only for the
+// invocations that pass an update-plan flag: Pulumi keeps `--save-plan` and
+// `--plan` behind PULUMI_EXPERIMENTAL, and turning that on globally would
+// also unhide unrelated experimental behavior for every other command reeve
+// runs. Scoping it to the two calls that need it keeps the blast radius to
+// the feature the operator opted into.
+func commandEnv(env map[string]string, experimental bool) []string {
+	if len(env) == 0 && !experimental {
+		return nil // inherit the parent environment unchanged
+	}
+	out := append(os.Environ(), flattenEnv(env)...)
+	if experimental {
+		out = append(out, "PULUMI_EXPERIMENTAL=true")
 	}
 	return out
 }

@@ -44,6 +44,8 @@ Exit codes:
 	cmd.Flags().String("actor", "", "User triggering the apply (default: $GITHUB_ACTOR)")
 	cmd.Flags().Bool("break-glass", false, "Emergency apply: override approvals (and freeze unless disabled); requires break_glass config and a justification")
 	cmd.Flags().String("justification", "", "Mandatory justification for --break-glass (or parsed from $REEVE_BREAK_GLASS_COMMENT)")
+	cmd.Flags().Bool("refresh", false,
+		"Reconcile state with live infrastructure before applying. Turns plan locking OFF for this run: the applied change set is computed after the refresh, so it is not the plan the PR previewed.")
 	return cmd
 }
 
@@ -180,6 +182,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		VCS:             client,
 		AuditWriter:     audit.NewWriter(store),
 		Force:           force,
+		Refresh:         flagBool(cmd, "refresh"),
 		BreakGlass:      bgReq,
 		CommentApproval: commentApprovalConfig(),
 	})

@@ -18,6 +18,20 @@ type PreviewOpts struct {
 	ExtraArgs  []string
 	Env        map[string]string
 	TimeoutSec int
+	// SavePlanPath asks the engine to persist the plan it just computed to
+	// this path, so a later Apply can execute that exact plan instead of
+	// computing a new one (plan locking). Empty means "do not save".
+	//
+	// Contract: only meaningful when Capabilities().SupportsSavedPlans. An
+	// engine that cannot save a plan MUST ignore this field and leave
+	// PreviewResult.PlanPath empty rather than fail the preview - plan
+	// locking degrades, it does not break previews.
+	SavePlanPath string
+	// Refresh asks the engine to reconcile its state with live
+	// infrastructure before computing the plan, so the diff is against
+	// reality rather than against possibly-stale state. Only meaningful
+	// when Capabilities().SupportsRefresh.
+	Refresh bool
 }
 
 // PreviewResult is what the engine returns per stack.
@@ -27,6 +41,12 @@ type PreviewResult struct {
 	PlanDiff    string // pulumi preview --diff output
 	FullPlan    string // raw JSON preview output, redacted upstream
 	Error       string // non-empty if preview failed for this stack
+	// PlanPath is the plan artifact the engine actually wrote. It echoes
+	// PreviewOpts.SavePlanPath on success and is EMPTY on any other outcome,
+	// including "the engine ignored SavePlanPath". Callers must treat empty
+	// as "there is no saved plan" and never assume the requested path
+	// exists. The file is the caller's to read, upload, and delete.
+	PlanPath string
 	// DriftedURNs lists the URNs of resources that actually changed (drift
 	// path only; excludes unchanged "same" steps). Used to fingerprint the
 	// drifted set so a change in *which* resources drift re-fires an alert.
@@ -85,6 +105,22 @@ type ApplyOpts struct {
 	ExtraArgs  []string
 	Env        map[string]string
 	TimeoutSec int
+	// PlanPath is a plan artifact produced by an earlier Preview (the file
+	// named by PreviewResult.PlanPath). When non-empty the engine MUST
+	// execute exactly that plan and MUST NOT compute a new one; if the plan
+	// no longer matches the world, the apply MUST fail rather than apply
+	// something else. Empty means "compute the change set now".
+	//
+	// Only meaningful when Capabilities().SupportsSavedPlans. An engine
+	// without that capability MUST reject a non-empty PlanPath with an
+	// error - silently ignoring it would apply an unreviewed change set
+	// while the caller believed the plan was locked.
+	PlanPath string
+	// Refresh asks the engine to reconcile state with live infrastructure
+	// before applying. Mutually exclusive with PlanPath in practice: a
+	// refresh can change the diff, which is exactly what a locked plan
+	// forbids. Callers that set both must expect the engine to fail.
+	Refresh bool
 }
 
 // ApplyResult is what the engine returns per stack after apply.
