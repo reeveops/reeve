@@ -22,7 +22,7 @@ func issueComment(login, assoc, body, typ string, at time.Time) *gh.IssueComment
 func defaultTrigger(t *testing.T) (prefixes []string, verb string, allowed map[string]struct{}) {
 	t.Helper()
 	cfg := vcs.CommentApprovalConfig{
-		CommandPrefixes:     []string{"/reeve", "@reeve"},
+		CommandPrefixes:     []string{"/reeve", "@acme-bot"},
 		AllowedAssociations: []string{"OWNER", "MEMBER", "COLLABORATOR"},
 	}
 	p, v := parseCommentTrigger(cfg)
@@ -104,7 +104,7 @@ func TestCommentApprovals_UnauthorizedAssociationRejected(t *testing.T) {
 	comments := []*gh.IssueComment{
 		// NONE / CONTRIBUTOR are not in the allowlist: must NOT count.
 		issueComment("outsider", "NONE", "/reeve approve", "User", time.Unix(2000, 0)),
-		issueComment("drive-by", "CONTRIBUTOR", "@reeve approve", "User", time.Unix(2001, 0)),
+		issueComment("drive-by", "CONTRIBUTOR", "@acme-bot approve", "User", time.Unix(2001, 0)),
 	}
 	out := commentApprovals(comments, prefixes, verb, allowed, headSHA)
 	if len(out) != 0 {
@@ -141,11 +141,11 @@ func TestCommentApprovals_NonCommandIgnored(t *testing.T) {
 func TestCommentApprovals_MentionPrefixAndCaseInsensitiveVerb(t *testing.T) {
 	prefixes, verb, allowed := defaultTrigger(t)
 	comments := []*gh.IssueComment{
-		issueComment("m", "OWNER", "@reeve Approve", "User", time.Unix(2000, 0)),
+		issueComment("m", "OWNER", "@acme-bot Approve", "User", time.Unix(2000, 0)),
 	}
 	out := commentApprovals(comments, prefixes, verb, allowed, headSHA)
 	if len(out) != 1 {
-		t.Fatalf("@reeve Approve should count, got %+v", out)
+		t.Fatalf("@acme-bot Approve should count, got %+v", out)
 	}
 }
 
@@ -213,6 +213,34 @@ func TestResolveApprovedCommit(t *testing.T) {
 				t.Fatalf("resolveApprovedCommit(%q,%q) = (%q,%v), want (%q,%v)", c.arg, c.head, sha, pinned, c.wantSHA, c.wantPinned)
 			}
 		})
+	}
+}
+
+// The zero-config fallback accepts the slash style only. "@reeve" is a real
+// GitHub account, so a default that accepted it made every mention-style
+// command notify a stranger who has nothing to do with the repo.
+func TestParseCommentTrigger_DefaultsToSlashStyleOnly(t *testing.T) {
+	prefixes, verb := parseCommentTrigger(vcs.CommentApprovalConfig{})
+	if verb != "approve" {
+		t.Fatalf("default verb = %q, want approve", verb)
+	}
+	if len(prefixes) != 1 || prefixes[0] != "/reeve" {
+		t.Fatalf("default prefixes = %v, want [/reeve] only", prefixes)
+	}
+}
+
+// Opting the mention style back in still works - the default changed, the
+// capability did not.
+func TestParseCommentTrigger_MentionStyleIsOptIn(t *testing.T) {
+	prefixes, _ := parseCommentTrigger(vcs.CommentApprovalConfig{
+		CommandPrefixes: []string{"/reeve", "@acme-bot"},
+	})
+	got := map[string]bool{}
+	for _, p := range prefixes {
+		got[p] = true
+	}
+	if !got["@acme-bot"] || !got["/reeve"] {
+		t.Fatalf("configured prefixes must be honored, got %v", prefixes)
 	}
 }
 

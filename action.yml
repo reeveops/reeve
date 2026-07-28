@@ -62,10 +62,16 @@ inputs:
     description: >-
       Comma-separated list of comment prefixes accepted as reeve commands.
       The first word of a comment must exactly match one of these (spaces
-      around entries are trimmed). Default accepts both the slash style
-      ("/reeve apply") and the mention style ("@reeve apply").
+      around entries are trimmed).
+
+      The default is the slash style only. The mention style ("@reeve apply")
+      used to be a default and no longer is: github.com/reeve is a real
+      person's account, so every "@reeve ..." comment sent them a
+      notification for a command that had nothing to do with them. Add
+      "@reeve" back here if you want it, but prefer a handle your org
+      actually controls.
     required: false
-    default: "/reeve,@reeve"
+    default: "/reeve"
   run-on-approval:
     description: >-
       Set "true" to dispatch "run approved" when a pull_request_review is
@@ -286,7 +292,7 @@ runs:
             # "/reeve up*" prefix match did exactly that).
             read -r PREFIX VERB REST <<< "$(printf '%s' "$COMMENT_BODY" | head -n1)"
             # The first word must exactly match one of the configured
-            # command prefixes (default: "/reeve" and "@reeve").
+            # command prefixes (default: "/reeve").
             PREFIX_OK=false
             IFS=',' read -ra PREFIXES <<< "${{ inputs.command-prefix }}"
             for P in "${PREFIXES[@]}"; do

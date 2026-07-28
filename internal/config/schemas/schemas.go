@@ -182,8 +182,8 @@ type FreezeWindowYAML struct {
 // path; it is a flow selector, never a gate, and never weakens approvals,
 // locks, freeze, checks, or preview freshness.
 const (
-	// ApplyTriggerComment applies only from a /reeve apply (or @reeve
-	// apply/up) PR comment. This is the default (apply-then-merge flow).
+	// ApplyTriggerComment applies only from a /reeve apply (or /reeve up)
+	// PR comment. This is the default (apply-then-merge flow).
 	ApplyTriggerComment = "comment"
 	// ApplyTriggerMerge applies automatically when the PR is merged
 	// (merge-then-apply / continuous-delivery flow). Comment-initiated
