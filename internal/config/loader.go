@@ -81,8 +81,20 @@ func Load(root string) (*Config, error) {
 	seenType := map[string]string{}
 	seenEngine := map[string]string{}
 
+	// Read every config through a root scoped to .reeve/. This directory is
+	// checked out from the PR HEAD, and git can store symlinks: without the
+	// root, a PR could commit `.reeve/shared.yaml -> ../../../etc/passwd`
+	// and reeve would read whatever it pointed at (and can echo parse
+	// failures back into the PR comment). os.Root refuses to traverse out.
+	dirRoot, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer dirRoot.Close()
+
 	for _, f := range files {
-		data, err := os.ReadFile(f)
+		// f stays absolute for error messages; only the read is scoped.
+		data, err := dirRoot.ReadFile(filepath.Base(f))
 		if err != nil {
 			return nil, err
 		}

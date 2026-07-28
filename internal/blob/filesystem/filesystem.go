@@ -3,11 +3,14 @@ package filesystem
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -18,6 +21,14 @@ import (
 // Store is the filesystem:// blob adapter. Atomic writes via tmpfile +
 // rename, conditional writes via hashing the existing contents. Used for
 // local testing and `reeve run preview --local`.
+//
+// Containment: every operation resolves its key through an *os.Root opened
+// on the bucket directory, so the kernel refuses any path that leaves it.
+// This replaces a hand-rolled string check that inspected the key for "/.."
+// and friends. The string check could not see symlinks: a symlinked
+// subdirectory under the bucket passed it and then wrote wherever the link
+// pointed. os.Root resolves each component against the root descriptor and
+// rejects the traversal instead.
 type Store struct {
 	root string
 }
@@ -31,27 +42,61 @@ func New(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Fail here rather than on first use if the bucket path is unusable.
+	r, err := os.OpenRoot(abs)
+	if err != nil {
+		return nil, err
+	}
+	_ = r.Close()
 	return &Store{root: abs}, nil
 }
 
-func (s *Store) path(key string) (string, error) {
-	if strings.HasPrefix(key, "/") || strings.HasPrefix(key, "..") ||
-		strings.Contains(key, "/../") || strings.HasSuffix(key, "/..") {
+// openRoot opens a root handle for one operation. Opening per call rather
+// than holding one for the Store's lifetime keeps the descriptor count flat
+// (tests build many Stores) and costs a single openat.
+func (s *Store) openRoot() (*os.Root, error) { return os.OpenRoot(s.root) }
+
+// cleanKey normalizes a blob key to a slash-separated path relative to the
+// root and rejects lexical escapes.
+//
+// This is no longer the security boundary - os.Root is - but it is kept
+// because it catches the common mistake with a message that names the
+// problem ("escapes root") instead of surfacing a syscall-level error, and
+// because it normalizes "a/../b" before it reaches the filesystem. The
+// escapes it cannot see (symlinks) are exactly the ones os.Root stops.
+func cleanKey(key string) (string, error) {
+	k := filepath.ToSlash(key)
+	if strings.TrimSpace(k) == "" {
+		return "", errors.New("blob key is empty")
+	}
+	if strings.HasPrefix(k, "/") {
+		return "", errors.New("blob key escapes root: must be relative to the bucket")
+	}
+	k = path.Clean(k)
+	if k == ".." || strings.HasPrefix(k, "../") {
 		return "", errors.New("blob key escapes root")
 	}
-	full := filepath.Join(s.root, filepath.FromSlash(key))
-	if !strings.HasPrefix(full, s.root+string(filepath.Separator)) && full != s.root {
-		return "", errors.New("blob key escapes root")
+	if k == "." {
+		return "", errors.New("blob key is empty")
 	}
-	return full, nil
+	return k, nil
 }
 
+// osKey converts a cleaned key to the platform path os.Root expects.
+func osKey(k string) string { return filepath.FromSlash(k) }
+
 func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metadata, error) {
-	p, err := s.path(key)
+	k, err := cleanKey(key)
 	if err != nil {
 		return nil, nil, err
 	}
-	f, err := os.Open(p)
+	r, err := s.openRoot()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer r.Close()
+
+	f, err := r.Open(osKey(k))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, blob.ErrNotFound
@@ -63,35 +108,48 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metad
 		_ = f.Close()
 		return nil, nil, err
 	}
-	etag, err := hashFile(p)
+	etag, err := hashKey(r, k)
 	if err != nil {
 		_ = f.Close()
 		return nil, nil, err
 	}
+	// f outlives the root handle deliberately: an *os.File stays valid after
+	// the directory descriptor it was opened from is closed.
 	return f, &blob.Metadata{ETag: etag, LastModified: st.ModTime().Unix(), Size: st.Size()}, nil
 }
 
 func (s *Store) Put(ctx context.Context, key string, r io.Reader) (*blob.Metadata, error) {
-	p, err := s.path(key)
+	k, err := cleanKey(key)
 	if err != nil {
 		return nil, err
 	}
-	return s.writeAtomic(p, r)
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return writeAtomic(root, k, r)
 }
 
 func (s *Store) PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch string) (*blob.Metadata, error) {
-	p, err := s.path(key)
+	k, err := cleanKey(key)
 	if err != nil {
 		return nil, err
 	}
-	// Lock the target path via a sibling lockfile.
-	lock, err := acquireLock(p)
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	// Lock the target key via a sibling lockfile.
+	lock, err := acquireLock(root, k)
 	if err != nil {
 		return nil, err
 	}
 	defer lock.release()
 
-	current, statErr := hashFileOrMissing(p)
+	current, statErr := hashKeyOrMissing(root, k)
 	if ifMatch == "" {
 		if statErr == nil {
 			return nil, blob.ErrPreconditionFailed // exists, but we required absence
@@ -100,94 +158,141 @@ func (s *Store) PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch
 		return nil, blob.ErrPreconditionFailed
 	}
 
-	return s.writeAtomic(p, r)
+	return writeAtomic(root, k, r)
 }
 
 func (s *Store) Delete(ctx context.Context, key string) error {
-	p, err := s.path(key)
+	k, err := cleanKey(key)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+	root, err := s.openRoot()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := root.Remove(osKey(k)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
-	p, err := s.path(prefix)
+	root, err := s.openRoot()
 	if err != nil {
 		return nil, err
 	}
-	var out []string
-	walkRoot := p
-	info, err := os.Stat(p)
+	defer root.Close()
+	fsys := root.FS()
+
+	// An empty prefix lists the whole bucket; io/fs spells that ".".
+	start := "."
+	if strings.TrimSpace(prefix) != "" {
+		k, err := cleanKey(prefix)
+		if err != nil {
+			return nil, err
+		}
+		start = path.Clean(k)
+	}
+
+	info, err := fs.Stat(fsys, start)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	if !info.IsDir() {
 		// Treat as a single-key match.
-		rel, _ := filepath.Rel(s.root, p)
-		return []string{filepath.ToSlash(rel)}, nil
+		return []string{start}, nil
 	}
-	err = filepath.Walk(walkRoot, func(path string, info os.FileInfo, err error) error {
+
+	var out []string
+	err = fs.WalkDir(fsys, start, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(s.root, path)
-		if err != nil {
-			return err
-		}
-		out = append(out, filepath.ToSlash(rel))
+		// WalkDir yields slash paths already relative to the bucket root,
+		// which is exactly the key form callers expect back.
+		out = append(out, p)
 		return nil
 	})
 	return out, err
 }
 
-func (s *Store) writeAtomic(target string, r io.Reader) (*blob.Metadata, error) {
-	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-		return nil, err
+// writeAtomic writes r to key via a sibling temp file plus rename. Both the
+// temp and the target are resolved through root, so neither can land outside
+// the bucket.
+func writeAtomic(root *os.Root, key string, r io.Reader) (*blob.Metadata, error) {
+	dir := path.Dir(key)
+	if dir != "." {
+		if err := root.MkdirAll(osKey(dir), 0o750); err != nil {
+			return nil, err
+		}
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".reeve-tmp-*")
+
+	tmpKey, tmp, err := createTemp(root, dir)
 	if err != nil {
 		return nil, err
 	}
-	tmpName := tmp.Name()
+	cleanup := func() { _ = root.Remove(osKey(tmpKey)) }
+
 	hasher := sha256.New()
-	tee := io.TeeReader(r, hasher)
-	n, err := io.Copy(tmp, tee)
+	n, err := io.Copy(tmp, io.TeeReader(r, hasher))
 	if err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		cleanup()
 		return nil, err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		cleanup()
 		return nil, err
 	}
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
+		cleanup()
 		return nil, err
 	}
-	if err := os.Rename(tmpName, target); err != nil {
-		_ = os.Remove(tmpName)
+	if err := root.Rename(osKey(tmpKey), osKey(key)); err != nil {
+		cleanup()
 		return nil, err
 	}
-	etag := hex.EncodeToString(hasher.Sum(nil))
-	return &blob.Metadata{ETag: etag, Size: n}, nil
+	return &blob.Metadata{ETag: hex.EncodeToString(hasher.Sum(nil)), Size: n}, nil
+}
+
+// createTemp makes an exclusive temp file beside the target. os.Root has no
+// CreateTemp, so this is the same retry-on-collision loop with O_EXCL.
+func createTemp(root *os.Root, dir string) (string, *os.File, error) {
+	var lastErr error
+	for i := 0; i < 10; i++ {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", nil, err
+		}
+		name := ".reeve-tmp-" + hex.EncodeToString(b[:])
+		key := name
+		if dir != "." {
+			key = dir + "/" + name
+		}
+		f, err := root.OpenFile(osKey(key), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			return key, f, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", nil, err
+		}
+		lastErr = err
+	}
+	return "", nil, lastErr
 }
 
 // --- helpers ---
 
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
+func hashKey(root *os.Root, key string) (string, error) {
+	f, err := root.Open(osKey(key))
 	if err != nil {
 		return "", err
 	}
@@ -199,8 +304,8 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func hashFileOrMissing(path string) (string, error) {
-	h, err := hashFile(path)
+func hashKeyOrMissing(root *os.Root, key string) (string, error) {
+	h, err := hashKey(root, key)
 	if err != nil && errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
@@ -208,23 +313,27 @@ func hashFileOrMissing(path string) (string, error) {
 }
 
 type fileLock struct {
-	f *os.File
+	root *os.Root
+	key  string
+	f    *os.File
 }
 
 func (l *fileLock) release() {
 	if l.f != nil {
 		_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 		_ = l.f.Close()
-		_ = os.Remove(l.f.Name())
+		_ = l.root.Remove(osKey(l.key))
 	}
 }
 
-func acquireLock(target string) (*fileLock, error) {
-	lockPath := target + ".lock"
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
-		return nil, err
+func acquireLock(root *os.Root, key string) (*fileLock, error) {
+	lockKey := key + ".lock"
+	if dir := path.Dir(lockKey); dir != "." {
+		if err := root.MkdirAll(osKey(dir), 0o750); err != nil {
+			return nil, err
+		}
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := root.OpenFile(osKey(lockKey), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +341,7 @@ func acquireLock(target string) (*fileLock, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	return &fileLock{f: f}, nil
+	return &fileLock{root: root, key: lockKey, f: f}, nil
 }
 
 // compile-time check

@@ -24,6 +24,8 @@ func PulumiLogin(ctx context.Context, cfg *schemas.Engine) error {
 	if cfg.Engine.Binary.Path != "" {
 		binary = cfg.Engine.Binary.Path
 	}
+	// #nosec G204 -- binary is engine.binary.path from operator config; `login` and the backend
+	// URL are separate argv elements, never a shell string
 	cmd := exec.CommandContext(ctx, binary, "login", cfg.Engine.State.URL)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -66,8 +66,14 @@ type projectYAML struct {
 // it records (project=<name>, path=<dir>) and enumerates stacks from
 // sibling Pulumi.<stack>.yaml files.
 func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.Stack, error) {
+	repoRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer repoRoot.Close()
+
 	var out []discovery.Stack
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -89,7 +95,15 @@ func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.
 		}
 		rel = filepath.ToSlash(rel)
 
-		project, err := readProjectName(path)
+		// Read the project file through a root on the repo. WalkDir matches
+		// entries with Lstat, so a Pulumi.yaml committed as a symlink is
+		// matched by name and then followed by a plain read; os.Root refuses
+		// to traverse out of the repo instead.
+		relFile, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		project, err := readProjectName(repoRoot, relFile)
 		if err != nil {
 			return err
 		}
@@ -114,8 +128,10 @@ func (e *Engine) EnumerateStacks(ctx context.Context, root string) ([]discovery.
 	return out, nil
 }
 
-func readProjectName(path string) (string, error) {
-	data, err := os.ReadFile(path)
+// readProjectName reads a Pulumi.yaml through repoRoot; rel is its path
+// relative to the repo root.
+func readProjectName(repoRoot *os.Root, rel string) (string, error) {
+	data, err := repoRoot.ReadFile(rel)
 	if err != nil {
 		return "", err
 	}
@@ -124,7 +140,15 @@ func readProjectName(path string) (string, error) {
 		return "", err
 	}
 	if p.Name == "" {
-		return filepath.Base(filepath.Dir(path)), nil
+		// Fall back to the containing directory's name. rel is repo-relative,
+		// so a Pulumi.yaml at the repo root has dir "." - resolve that to the
+		// repo directory's own name, which is what the absolute path used to
+		// produce.
+		dir := filepath.Dir(rel)
+		if dir == "." || dir == "" {
+			return filepath.Base(repoRoot.Name()), nil
+		}
+		return filepath.Base(dir), nil
 	}
 	return p.Name, nil
 }
@@ -188,6 +212,8 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// #nosec G204 -- e.Binary is engine.binary.path from operator config; args are built by this
+	// adapter and passed as argv with no shell
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
@@ -261,6 +287,8 @@ func (e *Engine) previewDiff(ctx context.Context, stack discovery.Stack, opts ia
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// #nosec G204 -- e.Binary is engine.binary.path from operator config; args are built by this
+	// adapter and passed as argv with no shell
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd

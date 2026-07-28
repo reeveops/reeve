@@ -113,6 +113,9 @@ type runCmd func(ctx context.Context, dir string, env map[string]string, bin str
 
 // realRun is the production runCmd: os/exec with combined env.
 func realRun(ctx context.Context, dir string, env map[string]string, bin string, args ...string) (execResult, error) {
+	// #nosec G204 -- bin is engine.binary.path from operator config (default `terraform`/`tofu`);
+	// args are built by this adapter, passed as argv with no shell, so no
+	// metacharacter injection
 	cmd := exec.CommandContext(ctx, bin, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = dir

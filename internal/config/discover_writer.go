@@ -22,7 +22,19 @@ import (
 //   - A `.bak` copy of the original file is written alongside.
 //   - dryRun=true returns the new YAML bytes without touching disk.
 func WriteClusteredStacks(path string, decls []discovery.Declaration, dryRun bool) ([]byte, error) {
-	data, err := os.ReadFile(path)
+	// Scoped to the engine config's own directory so the file name cannot
+	// resolve through a symlink to somewhere else. This protects the final
+	// component, which is the realistic case (a committed
+	// `.reeve/pulumi.yaml -> ...`); a symlinked .reeve/ itself is still
+	// followed, since that is the directory the operator pointed us at.
+	dirRoot, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer dirRoot.Close()
+	name := filepath.Base(path)
+
+	data, err := dirRoot.ReadFile(name)
 	if err != nil {
 		return nil, err
 	}
@@ -34,10 +46,10 @@ func WriteClusteredStacks(path string, decls []discovery.Declaration, dryRun boo
 	if dryRun {
 		return out, nil
 	}
-	if err := os.WriteFile(path+".bak", data, 0o600); err != nil {
+	if err := dirRoot.WriteFile(name+".bak", data, 0o600); err != nil {
 		return nil, fmt.Errorf("backup: %w", err)
 	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
+	if err := dirRoot.WriteFile(name, out, 0o600); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -158,7 +170,12 @@ func replaceMapChild(m *yaml.Node, key string, newVal *yaml.Node) bool {
 // DryRunDiff produces a unified diff between the current and proposed
 // contents. Small shim used by `reeve stacks discover --diff`.
 func DryRunDiff(path string, proposed []byte) (string, error) {
-	cur, err := os.ReadFile(path)
+	dirRoot, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	defer dirRoot.Close()
+	cur, err := dirRoot.ReadFile(filepath.Base(path))
 	if err != nil {
 		return "", err
 	}
