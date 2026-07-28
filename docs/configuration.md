@@ -96,7 +96,7 @@ approvals:
 preconditions:
   require_up_to_date: true
   require_checks_passing: true
-  preview_freshness: 2h            # preview must be newer than this
+  preview_freshness: 2h            # preview must be newer than this ("0" disables - see below)
   preview_max_commits_behind: 5
 
 freeze_windows:
@@ -851,6 +851,66 @@ when the PR modifies the config that carries them: channel dispatch is
 suppressed when notification config changed, and OTEL exporter init is
 skipped when `observability.yaml` changed — see
 [notifications.md](notifications.md#pre-approval-channel-isolation).
+
+## Preview freshness
+
+`preconditions.preview_freshness` bounds how old a plan may be at apply time.
+It exists for two failure modes, and both are about the world moving while a
+plan sits waiting for a human.
+
+**Stale plans on busy repos.** A plan records what *your* PR intended against
+the state it saw. It does not record that the state still looks that way. On a
+repo where several PRs land in a day, another PR can merge and change a
+resource your plan touches — and what happens next depends on the engine:
+
+- **Terraform / OpenTofu** (`SupportsSavedPlans: true`) apply the exact saved
+  plan file. If state moved since the plan was made, the engine *refuses* it
+  ("saved plan is stale"). Safe, but the failure arrives late: after the run
+  started, after the stack lock was taken, and on a queue where the next PR is
+  waiting behind it. Freshness turns that into an upfront block.
+- **Pulumi** (`SupportsSavedPlans: false`) has no saved plan — apply re-plans
+  against current state. Nothing errors. The apply simply executes something
+  other than what the reviewer read, and the wider the gap between preview and
+  apply, the more it can differ.
+
+Saved-plan parity protects you from *reeve* applying something other than what
+it planned. Neither engine protects you from *reality* having changed.
+
+This is also the axis `require_up_to_date` and `preview_max_commits_behind`
+cannot cover. Those compare your branch to its base — code drift. Freshness
+bounds *state* drift, which includes changes with no PR behind them at all: a
+console edit, an out-of-band apply, a drift-correction run. A branch can be
+perfectly up to date and its plan still describe a world that is gone.
+
+**Click-ops protection.** An approval plus an old plan is an apply anyone can
+trigger later from a comment. A freshness window forces the plan to be
+re-derived against current state before that is allowed, so an apply reflects
+a recent decision rather than a stale one someone stumbled back onto.
+
+### Disabling it
+
+```yaml
+preconditions:
+  preview_freshness: "0"           # deliberately disabled
+```
+
+`"0"` (or omitting the key) disables the gate: a plan of any age may be
+applied. Reeve records this on the gate trace as *"preview_freshness disabled
+- a plan of any age may be applied; concurrent merges are not accounted for"*,
+so it stays visible in the PR comment rather than looking like the check
+passed.
+
+Disabling is a reasonable choice for a low-traffic repo, a single-owner
+environment, or where an external process already serialises changes. It is a
+poor choice on a shared repo with concurrent merges — that is precisely the
+case the gate is for.
+
+A value that is not a Go duration is now a load error rather than a silent
+disable. Previously `preview_freshness: 2hrs` parsed as nothing, left the
+window at zero, and turned the gate off without saying so.
+
+Note that disabling freshness does not disable the `preview_succeeded` gate: a
+stack with no plan at all for the current commit is still blocked.
 
 ## Lint
 

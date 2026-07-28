@@ -239,8 +239,50 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		slog.Info("apply skipped: docs-only changes")
 		return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
 	}
-	if mapRes.Reason == discovery.ReasonBroadened {
-		timeline.add(ctx, "📡", "scope broadened", "changed files map to no specific stack; applying all stacks")
+	// Bind the apply scope to what was previewed for THIS commit.
+	//
+	// Two things make a freshly-computed mapping unsafe here. First,
+	// AffectedDetailed broadens to every stack the moment one changed file
+	// maps to no stack, discarding the precise matches - fine for "show me
+	// what might be affected", not for deciding what to apply. Second,
+	// ListChangedFiles is a live diff against a moving base: if the base
+	// advanced between preview and apply, the file list can differ from the
+	// one the plan was built from, so the mapping can change under a commit
+	// that never moved.
+	//
+	// The preview manifest is keyed by commit SHA and immutable, so it is
+	// the only honest record of what was planned and approved. Apply
+	// executes that set - never more.
+	if previewed, ok := PreviewedStackRefs(ctx, in.Blob, in.PRNumber, in.CommitSHA); ok {
+		bound := make([]discovery.Stack, 0, len(target))
+		for _, s := range declared {
+			if previewed[s.Ref()] {
+				bound = append(bound, s)
+			}
+		}
+		if dropped := scopeDelta(target, bound); len(dropped) > 0 {
+			timeline.add(ctx, "🎯", "scope bound to plan", fmt.Sprintf(
+				"apply targets the %d stack(s) previewed for %s; not applying %s, which this run's change mapping added but the plan did not cover",
+				len(bound), shortSHA(in.CommitSHA), strings.Join(dropped, ", ")))
+			slog.Warn("apply scope narrowed to the previewed set",
+				"sha", in.CommitSHA, "previewed", len(bound), "mapped", len(target), "dropped", dropped)
+		}
+		target = bound
+	} else if mapRes.Reason == discovery.ReasonBroadened {
+		// No preview manifest for this commit: every stack will fail the
+		// preview gate anyway, but do not silently widen the blast radius
+		// on the way there. Report it and keep the precise matches.
+		timeline.add(ctx, "📡", "scope broadened", fmt.Sprintf(
+			"changed files map to no specific stack (%s) and no plan exists for %s; not widening the apply to every stack",
+			strings.Join(mapRes.Unmapped, ", "), shortSHA(in.CommitSHA)))
+		target = mapRes.Matched
+	}
+
+	if len(target) == 0 {
+		timeline.add(ctx, "⏭️", "skipped", fmt.Sprintf(
+			"no stack has a plan for %s; run a preview on this commit first", shortSHA(in.CommitSHA)))
+		slog.Info("apply skipped: no previewed stacks for commit", "sha", in.CommitSHA)
+		return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
 	}
 
 	// 2. Per-stack context: PR + checks + upstream-commits + approvals + CODEOWNERS.
@@ -1008,4 +1050,22 @@ func aggregateOutcome(ss []summary.StackSummary, anyBlocked bool) string {
 		return "blocked"
 	}
 	return "success"
+}
+
+// scopeDelta returns the refs present in mapped but absent from bound - the
+// stacks a freshly-computed change mapping would have applied that the plan
+// for this commit never covered.
+func scopeDelta(mapped, bound []discovery.Stack) []string {
+	have := make(map[string]bool, len(bound))
+	for _, s := range bound {
+		have[s.Ref()] = true
+	}
+	var out []string
+	for _, s := range mapped {
+		if !have[s.Ref()] {
+			out = append(out, s.Ref())
+		}
+	}
+	sort.Strings(out)
+	return out
 }
