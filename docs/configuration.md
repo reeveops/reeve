@@ -858,14 +858,29 @@ skipped when `observability.yaml` changed — see
 It exists for two failure modes, and both are about the world moving while a
 plan sits waiting for a human.
 
-**Stale plans on busy repos.** A saved plan records what *your* PR intended
-against the state it saw. It does not record that the state still looks that
-way. On a repo where several PRs land in a day, another PR can merge and
-change a resource your plan touches. Your plan is then describing a world that
-no longer exists: at best the apply fails on a conflict mid-run, at worst it
-succeeds and quietly reverts or clobbers the other change. Saved-plan parity
-(`SupportsSavedPlans`) protects you from *reeve* applying something other than
-what it planned; it does not protect you from *reality* having changed.
+**Stale plans on busy repos.** A plan records what *your* PR intended against
+the state it saw. It does not record that the state still looks that way. On a
+repo where several PRs land in a day, another PR can merge and change a
+resource your plan touches — and what happens next depends on the engine:
+
+- **Terraform / OpenTofu** (`SupportsSavedPlans: true`) apply the exact saved
+  plan file. If state moved since the plan was made, the engine *refuses* it
+  ("saved plan is stale"). Safe, but the failure arrives late: after the run
+  started, after the stack lock was taken, and on a queue where the next PR is
+  waiting behind it. Freshness turns that into an upfront block.
+- **Pulumi** (`SupportsSavedPlans: false`) has no saved plan — apply re-plans
+  against current state. Nothing errors. The apply simply executes something
+  other than what the reviewer read, and the wider the gap between preview and
+  apply, the more it can differ.
+
+Saved-plan parity protects you from *reeve* applying something other than what
+it planned. Neither engine protects you from *reality* having changed.
+
+This is also the axis `require_up_to_date` and `preview_max_commits_behind`
+cannot cover. Those compare your branch to its base — code drift. Freshness
+bounds *state* drift, which includes changes with no PR behind them at all: a
+console edit, an out-of-band apply, a drift-correction run. A branch can be
+perfectly up to date and its plan still describe a world that is gone.
 
 **Click-ops protection.** An approval plus an old plan is an apply anyone can
 trigger later from a comment. A freshness window forces the plan to be
