@@ -111,3 +111,5 @@ fabric.properties
 
 dist/
 bin/
+# Local clone of reeveops/tap (Homebrew cask repo)
+tap/
