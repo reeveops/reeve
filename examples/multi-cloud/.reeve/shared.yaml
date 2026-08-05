@@ -32,5 +32,4 @@ preconditions:
   preview_freshness: 2h
 
 apply:
-  command: "/reeve apply"
   allow_fork_prs: false

@@ -3,7 +3,7 @@ package iac
 import (
 	"context"
 
-	"github.com/thefynx/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/core/discovery"
 )
 
 // DriftChecker runs an engine-specific drift check for a single stack.

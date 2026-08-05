@@ -54,11 +54,31 @@ Out of scope:
 - **Audit log is write-once.** Entries are created with
   `If-None-Match` preconditions. Overwrites are rejected.
 
+## Supported versions
+
+Only the latest release line receives security fixes. Fixes ship as a
+new release, not as backports.
+
+| Version | Supported |
+| ------- | --------- |
+| 0.2.x (latest release) | Yes |
+| < 0.2 | No - upgrade |
+| `<branch>-<sha>` edge prereleases | Not for production - signed but unversioned per-commit builds; pin a release |
+
 ## Supply-chain controls
 
-- **Release signing (planned, not shipped yet).** `.goreleaser.yaml`
-  wires sigstore/cosign keyless signing for when the first release is
-  cut. Pre-release, reeve is built from source only.
+- **Release signing.** goreleaser produces per-platform tarballs plus a
+  sha256 `checksums.txt`, and cosign (keyless, via GitHub OIDC in
+  `.github/workflows/release.yml`) signs the checksums file, publishing
+  the signature as `checksums.txt.bundle`. Binaries are not individually
+  signed - verify a tarball's sha256 against the signed `checksums.txt`.
+- **Edge signing.** The per-push `<branch>-<sha>` prereleases that back the
+  GitHub Action fast-path are cosign keyless-signed the same way
+  (`checksums.txt.bundle` alongside `checksums.txt`). The action verifies the
+  signature when `cosign` is available and rejects a signed-but-tampered
+  binary; `REEVE_REQUIRE_SIGNATURE=1` makes a valid signature mandatory. Edge
+  prereleases are unversioned and follow a branch - pin `@vX.Y.Z` for
+  reproducible, supported distribution.
 - **Vulnerability scanning on every PR:**
   - `govulncheck` - Go's reachability-aware vuln scanner against the
     official Go vulnerability database.

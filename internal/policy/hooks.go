@@ -13,15 +13,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thefynx/reeve/internal/core/redact"
+	"github.com/FynxLabs/reeve/internal/core/redact"
 )
 
 // Hook is one configured policy hook.
 type Hook struct {
-	Name     string
-	Command  []string
-	OnFail   FailMode // Block | Warn
-	Required bool     // false = skip silently if command absent
+	Name    string
+	Command []string
+	OnFail  FailMode // Block | Warn
+	// Required: false = skip silently if command absent. Config defaults
+	// this to TRUE when `required:` is omitted (see schemas.PolicyHookYAML
+	// - a missing scanner binary fails closed); false is an explicit opt-out.
+	Required bool
 }
 
 // FailMode controls what happens on a non-zero exit.
@@ -71,6 +74,11 @@ func Run(ctx context.Context, h Hook, tc Context, r *redact.Redactor) Result {
 
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	// #nosec G204 -- DELIBERATE: a policy hook IS an operator-supplied command from engine config.
+	// It is argv-form (no shell) and reached only from run.Apply, AFTER every
+	// approval gate - never on the preview path, so an unapproved PR cannot reach
+	// it. Note cmd.Env below inherits the full credential environment: a hook is
+	// trusted code
 	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

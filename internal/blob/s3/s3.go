@@ -22,7 +22,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/thefynx/reeve/internal/blob"
+	"github.com/FynxLabs/reeve/internal/blob"
 )
 
 // Store implements blob.Store against an S3 bucket.
@@ -173,8 +173,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// List returns keys under the prefix (non-recursive in the sense that
-// object keys are flat, but S3 is inherently flat).
+// List returns every key under the prefix (recursive - no delimiter).
 func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	var out []string
 	var continuationToken *string

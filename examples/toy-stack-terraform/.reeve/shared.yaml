@@ -1,0 +1,39 @@
+version: 1
+config_type: shared
+
+bucket:
+  type: filesystem
+  name: ./.reeve-state
+
+comments:
+  sort: status_grouped
+  collapse_threshold: 10
+  show_gates: true
+
+locking:
+  ttl: 4h
+  queue: fifo
+
+approvals:
+  sources:
+    - type: pr_review
+      enabled: true
+  default:
+    required_approvals: 1
+    approvers:
+      - "@infra-reviewers"
+    codeowners: false
+    dismiss_on_new_commit: true
+  stacks:
+    "*/prod":
+      required_approvals: 2
+
+preconditions:
+  require_up_to_date: true
+  require_checks_passing: true
+  preview_freshness: 2h
+  preview_max_commits_behind: 5
+
+apply:
+  trigger: comment
+  allow_fork_prs: false

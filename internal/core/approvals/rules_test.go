@@ -61,7 +61,7 @@ func TestEvaluateRequiredApprovals(t *testing.T) {
 func TestEvaluateDismissOnNewCommit(t *testing.T) {
 	rules := Rules{RequiredApprovals: 1, Approvers: []string{"alice"}, DismissOnNewCommit: true}
 	pr := PR{Number: 7, HeadSHA: "sha2"}
-	approvals := []Approval{{Approver: "alice", CommitSHA: "sha1"}}
+	approvals := []Approval{{Approver: "alice", CommitSHA: "sha1", Pinned: true}}
 	res := Evaluate(rules, approvals, pr, nil, "dave", evalNow)
 	if res.Satisfied {
 		t.Fatalf("expected unsatisfied after dismissal: %+v", res)
@@ -88,7 +88,7 @@ func TestEvaluateGroupSemantics(t *testing.T) {
 
 func TestEvaluateCodeowners(t *testing.T) {
 	rules := Rules{Codeowners: true}
-	pr := PR{Number: 7, HeadSHA: "sha1"}
+	pr := PR{Number: 7, HeadSHA: "sha1", RepoPrivate: true}
 	co := map[string][]string{
 		"internal/core/render": {"frontend-team"},
 	}
@@ -193,7 +193,7 @@ func TestEvaluateTeamWithCodeowners(t *testing.T) {
 	}
 	pr := PR{Number: 42, HeadSHA: headSHA, Author: "charlie"}
 	rawApprovals := []Approval{
-		{Approver: "alice", CommitSHA: headSHA, Source: "pr_review"},
+		{Approver: "alice", CommitSHA: headSHA, Source: "pr_review", Pinned: true},
 	}
 	codeowners := map[string][]string{
 		"infra/main.tf":  {"@acme/platform"},
@@ -223,7 +223,7 @@ func TestEvaluateNoGatesConfiguredFailsClosed(t *testing.T) {
 		t.Fatalf("expected no-gates to fail closed: %+v", res)
 	}
 	// One non-author approval then satisfies the default gate.
-	res = Evaluate(Rules{}, []Approval{{Approver: "alice"}}, PR{HeadSHA: "x"}, nil, "dave", evalNow)
+	res = Evaluate(Rules{}, []Approval{{Approver: "alice"}}, PR{HeadSHA: "x", RepoPrivate: true}, nil, "dave", evalNow)
 	if !res.Satisfied {
 		t.Fatalf("expected one approval to satisfy the default gate: %+v", res)
 	}
@@ -239,7 +239,7 @@ func TestEvaluateRequiredApprovalsEmptyAllowListCountsAnyApprover(t *testing.T) 
 	// "require N approvals" gate, not an unsatisfiable one: any 2 distinct
 	// non-author approvers satisfy it.
 	rules := Rules{RequiredApprovals: 2}
-	pr := PR{Number: 1, HeadSHA: "sha1", Author: "dave"}
+	pr := PR{Number: 1, HeadSHA: "sha1", Author: "dave", RepoPrivate: true}
 	res := Evaluate(rules, []Approval{{Approver: "alice"}}, pr, nil, "dave", evalNow)
 	if res.Satisfied {
 		t.Fatalf("one approval must not satisfy required_approvals=2: %+v", res)
@@ -284,7 +284,7 @@ func TestResolveMoreSpecificPatternWins(t *testing.T) {
 }
 
 func TestEvaluateFreshness(t *testing.T) {
-	pr := PR{Number: 7, HeadSHA: "sha1", Author: "dave"}
+	pr := PR{Number: 7, HeadSHA: "sha1", Author: "dave", RepoPrivate: true}
 	rules := Rules{RequiredApprovals: 1, Freshness: 24 * time.Hour}
 
 	cases := []struct {
@@ -343,7 +343,7 @@ func TestEvaluateZeroFreshnessNoConstraint(t *testing.T) {
 	// Freshness=0 means no constraint: ancient and untimestamped approvals
 	// both count.
 	rules := Rules{RequiredApprovals: 2}
-	pr := PR{Number: 7, HeadSHA: "sha1", Author: "dave"}
+	pr := PR{Number: 7, HeadSHA: "sha1", Author: "dave", RepoPrivate: true}
 	res := Evaluate(rules, []Approval{
 		{Approver: "alice", SubmittedAt: evalNow.Add(-100 * 24 * time.Hour)},
 		{Approver: "bob"},
@@ -397,7 +397,7 @@ func TestEvaluateCodeownersAllPathsEmailOnlyFallsBackToDefaultGate(t *testing.T)
 	// nothing enforceable - the safety default (1 approval) applies instead
 	// of the gate silently passing or permanently wedging.
 	rules := Rules{Codeowners: true}
-	pr := PR{Number: 7, HeadSHA: "sha1"}
+	pr := PR{Number: 7, HeadSHA: "sha1", RepoPrivate: true}
 	co := map[string][]string{"docs/guide.md": {"docs@example.com"}}
 	res := Evaluate(rules, nil, pr, co, "dave", evalNow)
 	if res.Satisfied {

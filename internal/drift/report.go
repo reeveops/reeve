@@ -27,8 +27,9 @@ func ReportMarkdown(out *RunOutput) string {
 		counts[EventDriftDetected], counts[EventDriftOngoing],
 		counts[EventDriftResolved], counts[EventCheckFailed])
 
-	// Show drifted stacks prominently.
-	drifted := filterItemsByOutcome(out.Items, OutcomeDriftDetected)
+	// Show drifted stacks prominently. Permanently-suppressed stacks are
+	// listed separately (below) rather than in the alert table.
+	drifted := filterUnsuppressed(filterItemsByOutcome(out.Items, OutcomeDriftDetected))
 	if len(drifted) > 0 {
 		b.WriteString("## 🔴 Drifted stacks\n\n")
 		b.WriteString("| Stack | Env | +Add | ~Change | -Delete | ±Replace | Status | Open PRs |\n")
@@ -50,6 +51,10 @@ func ReportMarkdown(out *RunOutput) string {
 				break
 			}
 		}
+		if out.OverlapWarning != "" {
+			fmt.Fprintf(&b, "> ⚠️ %s\n\n", out.OverlapWarning)
+		}
+
 		if anyOverlap {
 			b.WriteString("### ⚠️ Drifted stacks with open PRs\n\n")
 			b.WriteString("Long-lived IaC PRs over drifted infrastructure are compounding risk - ")
@@ -91,6 +96,21 @@ func ReportMarkdown(out *RunOutput) string {
 		b.WriteString("\n</details>\n\n")
 	}
 
+	// Permanently-suppressed stacks: checked and state-tracked, but their
+	// drift alerts are silenced by drift.yaml permanent_suppressions.
+	suppressed := filterSuppressed(out.Items)
+	if len(suppressed) > 0 {
+		fmt.Fprintf(&b, "<details><summary>%d suppressed</summary>\n\n", len(suppressed))
+		for _, it := range suppressed {
+			line := fmt.Sprintf("- `%s` (%s)", it.Ref(), it.Outcome)
+			if it.SuppressReason != "" {
+				line += " — " + it.SuppressReason
+			}
+			fmt.Fprintf(&b, "%s\n", line)
+		}
+		b.WriteString("\n</details>\n\n")
+	}
+
 	if len(out.Skipped) > 0 {
 		fmt.Fprintf(&b, "<details><summary>%d skipped</summary>\n\n", len(out.Skipped))
 		for _, s := range out.Skipped {
@@ -106,6 +126,30 @@ func filterItemsByOutcome(items []Item, want Outcome) []Item {
 	var out []Item
 	for _, it := range items {
 		if it.Outcome == want {
+			out = append(out, it)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ref() < out[j].Ref() })
+	return out
+}
+
+// filterUnsuppressed drops permanently-suppressed items (used to keep them
+// out of the drift-alert table).
+func filterUnsuppressed(items []Item) []Item {
+	var out []Item
+	for _, it := range items {
+		if !it.Suppressed {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// filterSuppressed returns permanently-suppressed items, sorted by ref.
+func filterSuppressed(items []Item) []Item {
+	var out []Item
+	for _, it := range items {
+		if it.Suppressed {
 			out = append(out, it)
 		}
 	}

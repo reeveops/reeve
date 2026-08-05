@@ -1,7 +1,7 @@
 # drift-scheduled
 
 Scheduled drift detection with named schedules (critical / prod /
-slow-movers) and three sinks: Slack dashboard channel, PagerDuty
+slow-movers) and three channels: Slack dashboard channel, PagerDuty
 Events API, GitHub issue tracker.
 
 Pairs with one of the federation examples - this directory shows only

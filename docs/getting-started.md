@@ -17,8 +17,10 @@ see [configuration.md](configuration.md) and [auth.md](auth.md).
 
 ## 1. Install reeve locally
 
-reeve is pre-release. No published binary, no Homebrew tap, no container
-image. Build from source:
+Grab a prebuilt tarball from the
+[releases page](https://github.com/FynxLabs/reeve/releases) (verify its
+sha256 against the release's cosign-signed `checksums.txt`), or build
+from source:
 
 ```bash
 git clone https://github.com/FynxLabs/reeve
@@ -30,9 +32,39 @@ go build -o ./bin/reeve ./cmd/reeve
 
 Put `./bin/reeve` on your `$PATH` or invoke it directly.
 
-## 2. Create `.reeve/`
+## 2. Create `.reeve/` with `reeve init`
 
-At the repo root, create two files.
+At the repo root, run:
+
+```bash
+reeve init
+```
+
+`reeve init` scans the repo for Pulumi projects and Terraform root modules
+(the same scan as `reeve stacks discover`), shows what it found, and walks
+you through a short wizard: the IaC engine (pulumi, terraform, or OpenTofu -
+pick `tofu` explicitly, it reads the same `.tf` files as terraform),
+approvals (CODEOWNERS-based or an explicit approver list), an optional
+commented freeze-window example, an optional Slack notification channel, and
+an approval-freshness window. Everything you skip is written as a commented
+best-practice example you can enable later.
+
+Running in a script or CI (or passing `--non-interactive` / `-n`) skips all
+prompts and writes a safe baseline: engine detected from repo files, stacks
+pre-filled, every optional gate off. Existing `.reeve/` files are never
+overwritten - `init` only fills in missing config types unless you pass
+`--force` (which keeps `*.bak` backups).
+
+Then check the result:
+
+```bash
+reeve lint
+```
+
+### What it wrote
+
+Two files (plus `notifications.yaml` if you configured Slack). You can also
+write these by hand - `reeve init` is just a shortcut.
 
 **`.reeve/shared.yaml`** - bucket, approvals, preconditions:
 
@@ -59,10 +91,9 @@ preconditions:
   preview_freshness: 2h
 
 apply:
-  trigger: comment
-  command: "/reeve apply"
+  trigger: comment               # comment (default): apply on /reeve apply | merge: apply on PR merge
   allow_fork_prs: false          # deny-by-default; flip with care
-  # auto_ready: true             # optional: when PR converts from draft to ready and plan succeeded, notify for approval
+  # auto_ready: true             # reserved — not yet enforced (draft→ready already notifies for approval when a plan has succeeded)
 ```
 
 **`.reeve/pulumi.yaml`** - engine + stack declarations:
@@ -158,13 +189,25 @@ That's it. The action auto-detects the command from the event:
 | `pull_request` (any other action: labeled, ...)    | silent no-op             |
 | `/reeve ready` comment                             | `reeve run ready`        |
 | `/reeve apply` comment                             | `reeve run apply`        |
+| `/reeve refresh` comment                           | `reeve run refresh`      |
 | `/reeve unlock [project/stack]` comment            | frees this PR's locks    |
 | `/reeve help` comment                              | posts available commands |
 | Any other comment, or any bot-authored comment     | silent no-op             |
 
-Every comment command also works mention-style: `@reeve apply`, `@reeve plan`,
-etc. The accepted prefixes are configurable via the `command-prefix` input
-(default `"/reeve,@reeve"`). Comments authored by bots (user type `Bot` or a
+**`reeve run apply` exit codes** (this is what turns the PR check red or
+green):
+
+| Exit | Meaning |
+| ---- | ------- |
+| `0`  | Every targeted stack applied cleanly or was a no-op — or every stack was **blocked** by preconditions/locks. Blocked is a deliberate non-failure: the gates held the apply back, nothing was attempted, and a later re-run can proceed. |
+| `1`  | One or more stacks **failed** to apply (engine, auth, or lock-storage error), the run was cancelled by a signal, post-apply persistence failed, or the run errored before applying (config, VCS, storage). The error message names the failed stacks. A failed apply never renders as a green check. |
+
+Accepted comment prefixes are configurable via the `command-prefix` input
+(default `"/reeve"`). Mention style (`@reeve apply`) is **not** accepted by
+default: `github.com/reeve` is a real person's account, so every such comment
+pinged someone with no connection to your repo. You can add `@reeve` back —
+`command-prefix: "/reeve,@reeve"` — but a handle your org actually owns is the
+better answer. Comments authored by bots (user type `Bot` or a
 login ending in `[bot]`) are always skipped, so reeve's own PR comments can
 never re-trigger a run.
 
@@ -177,8 +220,8 @@ never re-trigger a run.
 
 > **Draft PRs:** apply is blocked. reeve returns an error if `/reeve apply`
 > is attempted on a draft PR.
-> Enable `apply.auto_ready: true` in `shared.yaml` to automatically notify for approval
-> when the PR is converted from draft to ready for review and a plan has succeeded.
+> When a draft PR is converted to ready for review, reeve automatically notifies for
+> approval if a plan has already succeeded for the head commit.
 
 Open a PR. reeve posts a comment within ~30 seconds showing the plan for
 every stack touched by the changed files.
@@ -191,12 +234,14 @@ cache hit nothing is downloaded or built:
 
 - **`@vX.Y.Z`** - downloads that release's signed tarball and verifies it
   against the release's `checksums.txt`.
-- **`@master` / `@next`** - downloads a rolling *edge* binary from the
-  `edge-<branch>` prerelease. Edge assets are named with the sha256 hash of
-  the source they were built from; the action only uses one whose hash
-  matches the action source it just checked out, so the binary provably
-  corresponds to your pinned ref. Edge builds are unsigned (signed
-  distribution is the `vX.Y.Z` releases).
+- **`@master` / `@next`** - downloads the newest per-push `<branch>-<sha>`
+  prerelease (one is published per commit to that branch). The action verifies
+  the binary against the prerelease's `checksums.txt` and, when `cosign` is
+  available, its keyless signature (`checksums.txt.bundle`); set
+  `REEVE_REQUIRE_SIGNATURE=1` to make signature verification mandatory. Because
+  it resolves the *newest* prerelease, the binary may be built from a slightly
+  newer commit than the action source you pinned - the `vX.Y.Z` releases are
+  the reproducible, version-pinned distribution.
 - **Anything else** (a SHA pin, a feature branch, a fork) - builds from
   source on the runner, as does any download or checksum failure. Fallback
   is automatic and logged; a missing binary never fails your run.
@@ -304,7 +349,7 @@ on:
 permissions:
   contents: read
   id-token: write            # OIDC for the read-only role
-  issues: write              # for github_issue drift sink
+  issues: write              # for github_issue drift channel
 
 jobs:
   drift:
@@ -326,7 +371,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 ```
 
-Configure schedules + sinks in `.reeve/drift.yaml` - see [drift.md](drift.md).
+Configure schedules + channels in `.reeve/drift.yaml` - see [drift.md](drift.md).
 
 ## Troubleshooting
 
@@ -351,6 +396,6 @@ Configure schedules + sinks in `.reeve/drift.yaml` - see [drift.md](drift.md).
 
 - [configuration.md](configuration.md) - full schema for every `.reeve/*.yaml` file
 - [auth.md](auth.md) - every provider type, plus GitHub App setup
-- [drift.md](drift.md) - schedules, event lifecycle, sink catalog
+- [drift.md](drift.md) - schedules, event lifecycle, channel catalog
 - [policy-hooks.md](policy-hooks.md) - wiring OPA / Conftest / CrossGuard
 - [self-hosting.md](self-hosting.md) - bucket provisioning, scope, distribution

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,10 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/thefynx/reeve/internal/blob/factory"
-	blocks "github.com/thefynx/reeve/internal/blob/locks"
-	"github.com/thefynx/reeve/internal/config"
-	"github.com/thefynx/reeve/internal/run"
+	"github.com/FynxLabs/reeve/internal/blob/factory"
+	blocks "github.com/FynxLabs/reeve/internal/blob/locks"
+	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/FynxLabs/reeve/internal/run"
 )
 
 func newLocksCmd() *cobra.Command {
@@ -65,7 +64,7 @@ func openLocks(cmd *cobra.Command) (*blocks.Store, *config.Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, err
 	}
-	store, err := factory.Open(context.Background(), cfg.Shared.Bucket, root)
+	store, err := factory.Open(cmd.Context(), cfg.Shared.Bucket, root)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open bucket: %w", err)
 	}
@@ -77,7 +76,7 @@ func locksList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	locks, err := s.ListAll(context.Background())
+	locks, err := s.ListAll(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -109,7 +108,7 @@ func locksExplain(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	l, etag, err := s.Get(context.Background(), parts[0], parts[1])
+	l, etag, err := s.Get(cmd.Context(), parts[0], parts[1])
 	if err != nil {
 		return err
 	}
@@ -138,7 +137,7 @@ func locksReap(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	n, err := s.ReapAll(context.Background(), run.LockTTL(cfg.Shared))
+	n, err := s.ReapAll(cmd.Context(), run.LockTTL(cfg.Shared))
 	if err != nil {
 		return err
 	}
@@ -185,7 +184,7 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	ctx := context.Background()
+	ctx := cmd.Context()
 	ttl := run.LockTTL(cfg.Shared)
 	w := cmd.OutOrStdout()
 

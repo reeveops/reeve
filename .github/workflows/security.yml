@@ -1,8 +1,6 @@
 name: security
 
 on:
-  push:
-    branches: [ main, master ]
   pull_request:
   schedule:
   # Weekly re-scan so CVEs that land after a dormant branch is merged
@@ -16,14 +14,37 @@ permissions:
 
 jobs:
   # Dependency review runs on PRs only - blocks PRs that introduce HIGH+
-  # CVEs in dependencies before they hit main.
+  # CVEs in dependencies before they hit master.
   dependency-review:
     name: Dependency review
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-    - uses: actions/checkout@v6
-    - uses: actions/dependency-review-action@v4
+    - uses: actions/checkout@v7
+    - uses: actions/dependency-review-action@v5
       with:
         fail-on-severity: high
         comment-summary-in-pr: on-failure
+
+  # Scheduled (and manually dispatched) runs re-scan the default branch
+  # against the current Go vulnerability database - this is what surfaces
+  # CVEs published after the code stopped changing. CI already runs the
+  # same scanners per push/PR; this covers the quiet weeks in between.
+  vuln-scan:
+    name: Scheduled vulnerability scan
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up mise
+      uses: jdx/mise-action@v4
+      with:
+        experimental: true
+
+    - name: govulncheck
+      run: govulncheck ./...
+
+    - name: gosec
+      # Rule set lives in mise.toml's `sec` task - single definition.
+      run: mise run sec

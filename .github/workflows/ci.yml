@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [master, next]
   pull_request:
 
 permissions:
@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -27,10 +27,20 @@ jobs:
       - name: go test (race)
         run: go test -race ./...
 
+      # The reeve_minimal build excludes the interactive `reeve init` wizard
+      # (charmbracelet/huh + its TUI tree). Nothing else compiles it, so
+      # without this step init_wizard_minimal.go rots silently and only
+      # breaks when someone cuts a minimal artifact.
+      - name: go build (reeve_minimal)
+        run: go build -tags reeve_minimal ./...
+
+      - name: go test (reeve_minimal)
+        run: go test -tags reeve_minimal ./cmd/reeve/...
+
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up mise
         uses: jdx/mise-action@v4
@@ -41,7 +51,7 @@ jobs:
   vuln:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up mise
         uses: jdx/mise-action@v4
@@ -52,19 +62,63 @@ jobs:
   sec:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up mise
         uses: jdx/mise-action@v4
 
       - name: gosec
-        # Non-zero exit on findings; text output goes to the job log.
-        run: gosec -quiet -fmt=text -exclude=G104,G115,G204,G304,G703,G704 -exclude-dir=openspec -exclude-dir=docs -exclude-dir=examples ./...
+        # Non-zero exit on findings; text output goes to the job log. The rule
+        # set lives in mise.toml's `sec` task so CI and local runs cannot drift.
+        run: mise run sec
+
+  engine-conformance:
+    # Drives the iac.Engine contract suite (internal/iac/enginetest) against
+    # REAL engine binaries: real argv, real process, real `show -json`
+    # parsing. Terraform and OpenTofu run as SEPARATE subjects, each through
+    # the binary and source extension it actually reads - proving one does
+    # not prove the other.
+    #
+    # Cloud-free and network-free after `init`: the local backend keeps state
+    # in the stack dir and terraform_data is builtin, so no provider is
+    # downloaded. A missing binary skips its subject rather than failing, so
+    # the suite still runs locally; CI installs both so neither is skipped
+    # here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up mise
+        uses: jdx/mise-action@v4
+        with:
+          experimental: true
+
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v2
+        with:
+          # The wrapper is a shell shim that rewrites stdout; the adapter
+          # parses stdout, so it must exec the real binary.
+          tofu_wrapper: false
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          # Same reason as tofu_wrapper: the adapter parses stdout.
+          terraform_wrapper: false
+
+      - name: Confirm both engines are present
+        run: |
+          set -euo pipefail
+          tofu version
+          terraform version
+
+      - name: Engine contract conformance
+        run: go test -run TestContract -v ./internal/iac/...
 
   govet-extended:
     # Catches issues golangci-lint's vet settings sometimes miss.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - run: go vet -vettool=$(which shadow 2>/dev/null || true) ./... || go vet ./...

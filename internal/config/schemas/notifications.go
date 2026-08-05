@@ -1,9 +1,15 @@
 package schemas
 
-// Notifications is .reeve/notifications.yaml.
+// Notifications is .reeve/notifications.yaml: a generic `channels:` list
+// (type + settings + `on:` subscriptions).
+//
+// The original single `slack:` block is no longer loaded — the field exists
+// only so the loader can reject it with a pointer at `reeve migrate-config`,
+// which converts it to a channels: entry.
 type Notifications struct {
-	Header `yaml:",inline"`
-	Slack  *SlackConfig `yaml:"slack,omitempty"`
+	Header   `yaml:",inline"`
+	Slack    *SlackConfig  `yaml:"slack,omitempty"`
+	Channels []ChannelYAML `yaml:"channels,omitempty"`
 }
 
 // SlackTrigger controls when the first Slack message is created.

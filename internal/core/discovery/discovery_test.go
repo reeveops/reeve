@@ -196,3 +196,43 @@ func TestAffectedNoChangesAllIgnored(t *testing.T) {
 		t.Fatalf("expected no stacks, got %+v", got)
 	}
 }
+
+// Broadening replaces the precise matches with every stack. That is right for
+// preview ("what might be affected") and wrong for apply, so the precise set
+// has to survive on Matched - otherwise a caller that must not widen its
+// blast radius has nothing to fall back to.
+func TestBroadeningPreservesPreciseMatches(t *testing.T) {
+	stacks := []Stack{
+		{Project: "payments", Path: "platform-edge/credova-payments", Name: "prod"},
+		{Project: "ledger", Path: "platform-core/ledger", Name: "prod"},
+	}
+	changed := []string{
+		"platform-edge/credova-payments/main.tf", // maps to one stack
+		"shared/provider-versions.hcl",           // maps to none
+	}
+
+	res := AffectedDetailed(stacks, changed, ChangeMapping{Scope: ScopeAuto})
+	if res.Reason != ReasonBroadened {
+		t.Fatalf("expected broadening from the unmapped file, got %v", res.Reason)
+	}
+	if len(res.Stacks) != 2 {
+		t.Errorf("broadened Stacks should be every stack, got %d", len(res.Stacks))
+	}
+	if len(res.Matched) != 1 || res.Matched[0].Project != "payments" {
+		t.Fatalf("Matched must keep only the demonstrably affected stack, got %+v", res.Matched)
+	}
+}
+
+// With no unmapped files there is nothing to broaden, and Matched equals
+// Stacks so callers can use either.
+func TestMatchedEqualsStacksWhenNotBroadened(t *testing.T) {
+	stacks := []Stack{{Project: "payments", Path: "edge/payments", Name: "prod"}}
+	res := AffectedDetailed(stacks, []string{"edge/payments/main.tf"}, ChangeMapping{Scope: ScopeAuto})
+	if res.Reason != ReasonMatched {
+		t.Fatalf("expected ReasonMatched, got %v", res.Reason)
+	}
+	if len(res.Matched) != len(res.Stacks) {
+		t.Errorf("Matched (%d) should equal Stacks (%d) when nothing broadened",
+			len(res.Matched), len(res.Stacks))
+	}
+}

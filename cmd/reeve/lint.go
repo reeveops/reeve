@@ -1,22 +1,19 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
 	"github.com/spf13/cobra"
 
-	authfac "github.com/thefynx/reeve/internal/auth/factory"
-	"github.com/thefynx/reeve/internal/config"
-	"github.com/thefynx/reeve/internal/core/discovery"
-	"github.com/thefynx/reeve/internal/drift"
-	"github.com/thefynx/reeve/internal/iac/pulumi"
-	"github.com/thefynx/reeve/internal/vcs/codeowners"
+	authfac "github.com/FynxLabs/reeve/internal/auth/factory"
+	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/FynxLabs/reeve/internal/vcs/codeowners"
 )
 
 func newLintCmd() *cobra.Command {
@@ -32,6 +29,23 @@ func newLintCmd() *cobra.Command {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
+			// ${env:...} references outside the designated allow-list are
+			// kept literal; surface them so typos and unsupported
+			// placements don't fail silently at run time.
+			for _, w := range cfg.EnvExpandWarnings {
+				fmt.Fprintf(os.Stderr, "⚠️  %s\n", w)
+			}
+			// Engine configs: every engine.type must resolve to a compiled-in
+			// engine, so a typo'd (or not-yet-shipped) type fails the CI gate
+			// here instead of at run time.
+			engines := make([]iac.Engine, len(cfg.Engines))
+			for i, ec := range cfg.Engines {
+				e, err := iac.New(ec.Engine)
+				if err != nil {
+					return err
+				}
+				engines[i] = e
+			}
 			// Freeze windows: reject unparseable cron or duration here so a
 			// typo fails the CI gate instead of silently disabling the freeze.
 			for _, w := range cfg.Shared.FreezeWindows {
@@ -44,26 +58,10 @@ func newLintCmd() *cobra.Command {
 					}
 				}
 			}
-			// Drift sinks: an unknown event name in `on:` would be silently
-			// dropped at runtime, and a sink with an empty subscription never
-			// fires. Fail the typo here; warn on the never-firing sink.
-			if cfg.Drift != nil {
-				for i, sk := range cfg.Drift.Sinks {
-					name := sk.Name
-					if name == "" {
-						name = sk.Type
-					}
-					for _, evName := range sk.On {
-						if _, ok := drift.ParseEventName(evName); !ok {
-							return fmt.Errorf("drift sink %d (%s): unknown event %q in on: list (valid: %s)",
-								i, name, evName, strings.Join(drift.KnownEventNames(), ", "))
-						}
-					}
-					if len(sk.On) == 0 {
-						fmt.Fprintf(os.Stderr, "⚠️  drift sink %d (%s) has an empty on: list - it will never fire\n", i, name)
-					}
-				}
-			}
+			// Drift-channel event names and empty-on subscriptions are validated
+			// by cfg.Validate() above (validateChannels), which is drift-event
+			// strict for drift.yaml and exempts channels with default
+			// subscriptions - one source of truth, so lint and runtime agree.
 			// CODEOWNERS: email owners cannot be matched to VCS logins, so
 			// reeve's codeowners gate ignores them. Flag them here so a
 			// path owned only by emails isn't silently unenforced.
@@ -73,10 +71,10 @@ func newLintCmd() *cobra.Command {
 				// Collect declared stack refs for the conflict check.
 				var stacks []string
 				engineCfg := cfg.Engines[0]
-				engine := pulumi.New(engineCfg.Engine.Binary.Path)
-				enum, err := engine.EnumerateStacks(context.Background(), root)
+				engine := engines[0]
+				enum, err := engine.EnumerateStacks(cmd.Context(), root)
 				if err != nil {
-					return fmt.Errorf("enumerate stacks (is pulumi installed and the project valid?): %w", err)
+					return fmt.Errorf("enumerate stacks (is %s installed and the project valid?): %w", engine.Name(), err)
 				}
 				decls := make([]discovery.Declaration, 0, len(engineCfg.Engine.Stacks))
 				for _, s := range engineCfg.Engine.Stacks {
@@ -110,8 +108,15 @@ func newLintCmd() *cobra.Command {
 // at evaluation time). Same candidate paths as the VCS adapter's
 // FetchCodeowners.
 func lintCodeownersEmails(root string) {
+	// Scoped to the repo root: CODEOWNERS is read from the PR HEAD, where it
+	// could be a symlink out of the tree.
+	repo, err := os.OpenRoot(root)
+	if err != nil {
+		return
+	}
+	defer repo.Close()
 	for _, rel := range []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"} {
-		f, err := os.Open(filepath.Join(root, rel))
+		f, err := repo.Open(rel)
 		if err != nil {
 			continue
 		}

@@ -19,7 +19,10 @@ type Store interface {
 	PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch string) (*Metadata, error)
 	// Delete removes an object. Missing is not an error.
 	Delete(ctx context.Context, key string) error
-	// List returns keys under a prefix. Non-recursive delimiter is "/".
+	// List returns EVERY key under the prefix, recursively - there is no
+	// "/" delimiter grouping. All adapters and consumers (drift state
+	// walks, lock reaping, pending-event scans) rely on the full flat
+	// enumeration.
 	List(ctx context.Context, prefix string) ([]string, error)
 }
 

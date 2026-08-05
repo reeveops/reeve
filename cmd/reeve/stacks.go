@@ -1,16 +1,16 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 
-	"github.com/thefynx/reeve/internal/config"
-	"github.com/thefynx/reeve/internal/core/discovery"
-	"github.com/thefynx/reeve/internal/iac/pulumi"
+	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/iac"
 )
 
 func newStacksCmd() *cobra.Command {
@@ -26,10 +26,14 @@ func newStacksCmd() *cobra.Command {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			// Phase 1: only pulumi engine.
+			// Validate guarantees exactly one engine config (multi-engine
+			// routing is a later phase).
 			var engineCfg = cfg.Engines[0]
-			e := pulumi.New(engineCfg.Engine.Binary.Path)
-			enum, err := e.EnumerateStacks(context.Background(), root)
+			e, err := iac.New(engineCfg.Engine)
+			if err != nil {
+				return err
+			}
+			enum, err := e.EnumerateStacks(cmd.Context(), root)
 			if err != nil {
 				return err
 			}
@@ -62,7 +66,7 @@ func newStacksCmd() *cobra.Command {
 		Short: "Walk the repo and suggest pattern entries for engine config",
 		RunE:  stacksDiscover,
 	}
-	discover.Flags().String("engine", "pulumi", "Engine (pulumi | terraform | opentofu)")
+	discover.Flags().String("engine", "pulumi", "Engine (pulumi | terraform | tofu)")
 	discover.Flags().Bool("write", false, "Rewrite the engine config's stacks: block (keeps a *.bak)")
 	discover.Flags().Bool("diff", false, "Print the unified diff that --write would produce")
 	cmd.AddCommand(discover)
@@ -79,24 +83,23 @@ func stacksDiscover(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	// Enumerate using the requested engine. Phase 1: pulumi only.
-	if engineType != "pulumi" {
-		return fmt.Errorf("stacks discover: engine %q not supported yet (pulumi only in v1)", engineType)
-	}
-	bin := "pulumi"
+	// Enumerate using the requested engine, resolved via the registry - an
+	// engine type no compiled-in engine registered fails here.
+	body := schemas.EngineBody{Type: engineType}
 	var enginePath string
-	for _, e := range cfg.Engines {
-		if e.Engine.Type == engineType {
-			if e.Engine.Binary.Path != "" {
-				bin = e.Engine.Binary.Path
-			}
+	for _, ec := range cfg.Engines {
+		if ec.Engine.Type == engineType {
+			body = ec.Engine
 			// Locate the engine config file path - it's whichever .reeve/*.yaml
 			// carries this config_type + engine.type. Simpler: fixed by convention.
 			enginePath = filepath.Join(root, ".reeve", engineType+".yaml")
 		}
 	}
-	e := pulumi.New(bin)
-	enum, err := e.EnumerateStacks(context.Background(), root)
+	e, err := iac.New(body)
+	if err != nil {
+		return fmt.Errorf("stacks discover: %w", err)
+	}
+	enum, err := e.EnumerateStacks(cmd.Context(), root)
 	if err != nil {
 		return err
 	}

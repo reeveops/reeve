@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thefynx/reeve/internal/blob/filesystem"
+	"github.com/FynxLabs/reeve/internal/blob/filesystem"
 )
 
 func TestStoredReport(t *testing.T) {

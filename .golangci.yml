@@ -26,6 +26,12 @@ linters:
       exclude-functions:
       - (io.Closer).Close
       - (*os.File).Close
+      # Same rationale as *os.File: closing a root releases a directory
+      # descriptor. It flushes nothing, so the error is never actionable -
+      # write durability comes from the file write plus Sync, which IS
+      # checked. Needed explicitly because *os.Root is not statically an
+      # io.Closer at the call sites.
+      - (*os.Root).Close
       - fmt.Fprint
       - fmt.Fprintf
       - fmt.Fprintln
@@ -43,7 +49,7 @@ linters:
           - "**/internal/core/**/*.go"
           allow:
           - $gostd
-          - github.com/thefynx/reeve/internal/core
+          - github.com/FynxLabs/reeve/internal/core
           deny:
           - pkg: github.com/aws
             desc: "internal/core must be pure - move adapter code out of core/"

@@ -47,12 +47,18 @@ Per-stack sections always skip no-ops regardless of view.
 
 ## Apply timeline
 
-Each apply run owns one comment, pinned by per-run marker
-(`<!-- reeve:apply-timeline:<run-id> -->`). Events append in order, editing the
-comment in place:
+Each commit owns one comment, pinned by a per-commit marker
+(`<!-- reeve:apply-timeline:<short-sha> -->`). Every run of that commit - the
+first apply, a retry, a `--force` re-apply - appends to the same thread and
+edits the comment in place rather than posting a new one. Entries are persisted
+per commit (compare-and-swap) so concurrent runs never lose each other's
+history, and the header shows the latest run to touch the commit. Because
+editing a comment is silent while creating one fires an `issue_comment` webhook,
+consolidating per commit also stops reeve from spawning a fresh (self-trigger
+guard-skipped) workflow run for every progress update.
 
 ```
-### 🚀 reeve · apply · run #N · [commit <sha>] · [View run](<url>)
+### 🚀 reeve · apply · [run #N](<url>) · [commit <sha>]
 - 🚀 **apply starting**
 - ✅ **applied**: 2 stack(s): api/prod, worker/prod
 ```

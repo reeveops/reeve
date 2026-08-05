@@ -20,24 +20,63 @@ type Rule struct {
 	Owners  []string // handles as written, with leading @
 }
 
-// Parse returns rules in file order. Comments and blank lines are skipped.
+// Parse returns rules in file order. Comment lines, inline comments
+// (an unescaped `#` ends the entry), and blank lines are skipped.
 // Pattern-only lines (no owners) are kept: GitHub uses them to un-own paths
 // matched by earlier rules.
 func Parse(r io.Reader) []Rule {
 	var rules []Rule
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		fields := splitLine(sc.Text())
+		if len(fields) == 0 {
 			continue
 		}
-		fields := strings.Fields(line)
 		rules = append(rules, Rule{
 			Pattern: fields[0],
 			Owners:  fields[1:],
 		})
 	}
 	return rules
+}
+
+// splitLine tokenizes one CODEOWNERS line per GitHub's format:
+//   - tokens are separated by runs of spaces/tabs (leading/trailing
+//     whitespace ignored);
+//   - a backslash escapes a following space, tab, or `#`, so paths with
+//     spaces (`docs/getting\ started.md @team`) stay one token;
+//   - any other backslash sequence (e.g. `\*` escaping a glob
+//     metacharacter) passes through unchanged for the glob matcher;
+//   - an unescaped `#` starts a comment that runs to end of line, whether
+//     the line starts with it or it follows an entry.
+//
+// An empty result means the line holds no entry (blank or comment-only).
+func splitLine(line string) []string {
+	var fields []string
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() > 0 {
+			fields = append(fields, cur.String())
+			cur.Reset()
+		}
+	}
+	rs := []rune(line)
+	for i := 0; i < len(rs); i++ {
+		switch r := rs[i]; {
+		case r == '\\' && i+1 < len(rs) && (rs[i+1] == ' ' || rs[i+1] == '\t' || rs[i+1] == '#'):
+			cur.WriteRune(rs[i+1])
+			i++
+		case r == '#': // inline comment: entry ends here
+			flush()
+			return fields
+		case r == ' ' || r == '\t':
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return fields
 }
 
 // Resolve returns path → owners for every changed file that is owned.

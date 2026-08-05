@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/thefynx/reeve/internal/core/summary"
+	"github.com/FynxLabs/reeve/internal/core/summary"
 )
 
 // previewJSON is the subset of `pulumi preview --json` output we consume.

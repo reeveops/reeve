@@ -67,4 +67,4 @@ the box; config file overrides.
 ## Annotation emitters
 
 Thin HTTP-POST layer for Grafana, Datadog, Dash0, generic webhook.
-Per-sink event-type filter. Complements OTEL; doesn't replace it.
+Per-channel event-type filter. Complements OTEL; doesn't replace it.

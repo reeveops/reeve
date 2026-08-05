@@ -18,7 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
-	"github.com/thefynx/reeve/internal/auth"
+	"github.com/FynxLabs/reeve/internal/auth"
 )
 
 // AWSSecretsManager pulls a secret and exposes it via env vars.
@@ -46,7 +46,10 @@ func (p *AWSSecretsManager) Acquire(ctx context.Context) (*auth.Credential, erro
 		return nil, err
 	}
 	value := aws.ToString(out.SecretString)
-	env := applyEnvMap(p.EnvMap, value)
+	env, err := applyEnvMap(p.EnvMap, value)
+	if err != nil {
+		return nil, fmt.Errorf("aws_secrets_manager %q: %w", p.SecretID, err)
+	}
 	ttl := p.TTL
 	if ttl == 0 {
 		ttl = time.Hour
@@ -81,7 +84,10 @@ func (p *AWSSSMParameter) Acquire(ctx context.Context) (*auth.Credential, error)
 		return nil, err
 	}
 	val := aws.ToString(out.Parameter.Value)
-	env := applyEnvMap(p.EnvMap, val)
+	env, err := applyEnvMap(p.EnvMap, val)
+	if err != nil {
+		return nil, fmt.Errorf("aws_ssm_parameter %q: %w", p.Parameter, err)
+	}
 	return &auth.Credential{Env: env, Kind: "aws-ssm", Source: p.Name, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
@@ -101,51 +107,71 @@ func (p *GitHubSecret) Acquire(ctx context.Context) (*auth.Credential, error) {
 	if val == "" {
 		return nil, fmt.Errorf("github_secret: env var %s is empty", p.EnvVar)
 	}
-	env := applyEnvMap(p.EnvMap, val)
+	env, err := applyEnvMap(p.EnvMap, val)
+	if err != nil {
+		return nil, fmt.Errorf("github_secret %s: %w", p.EnvVar, err)
+	}
 	return &auth.Credential{Env: env, Kind: "github-secret", Source: p.Name}, nil
 }
 
-// applyEnvMap maps `{envKey: jsonField}` to env. If field is "", the
-// whole value is the env value. If field starts with "$.", it's a
-// JSON pointer into the secret string (parsed lazily).
-func applyEnvMap(m map[string]string, value string) map[string]string {
+// applyEnvMap maps `{envKey: secretField}` to env vars. FAIL CLOSED:
+//
+//   - field "" exports the whole secret value, but ONLY when the secret is
+//     a plain string. A JSON-object secret (a credential bundle) is never
+//     exported wholesale - name the field instead.
+//   - a named field must exist as a string in the JSON secret; a missing
+//     or non-string field is a hard error naming the field, never a
+//     silent fallback to the whole bundle.
+//
+// Error messages never include the secret value itself.
+func applyEnvMap(m map[string]string, value string) (map[string]string, error) {
 	if len(m) == 0 {
-		return map[string]string{}
+		// Lint rejects secret providers without env_map; at runtime an
+		// empty map simply exports nothing.
+		return map[string]string{}, nil
 	}
 	out := make(map[string]string, len(m))
 	for envKey, field := range m {
 		if field == "" {
+			if isJSONObject(value) {
+				return nil, fmt.Errorf("env_map %s: secret is a JSON object; whole-secret export (empty field value) is only allowed for plain-string secrets - name the field to export instead", envKey)
+			}
 			out[envKey] = value
 			continue
 		}
-		// Simple dotted-path: "api_key" in a JSON object.
-		if extracted, ok := extractJSONField(value, field); ok {
-			out[envKey] = extracted
-		} else {
-			out[envKey] = value
+		extracted, err := extractJSONField(value, field)
+		if err != nil {
+			return nil, fmt.Errorf("env_map %s: %w", envKey, err)
 		}
+		out[envKey] = extracted
 	}
-	return out
+	return out, nil
 }
 
-// extractJSONField pulls a string field out of a top-level JSON object. A
-// previous implementation hand-rolled the scan and mishandled escaped
-// quotes / unicode / nested values; using encoding/json is both safer and
-// shorter.
-func extractJSONField(raw, field string) (string, bool) {
+// isJSONObject reports whether raw parses as a top-level JSON object
+// (i.e. a credential bundle rather than a plain-string secret).
+func isJSONObject(raw string) bool {
+	var obj map[string]any
+	return json.Unmarshal([]byte(raw), &obj) == nil
+}
+
+// extractJSONField pulls a string field out of a top-level JSON object,
+// failing closed (with the field name, never the secret value) when the
+// secret is not a JSON object, the field is absent, or it is not a string.
+func extractJSONField(raw, field string) (string, error) {
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
-		return "", false
+		return "", fmt.Errorf("secret is not a JSON object; cannot extract field %q", field)
 	}
 	v, ok := obj[field]
 	if !ok {
-		return "", false
+		return "", fmt.Errorf("field %q not found in secret", field)
 	}
 	s, ok := v.(string)
 	if !ok {
-		return "", false
+		return "", fmt.Errorf("field %q in secret is not a string", field)
 	}
-	return s, true
+	return s, nil
 }
 
 // compile-time checks

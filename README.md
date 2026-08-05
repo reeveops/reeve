@@ -4,8 +4,9 @@
 
 # reeve
 
-**PR-native, self-hosted GitOps orchestrator for Pulumi.** No control plane,
-no vendor backend, no telemetry, no account - you own everything.
+**PR-native, self-hosted GitOps orchestrator for Pulumi, Terraform, and
+OpenTofu.** No control plane, no vendor backend, no telemetry, no account -
+you own everything.
 
 > Named after the medieval reeve: an official empowered to enforce rules and
 > manage an estate on behalf of those who own it. A tool whose entire job is
@@ -18,12 +19,14 @@ no vendor backend, no telemetry, no account - you own everything.
 
 `reeve` is a single Go binary you drop into your CI. On a PR it:
 
-1. Runs `pulumi preview` for every stack touched by the changed files.
+1. Runs the engine's preview (`pulumi preview` / `terraform plan`) for
+   every stack touched by the changed files.
 2. Posts a single PR comment with per-stack change counts and a collapsible
    plan - edited in place on every push.
 3. Gates `/reeve apply` behind approvals, CODEOWNERS, required checks,
    up-to-date base, preview freshness, policy hooks, per-stack FIFO locks,
-   and freeze windows.
+   and freeze windows — with an opt-in, justification-gated, loudly-audited
+   [break-glass](docs/break-glass.md) override for emergencies.
 4. Writes locks, run artifacts, and audit entries to **your** bucket (S3 /
    GCS / Azure Blob / R2 / local filesystem).
 5. Acquires **short-lived federated credentials** (AWS OIDC, GCP WIF, Azure
@@ -45,8 +48,18 @@ Every arrow leaves your trust boundary. `reeve` holds nothing.
 
 ## Status
 
-Pre-release. There is no published binary, no Homebrew tap, no GitHub
-Marketplace Action, and no container image yet. Run it from source:
+Alpha. [v0.2.0](https://github.com/FynxLabs/reeve/releases/latest) is the
+current release: per-platform tarballs (linux/darwin, amd64/arm64) with a
+sha256 `checksums.txt` whose cosign keyless signature ships alongside as
+`checksums.txt.bundle`. Per-push `<branch>-<sha>` prerelease builds (one per
+commit, cosign-signed) back the GitHub Action fast-path (see the pinning
+table below).
+The release pipeline also publishes a container image
+(`ghcr.io/fynxlabs/reeve`) and is wired to push a Homebrew cask to
+`FynxLabs/brew-tap`. Expect breaking config changes until 1.0 (`reeve
+migrate-config` covers renames).
+
+Or build from source:
 
 ```bash
 git clone https://github.com/FynxLabs/reeve
@@ -58,7 +71,16 @@ go build -o bin/reeve ./cmd/reeve
 
 ## Configure
 
-Create `.reeve/` in your repo:
+Scaffold `.reeve/` in your repo - `reeve init` discovers your Pulumi stacks
+or Terraform root modules, lets you pick the engine (pulumi / terraform /
+OpenTofu), and walks you through approvals, freeze windows, and
+notifications (use `--non-interactive` for a zero-prompt safe baseline):
+
+```bash
+reeve init
+```
+
+Or write the two files by hand:
 
 ```yaml
 # .reeve/shared.yaml
@@ -82,7 +104,7 @@ preconditions:
 version: 1
 config_type: engine
 engine:
-  type: pulumi
+  type: pulumi               # or terraform / tofu
   stacks:
     - pattern: "projects/*"
       stacks: [dev, staging, prod]
@@ -110,8 +132,8 @@ all of this only matters on a cache miss:
 
 | Pin                | Binary source                                                                                           |
 | ------------------ | ------------------------------------------------------------------------------------------------------- |
-| `@vX.Y.Z`          | Signed release tarball from that release, verified against its `checksums.txt`                          |
-| `@master` / `@next`| Rolling edge binary whose name embeds the exact source hash of the checked-out action source (unsigned) |
+| `@vX.Y.Z`          | Release tarball from that release, verified against its cosign-signed `checksums.txt`                   |
+| `@master` / `@next`| Newest per-push `<branch>-<sha>` prerelease binary, verified against its checksum and cosign signature (best-effort; set `REEVE_REQUIRE_SIGNATURE=1` to require it) |
 | anything else      | Built from source on the runner (SHA pins, feature branches, forks)                                     |
 
 Prebuilt paths save the ~30s+ Go toolchain setup + build on first runs. Any
@@ -123,15 +145,21 @@ the run never breaks because a binary wasn't available.
 | Event / Comment              | What it does                                                    |
 | ---------------------------- | --------------------------------------------------------------- |
 | PR opened / reopened / push  | `reeve run preview` runs automatically, posts plan comment      |
-| PR converted from draft      | `reeve run ready` runs automatically (if `auto_ready: true`)    |
+| PR converted from draft to ready | `reeve run ready` runs, notifying for approval if a plan has succeeded |
 | `/reeve preview` or `/reeve plan` | Re-runs plan for this PR                               |
 | `/reeve ready`               | Marks PR ready for approval, posts comment, notifies Slack      |
 | `/reeve apply` or `/reeve up` | Applies all planned stacks (subject to approval gates)         |
+| `/reeve apply --refresh`     | Reconciles state with live infrastructure, then applies. Turns plan locking off for that run |
+| `/reeve refresh [--dry-run] [--all]` | Reconciles state with live infrastructure. Changes no infrastructure — a "delete" means the resource was already gone and was dropped from state |
+| `/reeve breakglass "<justification>" apply` | Emergency apply: overrides approvals (and freeze unless disabled), never locks/checks; loudly audited. Requires `break_glass:` config |
 | `/reeve unlock [project/stack]` | Frees this PR's stack locks (all, or just one)               |
 | `/reeve help`                | Posts a comment listing available commands                      |
 
-Commands also work mention-style (`@reeve apply`); accepted prefixes are set
-by the `command-prefix` input (default `"/reeve,@reeve"`). Other
+Accepted comment prefixes are set by the `command-prefix` input (default
+`"/reeve"`). Mention style is no longer accepted by default —
+[github.com/reeve](https://github.com/reeve) belongs to a real person, and
+`@reeve apply` notified them every time. Add it back if you want it, but
+prefer a handle your org controls. Other
 `pull_request` actions (labels, assignees, edits) and all bot-authored
 comments are ignored, so reeve's own comments never re-trigger a run.
 Review approvals don't trigger runs unless you opt in with
@@ -166,8 +194,9 @@ mise run release-check # goreleaser config validation
 
 - [Getting started](docs/getting-started.md) - zero-to-PR-comment in 10 minutes
 - [Configuration reference](docs/configuration.md) - every config_type
+- [Break-glass apply](docs/break-glass.md) - emergency override: config, command, audit
 - [Auth providers](docs/auth.md) - OIDC/WIF/federated/secret managers
-- [Drift detection](docs/drift.md) - schedules, sinks, bootstrap modes
+- [Drift detection](docs/drift.md) - schedules, channels, bootstrap modes
 - [Policy hooks](docs/policy-hooks.md) - OPA, Conftest, CrossGuard, custom
 - [Self-hosting](docs/self-hosting.md) - bucket choice, GH App, scope
 - [Spec](openspec/specs/) - authoritative per-capability behavior
@@ -179,7 +208,7 @@ flowchart TB
   subgraph CI["CI Runner (GitHub Actions)"]
     subgraph Reeve["reeve (binary)"]
       Core["<b>Pure Core</b><br/>stack discovery · rule resolver · lock FSM<br/>precondition eval · comment render · redact"]
-      Core --> IaC["IaC<br/><i>Pulumi</i>"]
+      Core --> IaC["IaC<br/><i>Pulumi / Terraform / OpenTofu</i>"]
       Core --> VCS["VCS<br/><i>GitHub</i>"]
       Core --> Blob["Blob<br/><i>S3 / GCS / Azure</i>"]
       Core --> Notify["Notify<br/><i>Slack</i>"]
@@ -189,7 +218,7 @@ flowchart TB
     end
   end
 
-  IaC --> PulumiCLI(["pulumi CLI"])
+  IaC --> PulumiCLI(["pulumi / terraform / tofu CLI"])
   VCS --> GitHubAPI(["GitHub API"])
   Blob --> Bucket[("user's bucket")]
   Notify --> SlackAPI(["Slack API"])

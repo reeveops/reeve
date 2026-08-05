@@ -7,14 +7,18 @@ package locks
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/thefynx/reeve/internal/blob"
-	corelocks "github.com/thefynx/reeve/internal/core/locks"
+	"github.com/FynxLabs/reeve/internal/blob"
+	corelocks "github.com/FynxLabs/reeve/internal/core/locks"
 )
 
 // Store wraps a blob.Store with lock-specific key conventions.
@@ -24,11 +28,63 @@ type Store struct {
 	MaxRetries int
 	// Now is injectable for tests.
 	Now func() time.Time
+
+	// casOnce guards the one-time conditional-write probe (see ensureCAS).
+	casOnce sync.Once
+	casErr  error
 }
 
 // New returns a Store. MaxRetries defaults to 5.
 func New(s blob.Store) *Store {
 	return &Store{store: s, MaxRetries: 5, Now: time.Now}
+}
+
+// ErrConditionalWritesUnsupported means the backing bucket accepted a
+// conditional create for a key that already existed. Every lock guarantee
+// rests on the backend enforcing If-Match / If-None-Match; a backend that
+// ignores them (older MinIO, historical R2) turns locks into silent
+// no-ops, so we refuse to operate rather than pretend to lock.
+var ErrConditionalWritesUnsupported = errors.New(
+	"bucket does not enforce conditional writes (If-None-Match/If-Match); locks would be unsafe - use a backend with conditional-write support (real S3, current MinIO/R2, GCS, Azure Blob, or the filesystem store)")
+
+// ensureCAS probes, once per Store, that the backend actually enforces
+// conditional writes: create a probe object with If-None-Match:*, then
+// attempt a second conditional create of the same key, which MUST fail
+// with a precondition error. Some S3-compatibles accept the If-* headers
+// and silently ignore them - both writes succeed and every "lock" this
+// store hands out would be fiction. The probe object is deleted
+// best-effort; the verdict is cached for the life of the process.
+func (s *Store) ensureCAS(ctx context.Context) error {
+	s.casOnce.Do(func() {
+		var suffix [8]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			s.casErr = fmt.Errorf("conditional-write probe: %w", err)
+			return
+		}
+		key := "locks/.cas-probe/" + hex.EncodeToString(suffix[:])
+		defer func() {
+			// Best-effort cleanup; a leaked probe object is harmless (the
+			// random suffix keeps it out of every lock key's way and
+			// parseLockKey ignores non-.json keys).
+			_ = s.store.Delete(ctx, key)
+		}()
+		if _, err := s.store.PutIfMatch(ctx, key, strings.NewReader("probe"), ""); err != nil {
+			s.casErr = fmt.Errorf("conditional-write probe: initial create failed: %w", err)
+			return
+		}
+		_, err := s.store.PutIfMatch(ctx, key, strings.NewReader("probe2"), "")
+		switch {
+		case err == nil:
+			// Second create-if-absent of an existing key succeeded: the
+			// backend is not enforcing conditions. Fail loudly.
+			s.casErr = ErrConditionalWritesUnsupported
+		case errors.Is(err, blob.ErrPreconditionFailed):
+			s.casErr = nil // enforced, as required
+		default:
+			s.casErr = fmt.Errorf("conditional-write probe: %w", err)
+		}
+	})
+	return s.casErr
 }
 
 func (s *Store) key(project, stack string) string {
@@ -79,6 +135,56 @@ func (s *Store) Release(ctx context.Context, project, stack string, pr int, runI
 		return next, false, err
 	})
 	return l, err
+}
+
+// StartHeartbeat spawns a goroutine that refreshes holder's lease every
+// ttl/3 for as long as the work (an engine apply) runs, so an apply longer
+// than locking.ttl is never evicted by the reaper mid-flight. The refresh
+// reuses TryAcquire: same PR + same RunID is an idempotent lease extension.
+//
+// The heartbeat stops when ctx is cancelled or the returned stop func is
+// called (stop blocks until the goroutine has exited; it is safe to call
+// more than once). A refresh failure logs a warning and keeps trying -
+// repeated failures mean the CAS store is unhealthy, which must be loud but
+// must not kill a running apply.
+func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holder corelocks.Holder, ttl time.Duration) (stop func()) {
+	if s == nil || ttl <= 0 {
+		return func() {}
+	}
+	interval := ttl / 3
+	if interval <= 0 {
+		interval = time.Second
+	}
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_, ok, err := s.TryAcquire(ctx, project, stack, holder, ttl)
+				switch {
+				case err != nil && ctx.Err() == nil:
+					slog.Warn("lock heartbeat refresh failed - CAS store may be unhealthy",
+						"project", project, "stack", stack, "pr", holder.PR, "run_id", holder.RunID, "err", err)
+				case err == nil && !ok:
+					slog.Warn("lock heartbeat: no longer the holder - another party owns this lock",
+						"project", project, "stack", stack, "pr", holder.PR, "run_id", holder.RunID)
+				}
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
 }
 
 // ErrHolderActive is returned (force=false) when the PR holds the lock
@@ -198,6 +304,9 @@ func forcePromoteQueue(l corelocks.Lock, now time.Time, ttl time.Duration) corel
 		Actor:      next.Actor,
 		AcquiredAt: now.UTC().Format(time.RFC3339),
 		ExpiresAt:  now.Add(ttl).UTC().Format(time.RFC3339),
+		// Same provenance rule as corelocks.promoteNext: the queued run has
+		// already exited, so the reservation is adoptable by its PR.
+		Promoted: true,
 	}
 	return l
 }
@@ -271,6 +380,11 @@ func (s *Store) mutate(
 	ctx context.Context, project, stack string,
 	fn func(corelocks.Lock) (corelocks.Lock, bool, error),
 ) (corelocks.Lock, bool, error) {
+	// Every lock mutation rides PutIfMatch; refuse to mutate at all on a
+	// backend that does not enforce the precondition (probe runs once).
+	if err := s.ensureCAS(ctx); err != nil {
+		return corelocks.Lock{}, false, err
+	}
 	key := s.key(project, stack)
 	for attempt := 0; attempt <= s.MaxRetries; attempt++ {
 		cur, etag, err := s.Get(ctx, project, stack)

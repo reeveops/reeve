@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/thefynx/reeve/internal/core/redact"
+	"github.com/FynxLabs/reeve/internal/core/redact"
 )
 
 func TestRunPass(t *testing.T) {

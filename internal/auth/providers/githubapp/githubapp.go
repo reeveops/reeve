@@ -13,7 +13,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/thefynx/reeve/internal/auth"
+	"github.com/FynxLabs/reeve/internal/auth"
 )
 
 // Provider is a single github_app provider instance.
@@ -31,6 +31,10 @@ func New(name string, appID, installID int64, privateKeyPEM []byte) *Provider {
 func (p *Provider) Name() string { return p.name }
 func (p *Provider) Type() string { return "github_app" }
 
+// apiBase is a package var only so tests can point the exchange at an
+// httptest server; production behavior is unchanged.
+var apiBase = "https://api.github.com"
+
 // Acquire signs a JWT with the app's private key, then exchanges it at
 // /app/installations/{id}/access_tokens for an installation token.
 func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
@@ -39,7 +43,7 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 		return nil, fmt.Errorf("sign jwt: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", p.installationID)
+	url := fmt.Sprintf("%s/app/installations/%d/access_tokens", apiBase, p.installationID)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	req.Header.Set("Authorization", "Bearer "+signed)
 	req.Header.Set("Accept", "application/vnd.github+json")

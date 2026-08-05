@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thefynx/reeve/internal/blob"
+	"github.com/FynxLabs/reeve/internal/blob"
 )
 
 // Schema version lives in every entry. Bumping requires a migration.
@@ -28,11 +28,35 @@ type Entry struct {
 	Actor         string  `json:"actor"` // user login triggering the run
 	PR            int     `json:"pr,omitempty"`
 	CommitSHA     string  `json:"commit_sha,omitempty"`
-	Repo          string  `json:"repo,omitempty"` // "owner/name"
-	Outcome       string  `json:"outcome"`        // "success" | "failed" | "blocked"
+	Repo          string  `json:"repo,omitempty"`    // "owner/name"
+	RunURL        string  `json:"run_url,omitempty"` // CI run URL for this entry
+	Outcome       string  `json:"outcome"`           // "success" | "failed" | "blocked"
 	Stacks        []Stack `json:"stacks"`
 	// DurationMS is FinishedAt - StartedAt in milliseconds.
 	DurationMS int64 `json:"duration_ms"`
+	// BreakGlass is present only for emergency-override runs. The whole
+	// entry is already write-once (immutable); this block makes the
+	// override loud and self-describing.
+	BreakGlass *BreakGlass `json:"break_glass,omitempty"`
+}
+
+// BreakGlass records the emergency-override context of a run: who forced
+// it, why, which source authorized them, what was overridden, and whether
+// the authorizing config/CODEOWNERS was modified in the same PR (self-add
+// is allowed by design - this flag is the loud counterweight).
+type BreakGlass struct {
+	Justification string `json:"justification"`
+	// AuthorizedVia names the source that granted: internal_list |
+	// codeowners | anyone.
+	AuthorizedVia string `json:"authorized_via"`
+	// OverriddenGates lists gates that would have failed but were
+	// overridden (e.g. "approvals", "not_in_freeze").
+	OverriddenGates []string `json:"overridden_gates,omitempty"`
+	// AuthorizingConfigModified is true when the PR itself modified the
+	// break-glass config or a CODEOWNERS file.
+	AuthorizingConfigModified bool `json:"authorizing_config_modified"`
+	// AuthorizingPathsModified lists which authorizing paths were touched.
+	AuthorizingPathsModified []string `json:"authorizing_paths_modified,omitempty"`
 }
 
 // Stack is the per-stack record inside an entry. Counts only; no plan bodies.

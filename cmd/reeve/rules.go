@@ -6,9 +6,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/thefynx/reeve/internal/config"
-	"github.com/thefynx/reeve/internal/core/approvals"
-	"github.com/thefynx/reeve/internal/run"
+	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/FynxLabs/reeve/internal/core/approvals"
+	"github.com/FynxLabs/reeve/internal/run"
 )
 
 func newRulesCmd() *cobra.Command {

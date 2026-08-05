@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thefynx/reeve/internal/blob"
+	"github.com/FynxLabs/reeve/internal/blob"
 )
 
 // Outcome classifies a single drift-check result.
@@ -23,7 +23,7 @@ const (
 	OutcomeSkipped       Outcome = "skipped_fresh"
 )
 
-// Event is what sinks consume. Determined by comparing current outcome
+// Event is what channels consume. Determined by comparing current outcome
 // against prior state.
 type Event string
 
@@ -32,11 +32,17 @@ const (
 	EventDriftOngoing  Event = "drift_ongoing"
 	EventDriftResolved Event = "drift_resolved"
 	EventCheckFailed   Event = "check_failed"
-	EventNone          Event = "" // silent - no sink delivery
+	// EventCheckRecovered is the all-clear for EventCheckFailed: the first
+	// successful check (any outcome but error) after one or more failed
+	// checks. It is emitted ALONGSIDE the run's classification event (which
+	// may be none) - see NotifyPayloads - so stateful channels can resolve
+	// the incident/issue the failure opened.
+	EventCheckRecovered Event = "check_recovered"
+	EventNone           Event = "" // silent - no channel delivery
 )
 
-// KnownEventNames lists the event names a sink's `on:` list may subscribe
-// to. Used by lint and the sink factory to reject/flag typos instead of
+// KnownEventNames lists the event names a channel's `on:` list may subscribe
+// to. Used by lint and the channel factory to reject/flag typos instead of
 // silently dropping them.
 func KnownEventNames() []string {
 	return []string{
@@ -44,6 +50,7 @@ func KnownEventNames() []string {
 		string(EventDriftOngoing),
 		string(EventDriftResolved),
 		string(EventCheckFailed),
+		string(EventCheckRecovered),
 	}
 }
 
@@ -51,7 +58,7 @@ func KnownEventNames() []string {
 // unknown names (including the empty string).
 func ParseEventName(s string) (Event, bool) {
 	switch Event(s) {
-	case EventDriftDetected, EventDriftOngoing, EventDriftResolved, EventCheckFailed:
+	case EventDriftDetected, EventDriftOngoing, EventDriftResolved, EventCheckFailed, EventCheckRecovered:
 		return Event(s), true
 	}
 	return EventNone, false
@@ -68,6 +75,13 @@ type State struct {
 	Fingerprint      string    `json:"fingerprint,omitempty"`
 	// ConsecutiveErrors supports retry / backoff heuristics.
 	ConsecutiveErrors int `json:"consecutive_errors,omitempty"`
+	// LastNotifiedAt is when a drift alert for this stack last actually
+	// went out (drift_detected, or a renotify re-alert). Drives flap
+	// damping (behavior.renotify_after): a stack oscillating drifted/clean
+	// re-alerts only after the window elapses. Zero on state written by
+	// versions without damping - treated as "notified" so resolutions from
+	// legacy episodes still deliver.
+	LastNotifiedAt time.Time `json:"last_notified_at,omitempty"`
 }
 
 // Result is the current check output (passed into Classify).
@@ -91,6 +105,9 @@ func Classify(prev State, cur Result) (Event, State) {
 		OngoingSince:      prev.OngoingSince,
 		Fingerprint:       prev.Fingerprint,
 		ConsecutiveErrors: prev.ConsecutiveErrors,
+		// Carried across every transition (resolve included) - the flap
+		// damping window spans episodes by design.
+		LastNotifiedAt: prev.LastNotifiedAt,
 	}
 
 	switch cur.Outcome {
@@ -136,6 +153,54 @@ func Classify(prev State, cur Result) (Event, State) {
 
 	default:
 		return EventNone, next
+	}
+}
+
+// dampNotification applies flap damping to a classified event and returns
+// the event to dispatch to channels plus whether a drift alert actually goes
+// out now (the caller then stamps State.LastNotifiedAt).
+//
+// renotify == 0 (default) preserves the pre-damping behavior exactly: every
+// drift_detected notifies, drift_ongoing reaches only channels subscribed to
+// it, drift_resolved always notifies.
+//
+// renotify > 0 turns on damping:
+//   - drift_detected within renotify of the last alert is silenced - a stack
+//     oscillating drifted/clean re-alerts once per window, not every cycle.
+//     (This also covers fingerprint-change re-detections inside the window;
+//     the open incident already says the stack is drifted.)
+//   - drift_ongoing is silent until renotify elapses since the last alert,
+//     then re-fires AS drift_detected (so channels subscribed to detections
+//     re-trigger their incident) and restarts the window.
+//   - drift_resolved is delivered once per notified episode: if the episode
+//     being resolved never alerted (a damped flap), the recovery notice is
+//     suppressed too - channels never saw the detection, so there is nothing
+//     to resolve. Legacy state without LastNotifiedAt fails open (delivers).
+//
+// check_failed / check_recovered / none pass through untouched - damping is
+// strictly about drift alert noise.
+func dampNotification(prev State, ev Event, now time.Time, renotify time.Duration) (Event, bool) {
+	switch ev {
+	case EventDriftDetected:
+		if renotify > 0 && !prev.LastNotifiedAt.IsZero() && now.Sub(prev.LastNotifiedAt) < renotify {
+			return EventNone, false
+		}
+		return EventDriftDetected, true
+	case EventDriftOngoing:
+		if renotify <= 0 {
+			return EventDriftOngoing, false
+		}
+		if prev.LastNotifiedAt.IsZero() || now.Sub(prev.LastNotifiedAt) >= renotify {
+			return EventDriftDetected, true
+		}
+		return EventNone, false
+	case EventDriftResolved:
+		if prev.LastNotifiedAt.IsZero() || !prev.LastNotifiedAt.Before(prev.OngoingSince) {
+			return EventDriftResolved, false
+		}
+		return EventNone, false
+	default:
+		return ev, false
 	}
 }
 

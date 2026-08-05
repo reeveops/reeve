@@ -3,10 +3,12 @@ package filesystem
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/thefynx/reeve/internal/blob"
+	"github.com/FynxLabs/reeve/internal/blob"
 )
 
 func TestPutGet(t *testing.T) {
@@ -78,6 +80,39 @@ func TestPathEscapeRejected(t *testing.T) {
 	_, err := s.Put(ctx, "../escape", strings.NewReader("nope"))
 	if err == nil || !strings.Contains(err.Error(), "escapes root") {
 		t.Fatalf("expected path-escape rejection, got %v", err)
+	}
+}
+
+// TestSymlinkEscapeRejected covers the case the old string-based containment
+// check could not see: the key is lexically clean, but a directory under the
+// bucket is a symlink pointing outside it. The string check passed such a key
+// and the write landed wherever the link went; os.Root refuses to traverse it.
+func TestSymlinkEscapeRejected(t *testing.T) {
+	ctx := context.Background()
+	bucket := t.TempDir()
+	outside := t.TempDir()
+
+	if err := os.Symlink(outside, filepath.Join(bucket, "escape")); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	s, err := New(bucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Put(ctx, "escape/pwned.json", strings.NewReader("nope")); err == nil {
+		t.Error("Put through a symlinked directory must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "pwned.json")); err == nil {
+		t.Fatal("write escaped the bucket root")
+	}
+
+	// Reads must be refused for the same reason.
+	if err := os.WriteFile(filepath.Join(outside, "secret.json"), []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Get(ctx, "escape/secret.json"); err == nil {
+		t.Error("Get through a symlinked directory must be refused")
 	}
 }
 

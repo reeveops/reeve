@@ -12,6 +12,10 @@ type Auth struct {
 // ProviderYAML is a named provider declaration. The Type determines
 // which adapter is constructed; all other fields are type-specific and
 // parsed on demand by the adapter.
+//
+// Fields tagged `expand:"env"` are on the enumerated env-expansion
+// allow-list (docs/configuration.md#token-expansion); every other field
+// keeps `${env:...}` literal.
 type ProviderYAML struct {
 	Type string `yaml:"type"`
 
@@ -22,9 +26,9 @@ type ProviderYAML struct {
 	Region                   string `yaml:"region,omitempty"`
 	WorkloadIdentityProvider string `yaml:"workload_identity_provider,omitempty"`
 	ServiceAccount           string `yaml:"service_account,omitempty"`
-	TenantID                 string `yaml:"tenant_id,omitempty"`
-	ClientID                 string `yaml:"client_id,omitempty"`
-	SubscriptionID           string `yaml:"subscription_id,omitempty"`
+	TenantID                 string `yaml:"tenant_id,omitempty" expand:"env"`
+	ClientID                 string `yaml:"client_id,omitempty" expand:"env"`
+	SubscriptionID           string `yaml:"subscription_id,omitempty" expand:"env"`
 	AudienceOverride         string `yaml:"audience,omitempty"`
 
 	// Secret managers
@@ -35,12 +39,20 @@ type ProviderYAML struct {
 	VaultName  string `yaml:"vault_name,omitempty"` // azure_key_vault
 	SecretName string `yaml:"secret_name,omitempty"`
 
+	// EnvMap maps env var name → field inside the fetched secret and is
+	// REQUIRED for every secret-manager provider (lint errors without it:
+	// the provider exports nothing). An empty field value ("") exports the
+	// whole secret and is only valid when the secret is a plain string -
+	// never a JSON bundle. A named field missing from the secret is a hard
+	// error at acquire time (fail closed).
+	EnvMap map[string]string `yaml:"env_map,omitempty"`
+
 	TTL string `yaml:"ttl,omitempty"` // secret cache TTL
 
 	// GitHub App
-	AppID          any      `yaml:"app_id,omitempty"`          // int or string
-	InstallationID any      `yaml:"installation_id,omitempty"` // int or string
-	PrivateKey     string   `yaml:"private_key,omitempty"`
+	AppID          any      `yaml:"app_id,omitempty" expand:"env"`          // int or string
+	InstallationID any      `yaml:"installation_id,omitempty" expand:"env"` // int or string
+	PrivateKey     string   `yaml:"private_key,omitempty" expand:"env"`
 	Permissions    []string `yaml:"permissions,omitempty"`
 
 	// Vault

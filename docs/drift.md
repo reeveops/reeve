@@ -9,7 +9,12 @@ same bucket. Different trigger (scheduled), different urgency model
 
 A drift check asks: *"does the real infrastructure match the state the
 last apply wrote?"* For Pulumi, that's `preview --expect-no-changes` with
-`refresh` on first. Any non-zero change count on a stack means drift.
+`refresh` on first. For Terraform and OpenTofu, it's
+`plan -refresh-only -detailed-exitcode`: the refresh-only plan compares
+state against live infrastructure without writing state (the drifted
+resources come from the plan's `resource_drift`, so
+`refresh_before_check` needs no separate refresh step). Any non-zero
+change count on a stack means drift.
 
 reeve classifies each check into one of four events based on the prior
 state file:
@@ -20,10 +25,17 @@ state file:
 | `drift_ongoing` | Still drifted since the last run. **Silent by default.** |
 | `drift_resolved` | Was drifted, now clean |
 | `check_failed` | Run-level error (auth, network, engine crash) |
+| `check_recovered` | First successful check after a failed one — the all-clear for `check_failed` |
+
+`check_recovered` is emitted *alongside* the run's classification (it can
+accompany `drift_detected`, `drift_resolved`, or a silent no-change run),
+so stateful channels can resolve the incident/issue a `check_failed`
+opened. Subscribing to `check_failed` on the `pagerduty` or
+`github_issue` channel implicitly subscribes `check_recovered` too.
 
 **`drift_ongoing` is silent on purpose** - without the event lifecycle,
 alerting either spams every run or fires once and goes stale. The
-runner still updates state and emits OTEL metrics; only the sink
+runner still updates state and emits OTEL metrics; only the channel
 dispatch is suppressed.
 
 ## CLI
@@ -65,12 +77,35 @@ scope:
 behavior:
   refresh_before_check: true       # default for drift (off for PR preview)
   max_parallel_stacks: 8
-  timeout_per_stack: 15m
-  retry_on_transient_error: 2
+  timeout_per_stack: 15m           # wall-clock bound per stack attempt; unset = no bound
+  retry_on_transient_error: 2      # 0 (default) = no retries
 
-  # What "transient" means: network error, auth expiry. NOT engine crash,
-  # plan-parse error, or policy failure.
+  # timeout_per_stack caps a single stack's check attempt so one hung engine
+  # invocation can't stall the run. On overrun the engine process is cancelled
+  # and the stack is classified as a check error (check_failed) with the reason
+  # "stack check exceeded timeout_per_stack=15m"; the run continues with the
+  # other stacks. A timeout is a run error, NOT a transient - it is never
+  # retried, and because it bounds each attempt it also caps every retry.
 
+  # Flap damping (unset = off): after a drift alert goes out for a stack,
+  # further alerts stay silent until the drift resolves or this window
+  # elapses. See "Flap damping" below. Extended durations OK (24h, 3d, 1w).
+  renotify_after: 24h
+
+  # "Transient" = a network error reaching the engine or a cloud SDK, or
+  # expired credentials. A network error is retried up to this many times;
+  # expired credentials trigger a single rebind (re-resolve auth) + retry,
+  # bounded by the same budget. NOT retried: engine crash, plan-parse error,
+  # policy failure. A stack that succeeds on a retry is not an error; one
+  # that exhausts its retries classifies as `error` (fires `check_failed`).
+  # Context cancellation (Ctrl-C / SIGTERM) stops retrying immediately.
+
+  # Exit code control: when a condition below is true and occurred this
+  # run, `reeve drift run` exits nonzero (naming the condition) so CI can
+  # gate on it. All three default to false = always exit 0.
+  #   drift_detected -> any stack fired the drift_detected event
+  #   drift_ongoing  -> any stack fired the drift_ongoing event
+  #   run_error      -> any check failed (check_failed / outcome error)
   exit_on:
     drift_detected: false          # don't fail CI on drift - alert instead
     drift_ongoing: false
@@ -78,7 +113,7 @@ behavior:
 
   state_bootstrap:
     mode: require_manual           # baseline | alert_all | require_manual
-    baseline_max_age: 7d           # unset mode = alert_all on first run
+    baseline_max_age: 7d           # reserved — parsed but not yet enforced
 
 classification:
   ignore_properties:
@@ -87,13 +122,13 @@ classification:
   ignore_resources:
     - "urn:*:aws:autoscaling/group:*::*autoscaler-managed*"
   treat_as_drift:
-    orphaned_state: true           # state exists, resource gone
-    missing_state: true            # resource exists, no state tracks it
+    orphaned_state: true           # tracked in state, gone from the cloud
+    missing_state: true            # present in the cloud, untracked by state
 
 freshness:
   enabled: true
   window: 4h                       # skip stacks checked within 4h
-  respect_failures: true           # retry failed stacks even if fresh
+  respect_failures: true           # reserved — not yet enforced; failed stacks are always re-checked
 
 schedules:
   critical:
@@ -104,7 +139,7 @@ schedules:
   slow-movers:
     patterns: ["dev/*", "experiments/*"]
 
-sinks:
+channels:
   - type: slack
     channel: "#infra-drift"
     on: [drift_detected, check_failed]
@@ -129,6 +164,70 @@ sinks:
     headers:
       Content-Type: application/json
 ```
+
+## Flap damping (`behavior.renotify_after`)
+
+A stack that oscillates drifted → clean → drifted (an upstream job that
+periodically mutates and reverts something, an autoscaler fighting your
+config) fires a fresh `drift_detected` + `drift_resolved` pair every
+cycle. `behavior.renotify_after` bounds that noise. reeve tracks when a
+drift alert for each stack last actually went out
+(`last_notified_at` in the state file) and applies these rules:
+
+- **Unset (default):** no damping - every new detection notifies, every
+  resolution notifies. Exactly the behavior before this option existed.
+- **Set (e.g. `24h`, `3d`):**
+  - A new `drift_detected` within the window of the last alert is
+    **silenced** - the flap doesn't re-page anyone.
+  - Ongoing drift stays silent until the window elapses since the last
+    alert, then **re-alerts as `drift_detected`** (so channels
+    subscribed to detections re-trigger their incident) and restarts
+    the window.
+  - `drift_resolved` is delivered **once per notified episode**: if the
+    drift episode being resolved never alerted (it was a damped flap),
+    the recovery notice is suppressed too - channels never saw the
+    detection, so there is nothing to resolve.
+
+Damping affects **notification delivery only**. Classification events,
+the drift report, `exit_on` behavior, and OTEL metrics all still see
+every detection - a damped flap still fails CI when
+`exit_on.drift_detected: true`.
+
+`check_failed` / `check_recovered` are never damped.
+
+## Classification (drift-noise filtering)
+
+`classification:` filters the engine diff **before** a stack is classified,
+so recurring noise never fires an alert. It needs the structured per-resource
+diff the engine exposes (Pulumi `detailedDiff`, Terraform/OpenTofu
+`resource_drift`); an engine that only reports a summary is left untouched
+(the raw verdict stands).
+
+- **`ignore_properties`** — per resource type, a list of property-path globs
+  to ignore. Paths are dotted with array indices, matching the Pulumi
+  `detailedDiff` style (`tags.LastScanned`, `config.rules[3].expression`);
+  the Terraform adapter walks `before`/`after` into the same shape. If, after
+  removing ignored paths, an **update** has no property changes left, the
+  resource stops counting as drift. This only nullifies updates — a
+  create/delete/replace is a resource-level change regardless of which
+  properties differ.
+- **`ignore_resources`** — address/URN globs; matching resources are excluded
+  from drift entirely.
+- **`treat_as_drift`** — whether resources that are **orphaned** (tracked in
+  state but gone from the cloud) or **missing** (present in the cloud but not
+  tracked) count as drift. Both default to `true`; set one to `false` to drop
+  that category. Orphaned resources are detectable (a Pulumi `create` /
+  Terraform `delete` in the drift set). **`missing_state` is best-effort:**
+  neither a Pulumi `--expect-no-changes` preview nor a Terraform refresh-only
+  plan discovers resources they don't already manage, so today nothing is
+  categorized as missing and the flag has no effect — it is reserved for a
+  future out-of-band inventory source.
+
+Globs use `*` (any run of characters, including `:` and `/`) and `?`;
+`resource_type`, `ignore_resources`, and the property paths are all matched
+this way. A whole stack drifting to zero drift after filtering emits
+`drift_resolved` if it was previously drifted, exactly as a genuinely clean
+run would.
 
 ## Bootstrap modes
 
@@ -179,7 +278,7 @@ on:
 permissions:
   contents: read
   id-token: write                # OIDC federation
-  issues: write                  # for github_issue sink
+  issues: write                  # for github_issue channel
 
 jobs:
   critical:
@@ -269,18 +368,92 @@ in `drift.yaml`:
 
 ```yaml
 permanent_suppressions:
-  - stack: "prod/legacy-erp"
+  - stack: "prod/legacy-*"          # doublestar glob over project/stack
     reason: "Vendor-managed resources; tracked in TICKET-123"
+  - stack: "prod/frozen-vpc"
+    until: "2026-12-31T00:00:00Z"   # optional RFC3339 expiry; omit for permanent
+    reason: "Freeze window; re-enable alerts in Q1"
 ```
 
-These are listed in reports but never trigger events.
+A permanent suppression is the always-on, config-level twin of
+`reeve drift suppress add`. Unlike a time-bounded store suppression (which
+skips the check entirely), a permanently-suppressed stack is **still checked
+and its state still recorded** — so resolution is tracked and the stack shows
+up in `reeve drift status` — but its `drift_detected` / `drift_ongoing` /
+`drift_resolved` events are **not dispatched** to channels. It is listed in
+the report under a "suppressed" section with its reason.
 
-## Sinks
+`check_failed` is **never** suppressed: accepting drift on a stack must not
+also hide the drift checker itself breaking (auth, network, engine crash).
+`until` is an optional RFC3339 timestamp after which the suppression lapses;
+omit it for a permanent suppression. An unparseable `until` is treated as
+permanent (and logged) rather than silently dropping the suppression.
 
-Every sink declares which events it wants via `on:`. Valid names are
-`drift_detected`, `drift_ongoing`, `drift_resolved`, and `check_failed` -
-`reeve lint` rejects anything else, and a sink whose `on:` list is empty
-(or all-invalid at runtime) logs a warning because it will never fire.
+The store-based suppressions above (`reeve drift suppress add`) and these
+config-based `permanent_suppressions` are merged at run time; a stack matched
+by either is suppressed.
+
+## Channels
+
+Drift channels ride the shared notification-channel framework
+(`internal/notify`) — the same adapters that carry PR-flow notifications.
+Declare them under `channels:` in `drift.yaml` (below), or in
+`notifications.yaml` with drift events in `on:`; both feed the same
+dispatch. One channel implementation serves both producers — see
+[notifications.md](notifications.md) for the event list, delivery
+guarantees (concurrent dispatch, timeouts, retry with backoff), and how
+to add a destination.
+
+> **Renamed key:** drift.yaml's list was originally called `sinks:`.
+> That spelling no longer loads — reeve errors with a pointer at
+> `reeve migrate-config`, which renames it to `channels:` in place
+> (or just rename the key by hand).
+
+Every channel declares which events it wants via `on:`. The drift events are
+`drift_detected`, `drift_ongoing`, `drift_resolved`, `check_failed`, and
+`check_recovered` - an unknown name is a hard config error (load and
+`reeve lint` both reject it, listing the valid names), and a channel whose
+`on:` list is empty logs a warning because it will never fire.
+
+### Delivery durability
+
+The drift baseline advances *before* notifications go out, so a lost
+delivery could otherwise be lost forever (the next run would compare
+against the new baseline and stay silent). To close that window, every
+payload is persisted as an undelivered marker in the bucket
+(`drift/pending-events/<project>/<stack>/<event>.json`) before dispatch
+and cleared only after every subscribed channel delivered it. The next
+`reeve drift run` redelivers leftover markers ahead of its own events
+(a fresh event for the same stack+event supersedes a stale pending one).
+
+Delivery is therefore **at-least-once**: if one channel fails, the next
+run redelivers to *all* channels, including ones that already succeeded.
+PagerDuty (dedup keys) and github_issue (marker upserts) are idempotent;
+Slack/webhook may repeat a message — a duplicate beats a silently lost
+alert.
+
+### Grouping
+
+When a single run finds drift on many stacks, each drifted stack otherwise
+produces its own message per subscribed channel. Set `grouping:` on a channel
+to batch those into one message per group:
+
+| `grouping`        | Behavior                                                        |
+| ----------------- | --------------------------------------------------------------- |
+| `none` (default)  | One message per drifted stack (unset behaves the same).         |
+| `by_environment`  | One message per environment, listing that env's drifted stacks. |
+
+Grouping is a delivery-layer concern only: it never changes classification,
+state, `exit_on`, or which events fire - just how the resulting messages are
+batched. It applies to the drift alert lifecycle (`drift_detected`,
+`drift_ongoing`, `drift_resolved`). `check_failed` is **never** grouped - each
+is a distinct per-stack incident.
+
+Grouping is meaningful for `slack` and `webhook`, where a combined message
+cuts noise. It is a **no-op** for channels where per-stack tracking is the
+point: `github_issue` (an issue is a per-stack incident to fix and close) and
+`otel_annotation` (one metric/annotation per stack regardless). An unknown
+`grouping:` value is a hard config error.
 
 ### Slack
 
@@ -324,15 +497,38 @@ Payload shape:
 }
 ```
 
+With `grouping: by_environment`, a grouped POST replaces the top-level stack
+fields with the environment key and a `stacks` array:
+
+```json
+{
+  "event": "drift_detected",
+  "group": "prod",
+  "stacks": [
+    {"project": "api", "stack": "prod", "env": "prod", "outcome": "drift_detected",
+     "counts": {"add": 0, "change": 1, "delete": 0, "replace": 0}, "fingerprint": "a3f8e1...", "error": ""}
+  ],
+  "run_id": "drift-20260421T153000Z"
+}
+```
+
 Named presets for `incident_io` / `rootly` / `opsgenie` are deliberately
 **not** built in. Template the payload in your webhook receiver instead -
 that's where the transformation logic belongs.
 
 ### PagerDuty
 
-Events API v2 with automatic `trigger` / `resolve` action selection:
-`drift_detected` triggers, `drift_resolved` resolves. Dedup key is
-`reeve-drift-<project>/<stack>`.
+Events API v2 with automatic `trigger` / `resolve` action selection.
+Every stack gets two independent incident streams so a check failure
+never stomps a real drift incident (and vice versa):
+
+| Dedup key | Triggered by | Resolved by |
+|---|---|---|
+| `reeve-drift-<project>/<stack>` | `drift_detected`, `drift_ongoing` | `drift_resolved` |
+| `reeve-drift-check::<project>/<stack>` | `check_failed` | `check_recovered` |
+
+Subscribing to `check_failed` implicitly subscribes `check_recovered`, so
+check-failure incidents always resolve once the check heals.
 
 ```yaml
 - type: pagerduty
@@ -349,6 +545,12 @@ Events API v2 with automatic `trigger` / `resolve` action selection:
 One open issue per drifted stack, identified by a hidden marker
 (`<!-- reeve:drift:<project>/<stack> -->`). On re-runs, the issue body
 updates. On `drift_resolved`, the issue closes.
+
+Check failures get their own issue per stack (marker
+`<!-- reeve:drift-check:<project>/<stack> -->`, title
+`drift check failed: <project>/<stack>`), opened on `check_failed` and
+closed on `check_recovered` — they never overwrite the drift issue.
+Subscribing to `check_failed` implicitly subscribes `check_recovered`.
 
 ```yaml
 - type: github_issue
@@ -407,7 +609,7 @@ rather than inside reeve.
 ## Overlap with open PRs
 
 When drift is detected on a stack that has open PRs touching its paths,
-the report surfaces those PRs prominently. The raw sink payload
+the report surfaces those PRs prominently. The raw channel payload
 includes them too:
 
 ```json
@@ -419,6 +621,12 @@ includes them too:
 Long-lived IaC PRs over drifted stacks are compounding risk - the plan
 reviewers approved a week ago no longer matches reality. Incident
 tooling can use `overlapping_prs` to escalate.
+
+The scan runs once per drift run (all drifted paths in one pass over the
+open PRs, capped at 100 PRs). If some PRs could not be checked (a file
+listing failed, or the cap was hit), the run does **not** pretend "no
+overlap": the report and manifest carry a warning naming the PR numbers
+that could not be checked.
 
 ## Troubleshooting
 

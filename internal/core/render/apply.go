@@ -5,11 +5,27 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/thefynx/reeve/internal/core/summary"
+	"github.com/FynxLabs/reeve/internal/core/summary"
 )
 
 // ApplyMarker identifies reeve's apply-specific PR comment slot.
 const ApplyMarker = "<!-- reeve:apply:v1 -->"
+
+// BreakGlassMarker tags the break-glass section inside an apply comment so
+// tooling (and humans grepping the PR) can find emergency overrides.
+const BreakGlassMarker = "<!-- reeve:break-glass:v1 -->"
+
+// BreakGlassNote is the emergency-override context rendered LOUDLY at the
+// top of the apply comment. Present only for break-glass runs.
+type BreakGlassNote struct {
+	Actor         string
+	Justification string
+	AuthorizedVia string   // matched authorization source
+	Overridden    []string // gates overridden (e.g. approvals, not_in_freeze)
+	// ConfigModifiedInPR flags that the authorizing config/CODEOWNERS was
+	// modified in this same PR (self-add is by design, but loud).
+	ConfigModifiedInPR bool
+}
 
 // Apply-run progress is now reported via the accumulating timeline comment
 // (see timeline.go / run.applyTimeline) rather than a one-shot "starting"
@@ -25,6 +41,9 @@ type ApplyInput struct {
 	SortMode    string
 	Style       string
 	StackView   string // "all" (default) lists every stack; "changed" hides no-ops
+	// BreakGlass, when non-nil, renders the loud emergency-override
+	// section at the top of the comment.
+	BreakGlass *BreakGlassNote
 }
 
 // Apply renders the apply comment markdown. If the body would exceed
@@ -63,7 +82,14 @@ func renderApply(in ApplyInput, opts renderOpts) string {
 	b.WriteString("\n")
 
 	icon := overallIcon(in.Stacks)
-	fmt.Fprintf(&b, "## %s reeve · apply · run #%d · [commit %s]\n\n", icon, in.RunNumber, shortSHA(in.CommitSHA))
+	if in.BreakGlass != nil {
+		icon = "🚨"
+	}
+	fmt.Fprintf(&b, "## %s reeve · apply · %s · [commit %s]\n\n", icon, runRef(in.RunNumber, in.CIRunURL), shortSHA(in.CommitSHA))
+
+	if in.BreakGlass != nil {
+		b.WriteString(renderBreakGlassNote(*in.BreakGlass))
+	}
 
 	n := len(in.Stacks)
 	noun := "stacks"
@@ -74,11 +100,7 @@ func renderApply(in ApplyInput, opts renderOpts) string {
 	if in.DurationSec > 0 {
 		durBit = fmt.Sprintf(" · ⏱ %ds", in.DurationSec)
 	}
-	runBit := ""
-	if in.CIRunURL != "" {
-		runBit = fmt.Sprintf(" · [View run](%s)", in.CIRunURL)
-	}
-	fmt.Fprintf(&b, "**%d %s applied**%s%s\n\n", n, noun, durBit, runBit)
+	fmt.Fprintf(&b, "**%d %s applied**%s\n\n", n, noun, durBit)
 
 	if opts.truncationNote != "" {
 		fmt.Fprintf(&b, "> ⚠️ %s\n\n", opts.truncationNote)
@@ -139,6 +161,38 @@ func renderApply(in ApplyInput, opts renderOpts) string {
 		}
 	}
 
+	return b.String()
+}
+
+// renderBreakGlassNote emits the loud override section: its own marker, a
+// GitHub warning admonition, the actor/source/overridden-gates line, the
+// same-PR-config flag when set, and the justification as a quote.
+func renderBreakGlassNote(n BreakGlassNote) string {
+	var b strings.Builder
+	b.WriteString(BreakGlassMarker + "\n")
+	b.WriteString("> [!WARNING]\n")
+	b.WriteString("> ### 🚨 BREAK-GLASS APPLY — emergency override\n")
+	b.WriteString("> This run was forced past reeve's normal gates. Review it after the fire is out.\n")
+	b.WriteString(">\n")
+	fmt.Fprintf(&b, "> **Actor:** @%s · **Authorized via:** `%s`", strings.TrimPrefix(n.Actor, "@"), n.AuthorizedVia)
+	if len(n.Overridden) > 0 {
+		gates := make([]string, 0, len(n.Overridden))
+		for _, g := range n.Overridden {
+			gates = append(gates, "`"+g+"`")
+		}
+		fmt.Fprintf(&b, " · **Overridden gates:** %s", strings.Join(gates, ", "))
+	} else {
+		b.WriteString(" · **Overridden gates:** none (all gates would have passed)")
+	}
+	b.WriteString("\n")
+	if n.ConfigModifiedInPR {
+		b.WriteString(">\n> ⚠️ **The break-glass config or CODEOWNERS was modified in this same PR.** Authorization is head-resolved by design — verify the change was legitimate.\n")
+	}
+	b.WriteString(">\n> **Justification:**\n")
+	for _, line := range strings.Split(strings.TrimSpace(n.Justification), "\n") {
+		fmt.Fprintf(&b, "> > %s\n", line)
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 

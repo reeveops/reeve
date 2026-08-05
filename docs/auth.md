@@ -87,7 +87,7 @@ providers:
   aws-prod:
     type: aws_oidc
     role_arn: arn:aws:iam::111111111111:role/reeve-prod
-    session_name: reeve-${context:pr_number}   # default: "reeve"
+    session_name: reeve-prod                    # default: "reeve"; sent verbatim as the STS RoleSessionName
     duration: 1h                                # default 1h; lint warns >4h
     region: us-east-1
     audience: sts.amazonaws.com                 # default; override for custom audiences
@@ -193,7 +193,7 @@ providers:
 
    ```text
    Issuer:    https://token.actions.githubusercontent.com
-   Subject:   repo:myorg/myrepo:ref:refs/heads/main
+   Subject:   repo:myorg/myrepo:ref:refs/heads/master
    Audience:  api://AzureADTokenExchange
    ```
 
@@ -236,7 +236,32 @@ is fine.
 ## Secret managers
 
 All secret-manager providers use a parent auth provider for the API call
-and map the returned value into env vars for the engine.
+and map the returned value into env vars for the engine via `env_map`.
+
+### `env_map` (required)
+
+`env_map` maps **env var name → field inside the fetched secret** and is
+required on every secret-manager provider — without it the provider would
+fetch the secret and export nothing, so `reeve lint` rejects the config.
+
+```yaml
+env_map:
+  CLOUDFLARE_API_TOKEN: ""          # "" = whole secret (plain-string secrets only)
+  DATADOG_API_KEY: api_key          # extract "api_key" from a JSON secret
+```
+
+Semantics (fail closed):
+
+- An empty field value (`""`) exports the **whole secret**, and is only
+  valid when the secret is a plain string. If the secret is a JSON
+  object (a credential bundle), reeve refuses with a hard error — name
+  the field instead. The whole bundle is never exported implicitly.
+- A named field must exist as a string in the JSON secret. A missing or
+  non-string field is a hard error naming the field — never a silent
+  fallback to the whole secret.
+- Every exported value is registered with the central redactor, so a
+  secret that leaks into engine output is scrubbed from logs and PR
+  comments.
 
 ### AWS Secrets Manager
 
@@ -253,7 +278,8 @@ providers:
     secret_id: reeve/cloudflare/api-token
     region: us-east-1
     ttl: 1h
-    # env_map: { CLOUDFLARE_API_TOKEN: "" }   # "" = whole secret value
+    env_map:
+      CLOUDFLARE_API_TOKEN: ""      # "" = whole (plain-string) secret value
 ```
 
 The underlying IAM role (`aws-prod`) needs
@@ -268,6 +294,8 @@ providers:
     source: aws-prod
     parameter: /reeve/datadog/api-key
     region: us-east-1
+    env_map:
+      DATADOG_API_KEY: ""
 ```
 
 ### GCP Secret Manager
@@ -280,6 +308,8 @@ providers:
   stripe-key:
     type: gcp_secret_manager
     name: projects/PROJECT_ID/secrets/stripe-api-key/versions/latest
+    env_map:
+      STRIPE_API_KEY: ""
 ```
 
 ### Azure Key Vault
@@ -293,6 +323,8 @@ providers:
     type: azure_key_vault
     vault_name: mycompany-prod-kv
     secret_name: sendgrid-api-key
+    env_map:
+      SENDGRID_API_KEY: ""
 ```
 
 ### GitHub secret (env-backed)
@@ -305,6 +337,8 @@ providers:
   custom-token:
     type: github_secret
     env_var: MY_CUSTOM_SECRET
+    env_map:
+      MY_TOOL_TOKEN: ""             # re-export under the name the engine expects
 ```
 
 In the workflow:

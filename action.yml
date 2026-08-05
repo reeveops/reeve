@@ -10,18 +10,17 @@ branding:
 #   2. Cache miss -> try a prebuilt binary:
 #        @vX.Y.Z       -> that release's tarball, verified against the
 #                         release's checksums.txt (signed release pipeline).
-#        @master/@next -> the rolling edge-<branch> prerelease asset whose
-#                         name embeds this exact source hash, so the binary
-#                         provably matches the checked-out action source
-#                         (unsigned; published by edge-build.yml).
+#        @master/@next -> the newest <branch>-<sha> per-push prerelease
+#                         (unsigned; one release per commit, published by
+#                         edge-build.yml).
 #   3. Any other ref (SHA pins, branches, forks), or any download/verify
 #      failure -> build from source (~30s on the first miss), as before.
 
 inputs:
   command:
     description: >-
-      reeve subcommand: "preview", "ready", "apply", "pr-help", "lint", "stacks", "drift run",
-      "locks list", etc. Omit to auto-detect from the GitHub event context.
+      reeve subcommand: "preview", "ready", "apply", "refresh", "pr-help", "lint", "stacks",
+      "drift run", "locks list", etc. Omit to auto-detect from the GitHub event context.
     required: false
     default: ""
   root:
@@ -63,10 +62,16 @@ inputs:
     description: >-
       Comma-separated list of comment prefixes accepted as reeve commands.
       The first word of a comment must exactly match one of these (spaces
-      around entries are trimmed). Default accepts both the slash style
-      ("/reeve apply") and the mention style ("@reeve apply").
+      around entries are trimmed).
+
+      The default is the slash style only. The mention style ("@reeve apply")
+      used to be a default and no longer is: github.com/reeve is a real
+      person's account, so every "@reeve ..." comment sent them a
+      notification for a command that had nothing to do with them. Add
+      "@reeve" back here if you want it, but prefer a handle your org
+      actually controls.
     required: false
-    default: "/reeve,@reeve"
+    default: "/reeve"
   run-on-approval:
     description: >-
       Set "true" to dispatch "run approved" when a pull_request_review is
@@ -97,13 +102,14 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
-        # Shared with edge-build.yml so the cache key / edge-asset hash can
-        # never drift from the hash the edge builds were named with.
+        # Canonical source hash (see .github/scripts/source-hash.sh): keyed on
+        # content AND repo-relative path, so the same tree hashes identically
+        # wherever it is checked out. Used only as the binary cache key.
         echo "hash=$("$ACTION_PATH/.github/scripts/source-hash.sh" "$ACTION_PATH")" >> "$GITHUB_OUTPUT"
 
     - name: Restore reeve binary cache
       id: reeve-cache
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}/reeve-bin/reeve
         key: reeve-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
@@ -122,7 +128,6 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         REEVE_REF: ${{ github.action_ref }}
         REEVE_REPO: ${{ github.action_repository }}
-        REEVE_SRCHASH: ${{ steps.reeve-hash.outputs.hash }}
         REEVE_OS: ${{ runner.os }}
         REEVE_ARCH: ${{ runner.arch }}
         REEVE_DEST: ${{ runner.temp }}/reeve-bin/reeve
@@ -133,7 +138,7 @@ runs:
 
     - name: Set up Go (from reeve's go.mod)
       if: steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@v7
       with:
         go-version-file: ${{ github.action_path }}/go.mod
         cache-dependency-path: ${{ github.action_path }}/go.sum
@@ -160,7 +165,7 @@ runs:
       # refs/pull/<n>/head, so keying on issue.number made the job fail red.
       # issue.pull_request is present only when the issue is a PR.
       if: ${{ github.event.pull_request.number || github.event.issue.pull_request }}
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
         fetch-depth: 1
@@ -185,6 +190,11 @@ runs:
         SLACK_BOT_TOKEN: ${{ inputs.slack-token }}
         REEVE_BIN: ${{ runner.temp }}/reeve-bin/reeve
         REEVE_LOG_LEVEL: ${{ inputs.log-level }}
+        # Threaded to the reeve binary so the opt-in pr_comment approval source
+        # can re-enforce the SAME authorization gate this step applies to
+        # command dispatch when it reads historical `/reeve approve` comments.
+        REEVE_ALLOWED_ASSOCIATIONS: ${{ inputs.allowed-associations }}
+        REEVE_COMMAND_PREFIXES: ${{ inputs.command-prefix }}
       run: |
         set -euo pipefail
         ROOT="${{ inputs.root }}"
@@ -206,12 +216,31 @@ runs:
               exit 0
             fi
             REVIEW_STATE=$(jq -r .review.state < "$GITHUB_EVENT_PATH")
-            if [[ "$REVIEW_STATE" == "approved" ]]; then
-              CMD="approved"
-            else
+            if [[ "$REVIEW_STATE" != "approved" ]]; then
               echo "Review state '$REVIEW_STATE' - skipping."
               exit 0
             fi
+            # Authorization gate (mirrors the issue_comment branch): on a
+            # public repo ANY user can submit an approving review, and the
+            # dispatched "approved" run loads channel config from the untrusted
+            # PR HEAD. Require the reviewer's author_association to be in the
+            # allowlist before dispatching, so an unassociated approval can't
+            # start a run.
+            ASSOC=$(jq -r '.review.author_association // "NONE"' < "$GITHUB_EVENT_PATH")
+            AUTHORIZED=false
+            IFS=',' read -ra ALLOWED <<< "${{ inputs.allowed-associations }}"
+            for A in "${ALLOWED[@]}"; do
+              A=$(printf '%s' "$A" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+              if [[ -n "$A" && "$A" == "$ASSOC" ]]; then
+                AUTHORIZED=true
+                break
+              fi
+            done
+            if [[ "$AUTHORIZED" != true ]]; then
+              echo "Reviewer not authorized (association: $ASSOC) - skipping."
+              exit 0
+            fi
+            CMD="approved"
           elif [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             # Explicit trigger matrix: only code-changing actions run preview,
             # and ready_for_review runs ready. Everything else (labeled,
@@ -223,6 +252,23 @@ runs:
                 ;;
               ready_for_review)
                 CMD="ready"
+                ;;
+              closed)
+                # Merge-triggered apply (the merge-then-apply / continuous-
+                # delivery flow). Only a MERGED close dispatches; a plain
+                # close (PR abandoned) runs nothing. We always dispatch the
+                # apply with --trigger-source merge and let the binary decide:
+                # the binary is the source of truth for the mode and no-ops
+                # unless apply.trigger is "merge", so a merge event in a
+                # comment-mode repo can never force an apply.
+                MERGED=$(jq -r '.pull_request.merged // false' < "$GITHUB_EVENT_PATH")
+                if [[ "$MERGED" == "true" ]]; then
+                  CMD="apply"
+                  EXTRA="$EXTRA --trigger-source merge"
+                else
+                  echo "pull_request closed without merge - skipping."
+                  exit 0
+                fi
                 ;;
               *)
                 echo "pull_request action '$ACTION' does not trigger reeve - skipping."
@@ -246,7 +292,7 @@ runs:
             # "/reeve up*" prefix match did exactly that).
             read -r PREFIX VERB REST <<< "$(printf '%s' "$COMMENT_BODY" | head -n1)"
             # The first word must exactly match one of the configured
-            # command prefixes (default: "/reeve" and "@reeve").
+            # command prefixes (default: "/reeve").
             PREFIX_OK=false
             IFS=',' read -ra PREFIXES <<< "${{ inputs.command-prefix }}"
             for P in "${PREFIXES[@]}"; do
@@ -281,12 +327,52 @@ runs:
             case "$VERB" in
               apply|up)
                 CMD="apply"
+                # Comment-initiated apply. The binary rejects this (no-op) when
+                # apply.trigger is "merge", so exactly one initiation path
+                # applies per repo.
+                EXTRA="$EXTRA --trigger-source comment"
                 # Re-apply an already-applied commit: "--force" or "force" as a token.
                 if [[ " $REST " == *" --force "* || " $REST " == *" force "* ]]; then
                   EXTRA="$EXTRA --force"
                 fi
+                # Reconcile state with live infrastructure before applying.
+                # Only the explicit flag form: "refresh" as a bare word is
+                # ambiguous next to the /reeve refresh command.
+                if [[ " $REST " == *" --refresh "* ]]; then
+                  EXTRA="$EXTRA --refresh"
+                fi
+                ;;
+              refresh)
+                # State reconciliation, not a deploy: rewrites what the engine
+                # believes exists. Scoped to the PR's stacks unless --all.
+                CMD="refresh"
+                if [[ " $REST " == *" --dry-run "* || " $REST " == *" dry-run "* ]]; then
+                  EXTRA="$EXTRA --dry-run"
+                fi
+                if [[ " $REST " == *" --all "* || " $REST " == *" all "* ]]; then
+                  EXTRA="$EXTRA --all"
+                fi
                 ;;
               ready)         CMD="ready" ;;
+              approve)
+                # Opt-in pr_comment approval source. The comment itself IS the
+                # approval - the apply gate re-reads it at apply time (and
+                # re-checks author_association there). Dispatching "approved"
+                # here just refreshes the approved-state notification (Slack
+                # "ready to apply"), mirroring the pull_request_review path. It
+                # never applies. Unauthorized commenters were already rejected
+                # by the authorization gate above.
+                CMD="approved"
+                ;;
+              breakglass)
+                # /reeve breakglass "<justification>" apply — the CLI does the
+                # strict parse (and posts a helpful comment when malformed);
+                # the raw comment body travels via env, never shell-expanded.
+                CMD="apply"
+                EXTRA="$EXTRA --break-glass"
+                REEVE_BREAK_GLASS_COMMENT="$COMMENT_BODY"
+                export REEVE_BREAK_GLASS_COMMENT
+                ;;
               preview|plan)  CMD="preview" ;;
               unlock)
                 CMD="unlock"
@@ -328,7 +414,9 @@ runs:
             fi
             ;;
           approved|"run approved")
-            PR_NUMBER=$(jq -r '.pull_request.number' < "$GITHUB_EVENT_PATH")
+            # .pull_request.number on the review path; .issue.number on the
+            # issue_comment path (/reeve approve).
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
             "$REEVE_BIN" run approved --pr "$PR_NUMBER" $EXTRA
             ;;
           ready|"run ready")
@@ -338,6 +426,10 @@ runs:
           apply|"run apply")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
             "$REEVE_BIN" run apply --pr "$PR_NUMBER" $EXTRA
+            ;;
+          refresh|"run refresh")
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" $EXTRA
             ;;
           unlock)
             # PR-scoped lock cleanup: removes this PR from lock holders and

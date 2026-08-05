@@ -7,17 +7,15 @@
 # Ref semantics (github.action_ref):
 #   vX.Y.Z        -> that release's goreleaser tarball, verified against the
 #                    release's checksums.txt (signed release pipeline).
-#   master | next -> the rolling edge-<branch> prerelease asset whose name
-#                    embeds the source hash the action just computed. A name
-#                    match proves the binary was built from exactly the
-#                    checked-out action source; no match (edge build still
-#                    running, or an older build) falls back to source.
+#   master | next -> the newest <branch>-<sha> per-push prerelease published by
+#                    edge-build.yml; download its linux binary + checksum. No
+#                    matching prerelease yet (edge build still running) falls
+#                    back to source.
 #   anything else -> source build (SHA pins, feature branches, forks).
 #
 # Inputs (env):
 #   REEVE_REF      github.action_ref       (may be empty, e.g. local runs)
 #   REEVE_REPO     github.action_repository ("owner/repo"; empty on some runners)
-#   REEVE_SRCHASH  output of source-hash.sh over the action tree
 #   REEVE_OS       runner.os   (Linux, macOS, Windows)
 #   REEVE_ARCH     runner.arch (X64, ARM64, ...)
 #   REEVE_DEST     where to place the binary (the cached path)
@@ -65,9 +63,54 @@ verify_sha256() {
   fi
 }
 
+# verify_signature <checksums-file> <bundle-file>
+# Verifies the cosign keyless bundle over the checksums file. The checksum
+# already chains every artifact to this file, so signing it signs the set.
+# Default is best-effort: without cosign or a published bundle we proceed on
+# the checksum alone (so existing consumers are unaffected), but a bundle
+# that is PRESENT and fails to verify is always rejected. Set
+# REEVE_REQUIRE_SIGNATURE=1 to make a valid signature mandatory.
+verify_signature() {
+  local sums="$1" bundle="$2"
+  local require="${REEVE_REQUIRE_SIGNATURE:-}"
+  if ! command -v cosign > /dev/null 2>&1; then
+    if [[ "$require" == "1" ]]; then
+      echo "REEVE_REQUIRE_SIGNATURE=1 but cosign is not installed; cannot verify signature" >&2
+      return 1
+    fi
+    echo "cosign not installed; skipping signature check (checksum still enforced)" >&2
+    return 0
+  fi
+  if [[ ! -f "$bundle" ]]; then
+    if [[ "$require" == "1" ]]; then
+      echo "REEVE_REQUIRE_SIGNATURE=1 but this release published no signature bundle" >&2
+      return 1
+    fi
+    echo "no signature bundle for this release; skipping signature check" >&2
+    return 0
+  fi
+  # Keyless identity: any workflow in the source repo, GitHub's OIDC issuer.
+  local repo="${REEVE_REPO:-}" id_re
+  if [[ -n "$repo" ]]; then
+    id_re="^https://github.com/${repo}/\.github/workflows/.+@refs/(heads|tags)/.+$"
+  else
+    id_re="^https://github.com/.+/\.github/workflows/.+@refs/(heads|tags)/.+$"
+  fi
+  if cosign verify-blob \
+    --bundle "$bundle" \
+    --certificate-identity-regexp "$id_re" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    "$sums" > /dev/null 2>&1; then
+    echo "signature verified (cosign keyless)"
+    return 0
+  fi
+  echo "signature verification FAILED for $(basename "$sums")" >&2
+  return 1
+}
+
 fetch_main() {
   local out="${GITHUB_OUTPUT:-/dev/stdout}"
-  local ref="${REEVE_REF:-}" repo="${REEVE_REPO:-}" srchash="${REEVE_SRCHASH:-}"
+  local ref="${REEVE_REF:-}" repo="${REEVE_REPO:-}"
   local dest="${REEVE_DEST:?REEVE_DEST is required}"
   local arch kind workdir asset sums ok=false
 
@@ -112,31 +155,39 @@ fetch_main() {
       sums="checksums.txt"
       echo "Pinned release $ref: downloading $asset from $repo"
       if gh release download "$ref" --repo "$repo" \
-        --pattern "$asset" --pattern "$sums" --dir "$workdir"; then
+        --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" --dir "$workdir"; then
         ok=true
       else
         echo "download failed (missing release/asset, or network error)" >&2
       fi
       ;;
     edge)
-      if [[ -z "$srchash" ]]; then
-        fallback "source hash not available for edge lookup"
-        return 0
-      fi
-      asset="reeve_edge_linux_${arch}_${srchash}.tar.gz"
-      sums="checksums_${srchash}.txt"
-      echo "Edge ref '$ref': looking for source-hash-matched asset $asset on edge-$ref"
-      if gh release download "edge-$ref" --repo "$repo" \
-        --pattern "$asset" --pattern "$sums" --dir "$workdir"; then
-        ok=true
+      asset="reeve_linux_${arch}.tar.gz"
+      sums="checksums.txt"
+      # Resolve the newest <branch>-<sha> per-push prerelease. gh returns
+      # releases newest-first, so pick the first prerelease whose tag is
+      # prefixed with "<ref>-".
+      local tag
+      tag=$(gh api "repos/${repo}/releases?per_page=100" \
+        --jq "[.[] | select(.prerelease and (.tag_name | startswith(\"${ref}-\")))] | sort_by(.created_at) | reverse | .[0].tag_name" 2> /dev/null || true)
+      if [[ -z "$tag" || "$tag" == "null" ]]; then
+        echo "no ${ref}-* prerelease found (edge build may still be running)" >&2
       else
-        echo "no edge binary matching source hash $srchash (edge build may still be running)" >&2
+        echo "Edge ref '$ref': newest prerelease is $tag; downloading $asset from $repo"
+        if gh release download "$tag" --repo "$repo" \
+          --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" --dir "$workdir"; then
+          ok=true
+        else
+          echo "download failed for $tag (missing asset or network error)" >&2
+        fi
       fi
       ;;
   esac
 
   if [[ "$ok" == true ]]; then
     if ! verify_sha256 "$workdir/$asset" "$workdir/$sums"; then
+      ok=false
+    elif ! verify_signature "$workdir/$sums" "$workdir/${sums}.bundle"; then
       ok=false
     elif ! tar -xzf "$workdir/$asset" -C "$workdir" reeve; then
       echo "could not extract reeve from $asset" >&2

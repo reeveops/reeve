@@ -29,7 +29,7 @@ classification:
 freshness:
   enabled: true
   window: 4h
-  respect_failures: true
+  respect_failures: true           # reserved — not yet enforced; failed stacks are always re-checked
 
 schedules:
   critical:
@@ -40,7 +40,7 @@ schedules:
   slow-movers:
     patterns: ["dev/*", "experiments/*"]
 
-sinks:
+channels:
   - type: slack
     channel: "#infra-drift"
     on: [drift_detected, drift_resolved, check_failed]

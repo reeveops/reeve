@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/thefynx/reeve/internal/blob"
+	"github.com/FynxLabs/reeve/internal/blob"
 )
 
 // ErrNoRuns is returned by StoredReport when the bucket holds no drift

@@ -10,14 +10,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/thefynx/reeve/internal/auth"
-	"github.com/thefynx/reeve/internal/auth/providers/awsoidc"
-	"github.com/thefynx/reeve/internal/auth/providers/azurefed"
-	"github.com/thefynx/reeve/internal/auth/providers/gcpwif"
-	"github.com/thefynx/reeve/internal/auth/providers/githubapp"
-	"github.com/thefynx/reeve/internal/auth/providers/local"
-	"github.com/thefynx/reeve/internal/auth/providers/secrets"
-	"github.com/thefynx/reeve/internal/config/schemas"
+	"github.com/FynxLabs/reeve/internal/auth"
+	"github.com/FynxLabs/reeve/internal/auth/providers/awsoidc"
+	"github.com/FynxLabs/reeve/internal/auth/providers/azurefed"
+	"github.com/FynxLabs/reeve/internal/auth/providers/gcpwif"
+	"github.com/FynxLabs/reeve/internal/auth/providers/githubapp"
+	"github.com/FynxLabs/reeve/internal/auth/providers/local"
+	"github.com/FynxLabs/reeve/internal/auth/providers/secrets"
+	"github.com/FynxLabs/reeve/internal/config/schemas"
 )
 
 // Build returns a ready Registry for the given auth config. Each provider
@@ -56,10 +56,26 @@ func ValidateLint(cfg *schemas.Auth, stackRefs []string) error {
 				return fmt.Errorf("provider %q (env_passthrough): requires i_understand_this_is_dangerous: true", name)
 			}
 			fmt.Fprintf(os.Stderr, "⚠️  provider %q is env_passthrough - long-lived credentials bypass zero-trust\n", name)
+		case "aws_secrets_manager", "aws_ssm_parameter", "gcp_secret_manager", "azure_key_vault", "github_secret":
+			// A secret provider without env_map fetches the secret and
+			// exports nothing - dead config at best, a silent no-op at
+			// worst. Require the mapping.
+			if len(decl.EnvMap) == 0 {
+				return fmt.Errorf("provider %q (%s): env_map is required - without it the provider exports nothing (map env var names to secret fields, e.g. env_map: { MY_TOKEN: \"\" } for a plain-string secret)", name, decl.Type)
+			}
 		}
 		if decl.Duration != "" {
-			if d, err := time.ParseDuration(decl.Duration); err == nil && d > 4*time.Hour {
+			d, err := time.ParseDuration(decl.Duration)
+			if err != nil {
+				return fmt.Errorf("provider %q: invalid duration %q: %w", name, decl.Duration, err)
+			}
+			if d > 4*time.Hour {
 				fmt.Fprintf(os.Stderr, "⚠️  provider %q duration=%s exceeds the 4h recommended cap\n", name, d)
+			}
+		}
+		if decl.TTL != "" {
+			if _, err := time.ParseDuration(decl.TTL); err != nil {
+				return fmt.Errorf("provider %q: invalid ttl %q: %w", name, decl.TTL, err)
 			}
 		}
 	}
@@ -82,9 +98,17 @@ func ValidateLint(cfg *schemas.Auth, stackRefs []string) error {
 }
 
 func buildOne(name string, d schemas.ProviderYAML) (auth.Provider, error) {
-	dur, _ := parseDurationOrZero(d.Duration)
-	ttl, _ := parseDurationOrZero(d.TTL)
-	_ = ttl
+	// Malformed durations fail closed: a swallowed error here silently
+	// replaced a typo'd `duration: 30minutes` with the provider default.
+	// config.Validate also rejects these; this guards direct Build callers.
+	dur, err := parseDurationOrZero(d.Duration)
+	if err != nil {
+		return nil, fmt.Errorf("duration: invalid duration %q: %w", d.Duration, err)
+	}
+	ttl, err := parseDurationOrZero(d.TTL)
+	if err != nil {
+		return nil, fmt.Errorf("ttl: invalid duration %q: %w", d.TTL, err)
+	}
 	switch d.Type {
 	case "aws_oidc":
 		return awsoidc.New(name, d.RoleARN, d.SessionName, d.Region, d.AudienceOverride, dur), nil
@@ -113,27 +137,29 @@ func buildOne(name string, d schemas.ProviderYAML) (auth.Provider, error) {
 	case "aws_secrets_manager":
 		return secrets.NewAWSSecretsManager(&secrets.AWSSecretsManager{
 			Name: name, SecretID: d.SecretID, Region: d.Region,
-			TTL: ttl,
+			EnvMap: d.EnvMap, TTL: ttl,
 		}), nil
 
 	case "aws_ssm_parameter":
 		return secrets.NewAWSSSMParameter(&secrets.AWSSSMParameter{
 			Name: name, Parameter: d.Parameter, Region: d.Region,
+			EnvMap: d.EnvMap,
 		}), nil
 
 	case "gcp_secret_manager":
 		return secrets.NewGCPSecretManager(&secrets.GCPSecretManager{
-			Name: name, SecretName: d.GCPName,
+			Name: name, SecretName: d.GCPName, EnvMap: d.EnvMap,
 		}), nil
 
 	case "azure_key_vault":
 		return secrets.NewAzureKeyVault(&secrets.AzureKeyVault{
 			Name: name, VaultName: d.VaultName, SecretName: d.SecretName,
+			EnvMap: d.EnvMap,
 		}), nil
 
 	case "github_secret":
 		return secrets.NewGitHubSecret(&secrets.GitHubSecret{
-			Name: name, EnvVar: d.EnvVar,
+			Name: name, EnvVar: d.EnvVar, EnvMap: d.EnvMap,
 		}), nil
 
 	case "aws_profile":
@@ -196,6 +222,8 @@ func loadPrivateKey(src string) ([]byte, error) {
 	}
 	// Try file.
 	if _, err := os.Stat(src); err == nil {
+		// #nosec G304 -- src is auth.yaml's private_key, which is documented as accepting a file
+		// path; reading an operator-named key file is the feature
 		return os.ReadFile(src)
 	}
 	// Fall back to base64.

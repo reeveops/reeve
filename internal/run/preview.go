@@ -5,20 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/thefynx/reeve/internal/auth"
-	"github.com/thefynx/reeve/internal/blob"
-	"github.com/thefynx/reeve/internal/config/schemas"
-	"github.com/thefynx/reeve/internal/core/approvals"
-	"github.com/thefynx/reeve/internal/core/discovery"
-	"github.com/thefynx/reeve/internal/core/render"
-	"github.com/thefynx/reeve/internal/core/summary"
-	"github.com/thefynx/reeve/internal/iac"
-	"github.com/thefynx/reeve/internal/observability/annotations"
-	reeveotel "github.com/thefynx/reeve/internal/observability/otel"
-	"github.com/thefynx/reeve/internal/vcs"
+	"github.com/FynxLabs/reeve/internal/auth"
+	"github.com/FynxLabs/reeve/internal/blob"
+	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/FynxLabs/reeve/internal/core/approvals"
+	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/core/render"
+	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/FynxLabs/reeve/internal/notify"
+	reeveotel "github.com/FynxLabs/reeve/internal/observability/otel"
+	"github.com/FynxLabs/reeve/internal/vcs"
 )
 
 // prReader is the subset of VCS we need for preview.
@@ -54,16 +55,40 @@ type PreviewInput struct {
 	AuthConfig    *schemas.Auth
 	AuthRegistry  *auth.Registry
 	Notifications *schemas.Notifications
-	OTEL          *reeveotel.Provider
-	Annotations   []annotations.Emitter
+	// Observability is the loaded observability.yaml. Preview constructs
+	// the OTEL provider itself - AFTER the pre-approval gate below - so a
+	// PR that modifies observability config cannot point the OTLP exporter
+	// (endpoint + headers carry expanded ${env:} credentials) at an
+	// attacker collector during an automatic pre-approval preview.
+	//
+	// Annotation emitters (observability.yaml `annotations:`) need no gate
+	// here: PostAnnotation only fires on apply/drift events, never during
+	// preview.
+	Observability *schemas.Observability
 	Blob          blob.Store
 	VCS           prReader      // may be nil for --local
 	Comments      commentPoster // may be nil for --local
+	// ChannelSourceFiles are the repo-relative config files the loader
+	// sourced notification channels from (config.Config.ChannelSourceFiles).
+	// If the PR's changed files include any of them, pre-approval events
+	// (planning/plan) are NOT dispatched to channels. Empty falls back to
+	// the default .reeve file names (fail closed).
+	ChannelSourceFiles []string
+	// ObservabilitySourceFiles is the same for observability.yaml
+	// (config.Config.ObservabilitySourceFiles): if modified by the PR (or
+	// the changed-file list is unavailable), OTEL init is skipped for this
+	// preview. Empty falls back to ".reeve/observability.yaml".
+	ObservabilitySourceFiles []string
 	// Local skips change-mapping (run on all declared stacks).
 	Local bool
 	// Force re-runs even when this commit is already recorded as applied,
 	// bypassing the already-applied guard.
 	Force bool
+	// Refresh reconciles engine state with live infrastructure before
+	// planning, so the diff is against reality rather than against state
+	// that clickops may have invalidated. Off by default: a refresh costs a
+	// full provider read per stack on every push.
+	Refresh bool
 }
 
 // PreviewOutput bundles the artifacts from a preview run.
@@ -85,10 +110,86 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 
 	runID := fmt.Sprintf("run-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
 
-	// OTEL root span for this preview run.
-	ctx, endRun := in.OTEL.StartRunSpan(ctx, "preview", in.PRNumber, in.CommitSHA)
+	// Changed files are fetched up front (also reused for change mapping
+	// below): both the pre-approval channel dispatch and the OTEL exporter
+	// init must be decided BEFORE anything can reach the network.
+	var changed []string
+	var changedErr error
+	if !in.Local && in.VCS != nil {
+		changed, changedErr = in.VCS.ListChangedFiles(ctx, in.PRNumber)
+	}
+
+	// Pre-approval OTEL isolation: observability.yaml is loaded from the
+	// untrusted PR HEAD and its endpoint/headers expand ${env:} references,
+	// so when the PR modifies that config (or the changed-file list is
+	// unavailable) the OTLP exporter is not initialized at all for this
+	// preview - no connection, no headers sent. Same fail-closed semantics
+	// as the notification-channel gate below; --local is unaffected.
+	otelConfigured := in.Observability != nil && in.Observability.OTEL.Enabled
+	suppressOTEL := false
+	otelReason := ""
+	if otelConfigured {
+		suppressOTEL, otelReason = SuppressPreApprovalObservability(
+			in.Local, in.VCS != nil, changed, changedErr, in.ObservabilitySourceFiles)
+		if suppressOTEL {
+			slog.Warn("SECURITY: OTEL telemetry suppressed for this pre-approval preview",
+				"reason", otelReason, "pr", in.PRNumber, "sha", in.CommitSHA,
+				"note", "telemetry resumes after approval/apply")
+		}
+	}
+	var otelProvider *reeveotel.Provider
+	if !suppressOTEL {
+		var otelErr error
+		otelProvider, otelErr = BuildOTEL(ctx, in.Observability)
+		if otelErr != nil {
+			slog.Warn("otel init failed", "err", otelErr)
+		}
+		defer func() {
+			if err := otelProvider.Shutdown(ctx); err != nil {
+				slog.Warn("otel shutdown failed", "err", err)
+			}
+		}()
+	}
+
+	// OTEL root span for this preview run. Registered after the provider
+	// shutdown defer so the span ends before the exporter flushes.
+	ctx, endRun := otelProvider.StartRunSpan(ctx, "preview", in.PRNumber, in.CommitSHA)
 	outcome := "success"
 	defer func() { endRun(outcome) }()
+
+	// Pre-approval suppression: previews run automatically on the untrusted
+	// PR HEAD, so when the PR modifies the notification config itself (or
+	// the changed-file list is unavailable), no channel may receive the
+	// planning/plan events - a webhook channel added in the PR could
+	// otherwise exfiltrate expanded credentials before any human approves.
+	notifyActive := in.PRNumber > 0 && in.Notifications != nil
+	suppressChannels := false
+	suppressReason := ""
+	if notifyActive {
+		suppressChannels, suppressReason = SuppressPreApprovalChannels(
+			in.Local, in.VCS != nil, changed, changedErr, in.ChannelSourceFiles)
+		if suppressChannels {
+			slog.Warn("SECURITY: notification channels suppressed for this pre-approval preview",
+				"reason", suppressReason, "pr", in.PRNumber, "sha", in.CommitSHA,
+				"note", "channels resume after approval/apply")
+		}
+	}
+
+	// Channels are built once and reused for the preview-started and
+	// preview-finished events below.
+	var channels []notify.Channel
+	if notifyActive && !suppressChannels {
+		channels = BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.Comments)
+		// Timeline heartbeat: preview started. PR title/author are not
+		// fetched yet; the payload carries what the timeline needs (event,
+		// SHA, this run's CI URL).
+		if err := NotifyPREvent(ctx, channels, notify.EventPlanning, PRNotifyInput{
+			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+			PRTitle: in.PRTitle,
+		}); err != nil {
+			slog.Warn("notify planning failed", "err", err, "pr", in.PRNumber)
+		}
+	}
 
 	if err := PulumiLogin(ctx, in.Config); err != nil {
 		outcome = "failed"
@@ -110,9 +211,9 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		target = declared
 		slog.Debug("preview target: all declared stacks", "count", len(target))
 	} else {
-		changed, err := in.VCS.ListChangedFiles(ctx, in.PRNumber)
-		if err != nil {
-			return nil, fmt.Errorf("list changed files: %w", err)
+		if changedErr != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("list changed files: %w", changedErr)
 		}
 		slog.Debug("changed files", "count", len(changed), "files", changed)
 		cm := changeMappingFromConfig(in.Config)
@@ -128,7 +229,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	appCfg := toApprovalsConfig(in.Shared)
 	summaries := make([]summary.StackSummary, 0, len(target))
 	for _, s := range target {
-		ss := runPreviewOne(ctx, in, s)
+		ss := runPreviewOne(ctx, in, otelProvider, s, runID)
 		rules := approvals.Resolve(appCfg, s.Ref())
 		ss.RequiredApprovers = rules.Approvers
 		summaries = append(summaries, ss)
@@ -144,6 +245,16 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	// caller didn't force, flag it so reviewers know an apply re-run would be
 	// a no-op (the plan still renders; preview is read-only).
 	notice := mappingNotice
+	if suppressChannels {
+		notice = joinNotices(notice, fmt.Sprintf(
+			"⚠️ Notification channels suppressed for this preview: %s; channels resume after approval/apply.",
+			suppressReason))
+	}
+	if suppressOTEL {
+		notice = joinNotices(notice, fmt.Sprintf(
+			"⚠️ Telemetry (OTEL) suppressed for this preview: %s; telemetry resumes after approval/apply.",
+			otelReason))
+	}
 	if !in.Force {
 		if prior, _ := readAppliedState(ctx, in.Blob, in.PRNumber, in.CommitSHA); prior != nil {
 			appliedNote := fmt.Sprintf("Commit %s was already applied on run #%d (%s). Re-running apply is a no-op unless you comment `/reeve apply --force`.",
@@ -194,12 +305,14 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		prTitle = in.PRTitle
 	}
 
-	// Slack runs last in the pipeline so upstream failures are captured.
-	if in.PRNumber > 0 && in.Notifications != nil {
-		slackBackend := BuildSlackBackend(in.Notifications, in.Blob)
-		if err := NotifySlackPlanReady(ctx, slackBackend, in.Notifications,
-			in.PRNumber, in.CommitSHA, in.CIRunURL, prTitle, prAuthor, nil, summaries); err != nil {
-			slog.Warn("slack notify plan-ready failed", "err", err, "pr", in.PRNumber)
+	// Notifications run last in the pipeline so upstream failures are
+	// captured. Same pre-approval suppression as the planning event above.
+	if notifyActive && !suppressChannels {
+		if err := NotifyPREvent(ctx, channels, notify.EventPlan, PRNotifyInput{
+			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+			PRTitle: prTitle, PRAuthor: prAuthor, Stacks: summaries,
+		}); err != nil {
+			slog.Warn("notify plan-ready failed", "err", err, "pr", in.PRNumber)
 		}
 	}
 
@@ -211,7 +324,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}, nil
 }
 
-func runPreviewOne(ctx context.Context, in PreviewInput, s discovery.Stack) summary.StackSummary {
+func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string) summary.StackSummary {
 	redactor := BuildRedactor(in.Shared)
 
 	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview)
@@ -228,11 +341,29 @@ func runPreviewOne(ctx context.Context, in PreviewInput, s discovery.Stack) summ
 		redactor.AddSecret(v)
 	}
 
-	stackCtx, endStack := in.OTEL.StartStackSpan(ctx, s.Project, s.Name, s.Env, "preview")
+	// Plan locking: ask the engine to save the plan it is about to compute
+	// so apply can execute this exact change set instead of re-planning
+	// against a world that may have moved. Best-effort by design - if the
+	// temp file cannot be created the preview still runs, unlocked.
+	savePlanPath := ""
+	if in.Blob != nil && PlanLockingEnabled(in.Config) && EngineSupportsSavedPlans(in.Engine) {
+		if f, terr := os.CreateTemp("", "reeve-save-plan-*"); terr == nil {
+			savePlanPath = f.Name()
+			_ = f.Close()
+			defer os.Remove(savePlanPath)
+		} else {
+			slog.Warn("plan locking: temp file unavailable; preview will not save a plan", "stack", s.Ref(), "err", terr)
+		}
+	}
+
+	stackCtx, endStack := otelProvider.StartStackSpan(ctx, s.Project, s.Name, s.Env, "preview")
 	stackStart := time.Now()
 	res, err := in.Engine.Preview(stackCtx, s, iac.PreviewOpts{
-		Cwd: absJoin(in.RepoRoot, s.Path),
-		Env: authEnv,
+		Cwd:          absJoin(in.RepoRoot, s.Path),
+		Env:          authEnv,
+		TimeoutSec:   PreviewTimeoutSec(in.Config),
+		SavePlanPath: savePlanPath,
+		Refresh:      in.Refresh,
 	})
 	ss := summary.StackSummary{
 		Project: s.Project,
@@ -255,11 +386,24 @@ func runPreviewOne(ctx context.Context, in PreviewInput, s discovery.Stack) summ
 	ss.PlanSummary = redactor.Redact(res.PlanSummary)
 	ss.PlanDiff = redactor.Redact(res.PlanDiff)
 	ss.FullPlan = redactor.Redact(res.FullPlan)
-	in.OTEL.RecordStackChanges(ctx, s.Project, s.Name, res.Counts.Add, res.Counts.Change, res.Counts.Delete, res.Counts.Replace)
+	otelProvider.RecordStackChanges(ctx, s.Project, s.Name, res.Counts.Add, res.Counts.Change, res.Counts.Delete, res.Counts.Replace)
 	if res.Error != "" {
 		ss.Status = summary.StatusError
 		ss.Error = redactor.Redact(res.Error)
 		return ss
+	}
+	// Persist the saved plan next to the run manifest. A failure here is
+	// logged, not fatal: the preview itself is valid and apply falls back to
+	// re-planning, which is exactly the pre-plan-locking behavior.
+	if res.PlanPath != "" {
+		key, perr := PutPlanArtifact(ctx, in.Blob, in.PRNumber, runID, s.Ref(), res.PlanPath)
+		if perr != nil {
+			slog.Warn("plan locking: storing the saved plan failed; apply will re-plan for this stack",
+				"stack", s.Ref(), "err", perr)
+		} else {
+			ss.PlanKey = key
+			slog.Debug("plan locking: saved plan stored", "stack", s.Ref(), "key", key)
+		}
 	}
 	if ss.Counts.Total() == 0 {
 		ss.Status = summary.StatusNoOp

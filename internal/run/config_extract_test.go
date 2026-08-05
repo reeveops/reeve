@@ -3,7 +3,7 @@ package run
 import (
 	"testing"
 
-	"github.com/thefynx/reeve/internal/config/schemas"
+	"github.com/FynxLabs/reeve/internal/config/schemas"
 )
 
 func TestApprovalsDismissOnNewCommitDefault(t *testing.T) {

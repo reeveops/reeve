@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thefynx/reeve/internal/blob/filesystem"
-	corelocks "github.com/thefynx/reeve/internal/core/locks"
+	"github.com/FynxLabs/reeve/internal/blob/filesystem"
+	corelocks "github.com/FynxLabs/reeve/internal/core/locks"
 )
 
 func newStore(t *testing.T, now time.Time) *Store {
@@ -271,5 +271,38 @@ func TestUnlockPRAllSkipsActiveHolderButDequeues(t *testing.T) {
 	}
 	if n != 1 || len(active) != 0 {
 		t.Fatalf("force: expected 1 removal 0 active, got %d/%v", n, active)
+	}
+}
+
+func TestPromotedDeadReservationAdoptedByNextSamePRRun(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC)
+	s := newStore(t, now)
+
+	// PR 9 holds; PR 1's run queues and exits (blocked runs don't wait).
+	if _, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 9, RunID: "other"}, time.Hour); err != nil || !ok {
+		t.Fatalf("seed holder: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "dead"}, time.Hour); err != nil || ok {
+		t.Fatalf("seed queue: ok=%v err=%v", ok, err)
+	}
+	// PR 9 releases → PR 1's dead run is promoted with a full-ttl lease.
+	l, err := s.Release(ctx, "api", "prod", 9, "other", time.Hour)
+	if err != nil || l.Holder == nil || !l.Holder.Promoted {
+		t.Fatalf("release must promote PR 1 with Promoted marker: %+v err=%v", l.Holder, err)
+	}
+
+	// The next run of PR 1 adopts the reservation immediately - no 4h lockout.
+	l, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "live"}, time.Hour)
+	if err != nil || !ok {
+		t.Fatalf("live run must adopt promoted reservation: ok=%v err=%v", ok, err)
+	}
+	if l.Holder == nil || l.Holder.RunID != "live" || l.Holder.Promoted {
+		t.Fatalf("holder must be the live run with Promoted cleared: %+v", l.Holder)
+	}
+
+	// An actively acquired same-PR holder is still the double-apply guard.
+	if _, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "concurrent"}, time.Hour); ok || !errors.Is(err, corelocks.ErrHeldBySamePR) {
+		t.Fatalf("active same-PR holder must refuse: ok=%v err=%v", ok, err)
 	}
 }

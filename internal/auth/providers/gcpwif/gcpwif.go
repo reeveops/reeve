@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thefynx/reeve/internal/auth"
+	"github.com/FynxLabs/reeve/internal/auth"
 )
 
 // Provider is a single gcp_wif provider instance.
@@ -91,6 +91,14 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 	}, nil
 }
 
+// stsEndpoint and iamCredentialsBase are package vars only so tests can
+// point the exchange at an httptest server; production behavior is
+// unchanged.
+var (
+	stsEndpoint        = "https://sts.googleapis.com/v1/token"
+	iamCredentialsBase = "https://iamcredentials.googleapis.com" // #nosec G101 -- public API endpoint URL, not a credential
+)
+
 func exchangeSTS(ctx context.Context, oidcToken, wip string) (string, error) {
 	form := url.Values{}
 	form.Set("audience", "//iam.googleapis.com/"+wip)
@@ -101,7 +109,7 @@ func exchangeSTS(ctx context.Context, oidcToken, wip string) (string, error) {
 	form.Set("subject_token", oidcToken)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://sts.googleapis.com/v1/token", strings.NewReader(form.Encode()))
+		stsEndpoint, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -127,7 +135,7 @@ func generateSAAccessToken(ctx context.Context, stsToken, sa string, ttl time.Du
 		"lifetime": fmt.Sprintf("%ds", int(ttl.Seconds())),
 	}
 	body, _ := json.Marshal(payload)
-	endpoint := fmt.Sprintf("https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken", sa)
+	endpoint := fmt.Sprintf("%s/v1/projects/-/serviceAccounts/%s:generateAccessToken", iamCredentialsBase, sa)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+stsToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -189,9 +197,13 @@ func fetchGitHubOIDC(ctx context.Context, audience string) (string, error) {
 		}
 		url = url + sep + "audience=" + audience
 	}
+	// #nosec G704 -- URL is ACTIONS_ID_TOKEN_REQUEST_URL, injected by the Actions runner, not read
+	// from .reeve config or PR content; the call is refused when it or its paired
+	// token is unset
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/json; api-version=2.0")
+	// #nosec G704 -- same runner-provided endpoint as the request above
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err

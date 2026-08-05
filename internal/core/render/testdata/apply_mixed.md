@@ -1,7 +1,7 @@
 <!-- reeve:pr-comment:v1 -->
-## 🔴 reeve · apply · run #99 · [commit deadbee]
+## 🔴 reeve · apply · [run #99](https://example.com/runs/99) · [commit deadbee]
 
-**3 stacks applied** · ⏱ 120s · [View run](https://example.com/runs/99)
+**3 stacks applied** · ⏱ 120s
 
 | Stack | Env | ➕ Add | 🔄 Change | ➖ Delete | 🔁 Replace | Duration | Status |
 |---|---|---|---|---|---|---|---|

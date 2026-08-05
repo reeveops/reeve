@@ -5,13 +5,41 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thefynx/reeve/internal/config/schemas"
-	"github.com/thefynx/reeve/internal/core/approvals"
-	"github.com/thefynx/reeve/internal/core/discovery"
-	"github.com/thefynx/reeve/internal/core/freeze"
-	"github.com/thefynx/reeve/internal/core/preconditions"
-	"github.com/thefynx/reeve/internal/core/render"
+	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/FynxLabs/reeve/internal/core/approvals"
+	"github.com/FynxLabs/reeve/internal/core/breakglass"
+	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/core/freeze"
+	"github.com/FynxLabs/reeve/internal/core/preconditions"
+	"github.com/FynxLabs/reeve/internal/core/render"
 )
+
+// PreviewTimeoutSec returns engine.execution.preview_timeout as whole seconds
+// for PreviewOpts.TimeoutSec, or 0 (adapter default) when unset. Validated
+// positive at config load, so a bad value never reaches here.
+func PreviewTimeoutSec(e *schemas.Engine) int { return execTimeoutSec(e, true) }
+
+// ApplyTimeoutSec returns engine.execution.apply_timeout as whole seconds for
+// ApplyOpts.TimeoutSec, or 0 (adapter default) when unset.
+func ApplyTimeoutSec(e *schemas.Engine) int { return execTimeoutSec(e, false) }
+
+func execTimeoutSec(e *schemas.Engine, preview bool) int {
+	if e == nil {
+		return 0
+	}
+	v := e.Engine.Execution.ApplyTimeout
+	if preview {
+		v = e.Engine.Execution.PreviewTimeout
+	}
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return int(d / time.Second)
+}
 
 // mappingNoticeFor returns a PR-comment banner explaining a non-normal
 // change-mapping outcome, or "" for the normal matched case.
@@ -56,7 +84,11 @@ func toPreconditionsConfig(s *schemas.Shared) preconditions.Config {
 	if s.Preconditions.RequireChecksPassing != nil {
 		out.RequireChecksPassing = *s.Preconditions.RequireChecksPassing
 	}
-	if d, err := time.ParseDuration(s.Preconditions.PreviewFreshness); err == nil {
+	// Omitted takes the 4h default; an explicit "0" is the deliberate
+	// opt-out. An unparseable value cannot reach here - Config.Validate
+	// rejects it, so a typo can no longer silently leave the gate at zero
+	// (= disabled). See docs/configuration.md#preview-freshness.
+	if d, enabled := s.Preconditions.ResolvedPreviewFreshness(); enabled {
 		out.PreviewFreshness = d
 	}
 	return out
@@ -88,9 +120,15 @@ func toApprovalsConfig(s *schemas.Shared) approvals.Config {
 	if s.Approvals.Default.DismissOnNewCommit == nil {
 		cfg.Default.DismissOnNewCommit = true
 	}
+	// Repo-wide policy: rides on the default rule and is not overridable
+	// per stack. Off by default (safe on public repos).
+	cfg.Default.AllowUnlistedApprovalsOnPublic = s.Approvals.AllowUnlistedApprovalsOnPublic
 	for _, src := range s.Approvals.Sources {
+		// Enabled is required by validateApprovalSources (never nil on a
+		// loaded config); default a defensive false if a caller bypassed load.
+		enabled := src.Enabled != nil && *src.Enabled
 		cfg.Sources = append(cfg.Sources, approvals.SourceConfig{
-			Type: src.Type, Enabled: src.Enabled, Command: src.Command,
+			Type: src.Type, Enabled: enabled, Command: src.Command,
 		})
 	}
 	for pattern, r := range s.Approvals.Stacks {
@@ -106,6 +144,9 @@ func toApprovalsConfig(s *schemas.Shared) approvals.Config {
 		}
 		if r.DismissOnNewCommit != nil {
 			present["dismiss_on_new_commit"] = true
+		}
+		if r.AllowUnpinnedCommentApprovals != nil {
+			present["allow_unpinned_comment_approvals"] = true
 		}
 		if r.Freshness != "" {
 			present["freshness"] = true
@@ -133,12 +174,42 @@ func toApprovalRule(r schemas.ApprovalRuleYAML, present map[string]bool) approva
 	if r.DismissOnNewCommit != nil {
 		out.DismissOnNewCommit = *r.DismissOnNewCommit
 	}
+	if r.AllowUnpinnedCommentApprovals != nil {
+		out.AllowUnpinnedComments = *r.AllowUnpinnedCommentApprovals
+	}
 	if r.Freshness != "" {
 		if d, err := time.ParseDuration(r.Freshness); err == nil {
 			out.Freshness = d
 		}
 	}
 	_ = present
+	return out
+}
+
+// toBreakGlassConfig extracts the opt-in break_glass block. A nil block
+// yields Configured=false, which makes core/breakglass fail closed with a
+// polite "not configured" error. override_freeze defaults to TRUE when the
+// block exists but the key is omitted.
+func toBreakGlassConfig(s *schemas.Shared) breakglass.Config {
+	if s == nil || s.BreakGlass == nil {
+		return breakglass.Config{}
+	}
+	bg := s.BreakGlass
+	out := breakglass.Config{
+		Configured:     true,
+		InternalList:   bg.Authorized.InternalList,
+		Codeowners:     bg.Authorized.Codeowners,
+		Anyone:         bg.Authorized.Anyone,
+		VCSBypass:      bg.Authorized.VCSBypass,
+		Groups:         bg.Authorized.Groups,
+		OverrideFreeze: true,
+	}
+	if bg.OverrideFreeze != nil {
+		out.OverrideFreeze = *bg.OverrideFreeze
+	}
+	if bg.RejectSelfAuthorization != nil {
+		out.RejectSelfAuthorization = *bg.RejectSelfAuthorization
+	}
 	return out
 }
 
@@ -161,11 +232,16 @@ func toFreezeConfig(s *schemas.Shared) freeze.Config {
 // wiring can thread the same TTL into lock-store operations (reap,
 // leave, force-unlock) that promote queued holders.
 func LockTTL(s *schemas.Shared) time.Duration {
+	const def = 4 * time.Hour
 	if s == nil || s.Locking.TTL == "" {
-		return 4 * time.Hour
+		return def
 	}
-	if d, err := time.ParseDuration(s.Locking.TTL); err == nil {
+	// A non-positive TTL would produce a born-expired lease with a no-op
+	// heartbeat, letting a concurrent run evict the live holder mid-apply.
+	// validateDurations rejects that at load, but floor it here too so no
+	// path (bypassed validation, direct caller) can disable the lease.
+	if d, err := time.ParseDuration(s.Locking.TTL); err == nil && d > 0 {
 		return d
 	}
-	return 4 * time.Hour
+	return def
 }

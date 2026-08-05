@@ -182,9 +182,11 @@ With `policies/prod/`, `policies/staging/`, etc.
 
 ### Cross-engine shared policies
 
-Policy hooks live in engine config, so with multiple engines you'd
-duplicate the block. That's fine - same OPA policies template into two
-files. If duplication grows, write a YAML anchor:
+Policy hooks live in engine config. reeve currently supports one engine
+config per repo (loading more than one is a validation error), so today
+this only matters across *repos* - but the same pattern applies: the
+same OPA policies template into each engine file. Within one file, a
+YAML anchor removes duplication:
 
 ```yaml
 # .reeve/pulumi.yaml

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,10 +8,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/thefynx/reeve/internal/blob/factory"
-	"github.com/thefynx/reeve/internal/config"
-	"github.com/thefynx/reeve/internal/run"
-	gh "github.com/thefynx/reeve/internal/vcs/github"
+	"github.com/FynxLabs/reeve/internal/blob/factory"
+	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/FynxLabs/reeve/internal/notify"
+	"github.com/FynxLabs/reeve/internal/run"
+	gh "github.com/FynxLabs/reeve/internal/vcs/github"
 )
 
 func newReadyCmd() *cobra.Command {
@@ -32,7 +32,7 @@ func newReadyCmd() *cobra.Command {
 }
 
 func runReady(cmd *cobra.Command, _ []string) error {
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	pr := flagInt(cmd, "pr")
 	sha := flagStringOrEnv(cmd, "sha", "GITHUB_SHA")
@@ -89,10 +89,15 @@ func runReady(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	backend := run.BuildSlackBackend(cfg.Notifications, store)
-	if err := run.NotifySlackReady(ctx, backend, cfg.Notifications,
-		pr, sha, runURL, prMeta.Title, prMeta.Author, nil, nil); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "slack notify: %v\n", err)
+	channels, reason := run.BuildPRNotifyChannels(ctx, cfg.Notifications, cfg.ChannelSourceFiles, store, client, pr)
+	if reason != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "notify: channels suppressed (%s)\n", reason)
+	}
+	if err := run.NotifyPREvent(ctx, channels, notify.EventReady, run.PRNotifyInput{
+		PR: pr, CommitSHA: sha, RunURL: runURL,
+		PRTitle: prMeta.Title, PRAuthor: prMeta.Author,
+	}); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "notify: %v\n", err)
 	}
 
 	comment := "<!-- reeve:ready -->\n:white_check_mark: **Plan complete.** Ready for approval."

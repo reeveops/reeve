@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/thefynx/reeve/internal/config/schemas"
-	"github.com/thefynx/reeve/internal/core/discovery"
-	"github.com/thefynx/reeve/internal/core/redact"
-	"github.com/thefynx/reeve/internal/core/summary"
-	"github.com/thefynx/reeve/internal/policy"
+	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/core/redact"
+	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/FynxLabs/reeve/internal/policy"
 )
 
 // HooksFromEngine converts engine config into policy.Hook list.
@@ -28,7 +28,10 @@ func HooksFromEngine(e *schemas.Engine) []policy.Hook {
 		}
 		out = append(out, policy.Hook{
 			Name: h.Name, Command: h.Command,
-			OnFail: mode, Required: h.Required,
+			// Omitted `required:` defaults to TRUE (fail closed): a hook
+			// whose scanner binary is missing fails the run instead of
+			// silently skipping the policy gate.
+			OnFail: mode, Required: h.IsRequired(),
 		})
 	}
 	return out

@@ -3,6 +3,11 @@
 // (pulumi); other config_types scaffold with version+config_type only.
 package schemas
 
+import (
+	"strings"
+	"time"
+)
+
 // Header is common to every config file.
 type Header struct {
 	Version    int    `yaml:"version"`
@@ -19,6 +24,7 @@ type Shared struct {
 	Approvals     ApprovalsYAML      `yaml:"approvals"`
 	Preconditions PreconditionsYAML  `yaml:"preconditions"`
 	FreezeWindows []FreezeWindowYAML `yaml:"freeze_windows"`
+	BreakGlass    *BreakGlassYAML    `yaml:"break_glass,omitempty"`
 	Apply         ApplyConfig        `yaml:"apply"`
 	Retention     RetentionConfig    `yaml:"retention"`
 	LogLevel      string             `yaml:"log_level"`
@@ -46,7 +52,7 @@ type LockingConfig struct {
 }
 
 type AdminOverride struct {
-	Allowed        []string `yaml:"allowed"`
+	Allowed        []string `yaml:"allowed" expand:"env"`
 	RequiresReason bool     `yaml:"requires_reason"`
 }
 
@@ -54,11 +60,22 @@ type ApprovalsYAML struct {
 	Sources []ApprovalSource            `yaml:"sources"`
 	Default ApprovalRuleYAML            `yaml:"default"`
 	Stacks  map[string]ApprovalRuleYAML `yaml:"stacks"`
+	// AllowUnlistedApprovalsOnPublic opts a PUBLIC repository into counting
+	// approvals from reviewers who are not on an approvers list and not a
+	// CODEOWNER. Off by default: on a public repo anyone can submit an
+	// approving review, so a bare numeric policy is not a real gate.
+	// Ignored on private repos (there the reviewer set is already the
+	// collaborator set).
+	AllowUnlistedApprovalsOnPublic bool `yaml:"allow_unlisted_approvals_on_public,omitempty"`
 }
 
 type ApprovalSource struct {
-	Type    string `yaml:"type"` // pr_review | pr_comment
-	Enabled bool   `yaml:"enabled"`
+	Type string `yaml:"type"` // pr_review | pr_comment
+	// Enabled is required when the entry is listed: a pointer distinguishes
+	// "omitted" (nil → rejected at load, so a listed source is never silently
+	// off) from an explicit true/false. There is no safe default — omitting it
+	// on pr_review used to disable reviews, the opposite of the usual intent.
+	Enabled *bool  `yaml:"enabled"`
 	Command string `yaml:"command"` // for pr_comment
 }
 
@@ -69,13 +86,89 @@ type ApprovalRuleYAML struct {
 	RequireAllGroups   *bool    `yaml:"require_all_groups,omitempty"`
 	DismissOnNewCommit *bool    `yaml:"dismiss_on_new_commit,omitempty"`
 	Freshness          string   `yaml:"freshness,omitempty"` // e.g. "24h"
+	// AllowUnpinnedCommentApprovals opts into counting a bare `/reeve approve`
+	// (a pr_comment approval that names no SHA) even when dismiss_on_new_commit
+	// is on. Off by default: an unnamed comment approval cannot be bound to the
+	// reviewed commit, so the secure default drops it and asks the reviewer to
+	// name the SHA (`/reeve approve <sha>`). Set true to accept bare approvals
+	// as approve-and-stick (they survive new commits) - a deliberate weaker
+	// policy for teams that trust their allowed approvers.
+	AllowUnpinnedCommentApprovals *bool `yaml:"allow_unpinned_comment_approvals,omitempty"`
 }
 
 type PreconditionsYAML struct {
-	RequireUpToDate         *bool  `yaml:"require_up_to_date,omitempty"`
-	RequireChecksPassing    *bool  `yaml:"require_checks_passing,omitempty"`
-	PreviewFreshness        string `yaml:"preview_freshness,omitempty"` // e.g. "2h"
+	RequireUpToDate      *bool `yaml:"require_up_to_date,omitempty"`
+	RequireChecksPassing *bool `yaml:"require_checks_passing,omitempty"`
+	// PreviewFreshness bounds how old the plan behind an apply may be, as a
+	// Go duration ("4h", "45m"). Omitted means DefaultPreviewFreshness;
+	// "0" disables the gate deliberately.
+	//
+	// The window exists because a plan proves what THIS PR intended, not
+	// that the world still matches it - another PR merging in between can
+	// change a resource this plan touches, so an old plan can apply cleanly
+	// and still be wrong. See docs/configuration.md#preview-freshness.
+	PreviewFreshness        string `yaml:"preview_freshness,omitempty"`
 	PreviewMaxCommitsBehind int    `yaml:"preview_max_commits_behind"`
+}
+
+// DefaultPreviewFreshness is the window applied when preconditions.
+// preview_freshness is omitted. Four hours is roughly "planned this working
+// session": long enough that a normal review cycle does not force a re-plan,
+// short enough that a plan cannot survive a day of other merges.
+const DefaultPreviewFreshness = 4 * time.Hour
+
+// ResolvedPreviewFreshness returns the effective window and whether the gate
+// is enabled. An empty value takes the default; an explicit "0" disables the
+// gate; anything unparseable also reports disabled, which cannot happen in
+// practice because Config.Validate rejects it first.
+func (p PreconditionsYAML) ResolvedPreviewFreshness() (time.Duration, bool) {
+	v := strings.TrimSpace(p.PreviewFreshness)
+	if v == "" {
+		return DefaultPreviewFreshness, true
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+// BreakGlassYAML is the opt-in `break_glass:` block in shared.yaml.
+// Absent (nil) means break-glass is OFF: the `/reeve breakglass` command
+// errors politely. Authorization is resolved from the config as of the PR
+// HEAD (self-add is allowed by design; the audit record flags same-PR
+// modification of the authorizing files).
+type BreakGlassYAML struct {
+	Authorized BreakGlassAuthorized `yaml:"authorized"`
+	// OverrideFreeze: break-glass also overrides freeze windows. nil
+	// defaults to TRUE - an emergency override that stops at a scheduled
+	// freeze is not much of an override. Set false to keep freeze binding.
+	OverrideFreeze *bool `yaml:"override_freeze,omitempty"`
+	// RejectSelfAuthorization locks down the head-resolved authorization:
+	// when true, a PR that modifies its own authorizing files (a .reeve
+	// config or CODEOWNERS) cannot authorize a break-glass apply, no matter
+	// which source would grant. Default false keeps the documented
+	// behavior — self-add is allowed but loudly audited — for operators who
+	// prioritize late-night availability; set true when you would rather
+	// fail closed than allow same-PR self-authorization.
+	RejectSelfAuthorization *bool `yaml:"reject_self_authorization,omitempty"`
+}
+
+// BreakGlassAuthorized is the union of authorization sources - any source
+// granting the actor is enough.
+type BreakGlassAuthorized struct {
+	// InternalList holds explicit logins and "org/team" slugs.
+	InternalList []string `yaml:"internal_list,omitempty"`
+	// Codeowners: anyone CODEOWNERS makes an owner of a changed path.
+	Codeowners bool `yaml:"codeowners,omitempty"`
+	// Anyone: any actor may break-glass (justification + audit still apply).
+	Anyone bool `yaml:"anyone,omitempty"`
+	// VCSBypass: GitHub ruleset bypass actors. Config surface only - the
+	// runtime rejects it with a clear "not yet supported" error.
+	VCSBypass bool `yaml:"vcs_bypass,omitempty"`
+	// Groups holds phase-2 external identity group sources
+	// ("group:<provider>:<name>"). Parsed and rejected until phase 2.
+	Groups []string `yaml:"groups,omitempty"`
 }
 
 type FreezeWindowYAML struct {
@@ -85,12 +178,23 @@ type FreezeWindowYAML struct {
 	Stacks   []string `yaml:"stacks"`
 }
 
+// Apply trigger modes. The trigger selects exactly ONE apply-initiation
+// path; it is a flow selector, never a gate, and never weakens approvals,
+// locks, freeze, checks, or preview freshness.
+const (
+	// ApplyTriggerComment applies only from a /reeve apply (or /reeve up)
+	// PR comment. This is the default (apply-then-merge flow).
+	ApplyTriggerComment = "comment"
+	// ApplyTriggerMerge applies automatically when the PR is merged
+	// (merge-then-apply / continuous-delivery flow). Comment-initiated
+	// applies are rejected as a no-op in this mode.
+	ApplyTriggerMerge = "merge"
+)
+
 type ApplyConfig struct {
-	// Trigger: "comment" (default; requires /reeve apply) | "merge".
+	// Trigger selects the apply-initiation path: "comment" (default) |
+	// "merge". See the ApplyTrigger* constants and TriggerMode().
 	Trigger string `yaml:"trigger"`
-	// Command: the magic phrase in a PR comment that triggers apply.
-	// Defaults to "/reeve apply".
-	Command string `yaml:"command"`
 	// AllowForkPRs: if true, apply runs on fork PRs with full creds.
 	// Default false. Surfaces via preconditions GateFork.
 	AllowForkPRs bool `yaml:"allow_fork_prs"`
@@ -100,11 +204,25 @@ type ApplyConfig struct {
 	AutoReady bool `yaml:"auto_ready"`
 }
 
+// TriggerMode returns the resolved apply trigger mode, defaulting to
+// "comment" when unset. An unrecognized value is validated (and rejected)
+// by config.Validate; this accessor treats anything other than the exact
+// "merge" keyword as the safe comment default.
+func (a ApplyConfig) TriggerMode() string {
+	if a.Trigger == ApplyTriggerMerge {
+		return ApplyTriggerMerge
+	}
+	return ApplyTriggerComment
+}
+
+// BucketConfig fields carry `expand:"env"`: they are part of the enumerated
+// env-expansion allow-list (see internal/config/env_expand.go and
+// docs/configuration.md#token-expansion).
 type BucketConfig struct {
-	Type   string `yaml:"type"`   // filesystem | s3 | gcs | azblob | r2
-	Name   string `yaml:"name"`   // bucket name, or directory for filesystem
-	Region string `yaml:"region"` // optional
-	Prefix string `yaml:"prefix"` // optional sub-prefix
+	Type   string `yaml:"type"`                // filesystem | s3 | gcs | azblob | r2
+	Name   string `yaml:"name" expand:"env"`   // bucket name, or directory for filesystem
+	Region string `yaml:"region" expand:"env"` // optional
+	Prefix string `yaml:"prefix" expand:"env"` // optional sub-prefix
 }
 
 type CommentsConfig struct {
@@ -124,7 +242,7 @@ type Engine struct {
 }
 
 type EngineBody struct {
-	Type          string           `yaml:"type"` // pulumi | terraform | opentofu
+	Type          string           `yaml:"type"` // pulumi | terraform | tofu (OpenTofu)
 	Binary        EngineBinary     `yaml:"binary"`
 	State         EngineState      `yaml:"state,omitempty"`
 	Stacks        []StackDecl      `yaml:"stacks"`
@@ -132,7 +250,27 @@ type EngineBody struct {
 	ChangeMapping ChangeMap        `yaml:"change_mapping"`
 	Execution     Execution        `yaml:"execution"`
 	PolicyHooks   []PolicyHookYAML `yaml:"policy_hooks,omitempty"`
+	// PlanLocking binds an apply to the plan artifact its preview produced,
+	// instead of letting the engine compute a fresh change set at apply
+	// time. nil (omitted) means TRUE.
+	//
+	// Off, both engines re-plan inside the apply call, so what ships is
+	// whatever the world looks like at apply time - "last apply wins". On,
+	// the preview's plan is stored alongside the run manifest and handed
+	// back to the engine (`terraform apply <plan>`, `pulumi up --plan`), and
+	// an apply the world has moved out from under FAILS instead of silently
+	// applying something else.
+	//
+	// Two reasons an operator turns it off: Pulumi's update-plan flags are
+	// still experimental, and the stored plan artifact contains resource
+	// attribute values (see docs/configuration.md#plan-locking).
+	PlanLocking *bool `yaml:"plan_locking,omitempty"`
 }
+
+// PlanLockingEnabled resolves the default: an omitted `plan_locking:` means
+// locked. Callers still check the engine's SupportsSavedPlans - config asks
+// for locking, capability decides whether it can happen.
+func (b EngineBody) PlanLockingEnabled() bool { return b.PlanLocking == nil || *b.PlanLocking }
 
 // EngineState describes the engine's own state backend. reeve does not
 // manage state - it configures the engine (e.g. `pulumi login`) before
@@ -156,11 +294,19 @@ type EngineSecretsProvider struct {
 
 // PolicyHookYAML is one entry in engine.policy_hooks.
 type PolicyHookYAML struct {
-	Name     string   `yaml:"name"`
-	Command  []string `yaml:"command"`
-	OnFail   string   `yaml:"on_fail"` // block | warn (default block)
-	Required bool     `yaml:"required"`
+	Name    string   `yaml:"name"`
+	Command []string `yaml:"command"`
+	OnFail  string   `yaml:"on_fail"` // block | warn (default block)
+	// Required controls what happens when command[0] is not on PATH.
+	// nil (omitted) defaults to TRUE - a missing scanner binary fails the
+	// run instead of silently skipping the policy gate. Set
+	// `required: false` to explicitly opt in to the silent skip.
+	Required *bool `yaml:"required,omitempty"`
 }
+
+// IsRequired resolves the fail-closed default: an omitted `required:` means
+// the hook is required.
+func (h PolicyHookYAML) IsRequired() bool { return h.Required == nil || *h.Required }
 
 type EngineBinary struct {
 	Path    string `yaml:"path"`

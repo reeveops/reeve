@@ -1,7 +1,7 @@
 // Package blob defines the user-owned storage abstraction: locks, run
 // artifacts, drift state, audit logs. Adapters (filesystem, s3, gcs,
 // azblob) satisfy use-site interfaces. Conditional-write primitives are
-// required for atomic lock transitions (PLAN.md §5.2, §5.8).
+// required for atomic lock transitions.
 package blob
 
 import "errors"

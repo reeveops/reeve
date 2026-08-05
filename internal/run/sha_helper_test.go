@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/thefynx/reeve/internal/vcs"
+	"github.com/FynxLabs/reeve/internal/vcs"
 )
 
 type fakePRReader struct {

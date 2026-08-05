@@ -39,6 +39,11 @@ type StackSummary struct {
 	DurationMS        int64       // apply duration (preview may be 0)
 	Gates             []GateTrace // rendered as "🔐 apply gates" section
 	RequiredApprovers []string    // approvers required before apply
+	// PlanKey is the blob key of the engine plan artifact this preview
+	// saved (plan locking). Empty means no artifact was stored - either
+	// locking is off, the engine cannot save plans, or the upload failed -
+	// and apply will re-plan instead of executing this exact change set.
+	PlanKey string
 }
 
 // GateTrace is one line of the per-stack "apply gates" trace.

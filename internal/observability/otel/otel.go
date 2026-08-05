@@ -8,8 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -22,6 +20,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/FynxLabs/reeve/internal/core/envref"
 )
 
 // CardinalityMode controls the stack label.
@@ -80,7 +80,7 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 		semconv.ServiceName(opts.ServiceName),
 	}
 	for k, v := range opts.ResourceAttrs {
-		attrs = append(attrs, attribute.String(k, expandEnv(v)))
+		attrs = append(attrs, attribute.String(k, envref.Expand(v)))
 	}
 	res, err := resource.New(ctx, resource.WithAttributes(attrs...))
 	if err != nil {
@@ -90,14 +90,14 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 	traceOpts := []otlptracehttp.Option{}
 	metricOpts := []otlpmetrichttp.Option{}
 	if ep := opts.Endpoint; ep != "" {
-		ep = expandEnv(ep)
+		ep = envref.Expand(ep)
 		traceOpts = append(traceOpts, otlptracehttp.WithEndpointURL(ep))
 		metricOpts = append(metricOpts, otlpmetrichttp.WithEndpointURL(ep))
 	}
 	if len(opts.Headers) > 0 {
 		h := map[string]string{}
 		for k, v := range opts.Headers {
-			h[k] = expandEnv(v)
+			h[k] = envref.Expand(v)
 		}
 		traceOpts = append(traceOpts, otlptracehttp.WithHeaders(h))
 		metricOpts = append(metricOpts, otlpmetrichttp.WithHeaders(h))
@@ -127,8 +127,8 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 		propagation.TraceContext{}, propagation.Baggage{},
 	))
 
-	tracer := tp.Tracer("github.com/thefynx/reeve")
-	meter := mp.Meter("github.com/thefynx/reeve")
+	tracer := tp.Tracer("github.com/FynxLabs/reeve")
+	meter := mp.Meter("github.com/FynxLabs/reeve")
 
 	p := &Provider{
 		tp:          tp,
@@ -321,12 +321,4 @@ func (p *Provider) stackLabel(project, stack string) string {
 		h := sha256.Sum256([]byte(project + "/" + stack))
 		return hex.EncodeToString(h[:8])
 	}
-}
-
-// expandEnv replaces ${env:NAME} with the env var value.
-func expandEnv(s string) string {
-	if strings.HasPrefix(s, "${env:") && strings.HasSuffix(s, "}") {
-		return os.Getenv(strings.TrimSuffix(strings.TrimPrefix(s, "${env:"), "}"))
-	}
-	return s
 }

@@ -1,7 +1,7 @@
 <!-- reeve:pr-comment:v1 -->
-## 🟡 reeve · preview · run #47 · [commit abc1234]
+## 🟡 reeve · preview · [run #47](https://example.com/runs/47) · [commit abc1234]
 
-**3 stacks changed** · ⏱ 42s · [View run](https://example.com/runs/47)
+**3 stacks changed** · ⏱ 42s
 
 | Stack | Env | ➕ Add | 🔄 Change | ➖ Delete | 🔁 Replace | Status |
 |---|---|---|---|---|---|---|

@@ -145,6 +145,52 @@ bogus_field: 42
 	}
 }
 
+func TestApplyCommandKeyRejected(t *testing.T) {
+	// apply.command was removed; the strict loader must reject it as an
+	// unknown key rather than silently ignoring a stale override.
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket: {type: filesystem, name: x}
+apply:
+  trigger: comment
+  command: "/reeve apply"
+`,
+		"pulumi.yaml": minimalPulumi(),
+	})
+	_, err := Load(root)
+	if err == nil || !strings.Contains(err.Error(), "command") {
+		t.Fatalf("expected strict loader to reject apply.command, got %v", err)
+	}
+}
+
+func TestApplyTriggerValidation(t *testing.T) {
+	load := func(trigger string) error {
+		root := writeReeve(t, map[string]string{
+			"shared.yaml": `version: 1
+config_type: shared
+bucket: {type: filesystem, name: x}
+apply:
+  trigger: ` + trigger + `
+`,
+			"pulumi.yaml": minimalPulumi(),
+		})
+		cfg, err := Load(root)
+		if err != nil {
+			return err
+		}
+		return cfg.Validate()
+	}
+	for _, ok := range []string{"comment", "merge"} {
+		if err := load(ok); err != nil {
+			t.Fatalf("apply.trigger %q must be accepted, got %v", ok, err)
+		}
+	}
+	if err := load("mrege"); err == nil || !strings.Contains(err.Error(), "apply.trigger") {
+		t.Fatalf("invalid apply.trigger must be rejected, got %v", err)
+	}
+}
+
 func TestDuplicateEngineTypeRejected(t *testing.T) {
 	root := writeReeve(t, map[string]string{
 		"shared.yaml":  minimalShared(),
@@ -154,6 +200,32 @@ func TestDuplicateEngineTypeRejected(t *testing.T) {
 	_, err := Load(root)
 	if err == nil || !strings.Contains(err.Error(), "duplicate engine.type") {
 		t.Fatalf("expected duplicate engine.type error, got %v", err)
+	}
+}
+
+func TestMultipleEngineConfigsRejected(t *testing.T) {
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": minimalShared(),
+		"pulumi.yaml": minimalPulumi(),
+		"terraform.yaml": `version: 1
+config_type: engine
+engine:
+  type: terraform
+  binary:
+    path: terraform
+  stacks: []
+`,
+	})
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "multiple engine configs found") {
+		t.Fatalf("expected multiple-engine validate error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "pulumi") || !strings.Contains(err.Error(), "terraform") {
+		t.Fatalf("error should name the engine types, got %v", err)
 	}
 }
 
@@ -197,6 +269,65 @@ engine:
 `
 }
 
+func TestValidateApprovalSources(t *testing.T) {
+	valid := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket: {type: filesystem, name: ./x}
+approvals:
+  sources:
+    - {type: pr_review, enabled: true}
+    - {type: pr_comment, enabled: true, command: "/reeve approve"}
+`,
+		"pulumi.yaml": minimalPulumi(),
+	})
+	cfg, err := Load(valid)
+	if err != nil {
+		t.Fatalf("Load valid: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid sources should pass, got %v", err)
+	}
+
+	bad := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket: {type: filesystem, name: ./x}
+approvals:
+  sources:
+    - {type: pr_commnet, enabled: true}
+`,
+		"pulumi.yaml": minimalPulumi(),
+	})
+	cfg2, err := Load(bad)
+	if err != nil {
+		t.Fatalf("Load bad: %v", err)
+	}
+	if err := cfg2.Validate(); err == nil || !strings.Contains(err.Error(), "unknown source type") {
+		t.Fatalf("typo'd source type must be rejected, got %v", err)
+	}
+
+	// A listed source with `enabled` omitted must be rejected, not silently
+	// disabled (the C5 footgun).
+	missingEnabled := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket: {type: filesystem, name: ./x}
+approvals:
+  sources:
+    - {type: pr_review}
+`,
+		"pulumi.yaml": minimalPulumi(),
+	})
+	cfg3, err := Load(missingEnabled)
+	if err != nil {
+		t.Fatalf("Load missing-enabled: %v", err)
+	}
+	if err := cfg3.Validate(); err == nil || !strings.Contains(err.Error(), "must set 'enabled") {
+		t.Fatalf("omitted enabled must be rejected, got %v", err)
+	}
+}
+
 func TestLogSettingsNilShared(t *testing.T) {
 	// The panic guard: commands call LogSettings() before Validate(), so it
 	// must not dereference a nil Shared (missing .reeve/shared.yaml).
@@ -207,5 +338,77 @@ func TestLogSettingsNilShared(t *testing.T) {
 	c2 := &Config{Shared: nil}
 	if lvl, fmtt := c2.LogSettings(); lvl != "" || fmtt != "" {
 		t.Fatalf("nil Shared should yield empty settings, got %q/%q", lvl, fmtt)
+	}
+}
+
+func TestBreakGlassBlockParses(t *testing.T) {
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket:
+  type: filesystem
+  name: ./.reeve-state
+break_glass:
+  authorized:
+    internal_list: ["alice", "myorg/sre"]
+    codeowners: true
+    anyone: false
+    vcs_bypass: false
+    groups: ["group:aws_iam:oncall"]
+  override_freeze: false
+`,
+	})
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bg := cfg.Shared.BreakGlass
+	if bg == nil {
+		t.Fatal("break_glass block not loaded")
+		return
+	}
+	if len(bg.Authorized.InternalList) != 2 || !bg.Authorized.Codeowners || bg.Authorized.Anyone {
+		t.Fatalf("authorized mismatch: %+v", bg.Authorized)
+	}
+	if len(bg.Authorized.Groups) != 1 || bg.Authorized.Groups[0] != "group:aws_iam:oncall" {
+		t.Fatalf("groups mismatch: %+v", bg.Authorized.Groups)
+	}
+	if bg.OverrideFreeze == nil || *bg.OverrideFreeze {
+		t.Fatalf("override_freeze should parse false, got %+v", bg.OverrideFreeze)
+	}
+}
+
+func TestBreakGlassAbsentStaysNil(t *testing.T) {
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket:
+  type: filesystem
+  name: ./.reeve-state
+`,
+	})
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Shared.BreakGlass != nil {
+		t.Fatalf("break_glass must be nil (off) when absent, got %+v", cfg.Shared.BreakGlass)
+	}
+}
+
+func TestBreakGlassUnknownKeyRejected(t *testing.T) {
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket:
+  type: filesystem
+  name: ./.reeve-state
+break_glass:
+  authorised:
+    anyone: true
+`,
+	})
+	if _, err := Load(root); err == nil || !strings.Contains(err.Error(), "authorised") {
+		t.Fatalf("strict loader must reject unknown break_glass key, got %v", err)
 	}
 }

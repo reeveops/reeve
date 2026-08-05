@@ -136,3 +136,146 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// --- break-glass gate composition ---
+
+func gateFor(res Result, id GateID) (GateResult, bool) {
+	for _, g := range res.Gates {
+		if g.Gate == id {
+			return g, true
+		}
+	}
+	return GateResult{}, false
+}
+
+func overrode(res Result, id GateID) bool {
+	for _, g := range res.Overridden {
+		if g == id {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBreakGlassOverridesApprovals(t *testing.T) {
+	in := Inputs{
+		PreviewSucceeded: true, LockAcquirable: true,
+		ApprovalsSatisfied: false,
+		BreakGlass:         true, BreakGlassOverrideFreeze: true,
+	}
+	res := Evaluate(Config{}, in)
+	if res.Blocked {
+		t.Fatalf("break-glass must override the approvals gate: %+v", res.Gates)
+	}
+	g, _ := gateFor(res, GateApprovals)
+	if g.Outcome != OutcomeWarning || !contains(g.Reason, "break-glass") {
+		t.Fatalf("approvals gate should warn as overridden: %+v", g)
+	}
+	if !overrode(res, GateApprovals) {
+		t.Fatalf("approvals must be recorded as overridden: %+v", res.Overridden)
+	}
+}
+
+func TestBreakGlassSatisfiedApprovalsNotOverridden(t *testing.T) {
+	in := Inputs{
+		PreviewSucceeded: true, LockAcquirable: true,
+		ApprovalsSatisfied: true,
+		BreakGlass:         true, BreakGlassOverrideFreeze: true,
+	}
+	res := Evaluate(Config{}, in)
+	if overrode(res, GateApprovals) {
+		t.Fatal("satisfied approvals must not be recorded as overridden")
+	}
+}
+
+func TestBreakGlassFreezeOverrideConditional(t *testing.T) {
+	base := Inputs{
+		PreviewSucceeded: true, LockAcquirable: true, ApprovalsSatisfied: false,
+		InFreeze: true, FreezeName: "holiday",
+		BreakGlass: true,
+	}
+
+	on := base
+	on.BreakGlassOverrideFreeze = true
+	res := Evaluate(Config{}, on)
+	if res.Blocked {
+		t.Fatalf("override_freeze=true must override the freeze gate: %+v", res.Gates)
+	}
+	g, _ := gateFor(res, GateFreeze)
+	if g.Outcome != OutcomeWarning || !contains(g.Reason, "holiday") {
+		t.Fatalf("freeze gate should warn with the window name: %+v", g)
+	}
+	if !overrode(res, GateFreeze) {
+		t.Fatalf("freeze must be recorded as overridden: %+v", res.Overridden)
+	}
+
+	off := base
+	off.BreakGlassOverrideFreeze = false
+	res = Evaluate(Config{}, off)
+	if !res.Blocked {
+		t.Fatal("override_freeze=false must keep the freeze gate binding")
+	}
+	g, _ = gateFor(res, GateFreeze)
+	if g.Outcome != OutcomeFail {
+		t.Fatalf("freeze gate should fail: %+v", g)
+	}
+	if overrode(res, GateFreeze) {
+		t.Fatal("blocked freeze must not be recorded as overridden")
+	}
+}
+
+func TestBreakGlassNeverOverridesLocks(t *testing.T) {
+	in := Inputs{
+		PreviewSucceeded: true, ApprovalsSatisfied: false,
+		LockAcquirable: false, LockBlockedByPR: 7,
+		BreakGlass: true, BreakGlassOverrideFreeze: true,
+	}
+	res := Evaluate(Config{}, in)
+	if !res.Blocked {
+		t.Fatal("break-glass must NEVER bypass locks")
+	}
+	g, _ := gateFor(res, GateLock)
+	if g.Outcome != OutcomeFail || !contains(g.Reason, "#7") {
+		t.Fatalf("lock gate should fail with holder PR: %+v", g)
+	}
+}
+
+func TestBreakGlassStillEnforcesChecksAndPreview(t *testing.T) {
+	cfg := Config{RequireChecksPassing: true}
+	in := Inputs{
+		ChecksGreen: false, PreviewSucceeded: true,
+		ApprovalsSatisfied: false, LockAcquirable: true,
+		BreakGlass: true, BreakGlassOverrideFreeze: true,
+	}
+	res := Evaluate(cfg, in)
+	if !res.Blocked {
+		t.Fatal("break-glass must not bypass checks_green")
+	}
+	g, _ := gateFor(res, GateChecksGreen)
+	if g.Outcome != OutcomeFail {
+		t.Fatalf("checks gate should fail: %+v", g)
+	}
+
+	in.ChecksGreen = true
+	in.PreviewSucceeded = false
+	res = Evaluate(cfg, in)
+	if !res.Blocked {
+		t.Fatal("break-glass must not bypass preview_succeeded")
+	}
+}
+
+func TestBreakGlassStillEnforcesDraftAndFork(t *testing.T) {
+	in := Inputs{
+		PRIsDraft: true, PreviewSucceeded: true,
+		ApprovalsSatisfied: false, LockAcquirable: true,
+		BreakGlass: true, BreakGlassOverrideFreeze: true,
+	}
+	if res := Evaluate(Config{}, in); !res.Blocked {
+		t.Fatal("break-glass must not bypass the draft gate")
+	}
+	in.PRIsDraft = false
+	in.PRIsFork = true
+	if res := Evaluate(Config{FailOnForkPRs: true}, in); !res.Blocked {
+		t.Fatal("break-glass must not bypass the fork gate")
+	}
+}

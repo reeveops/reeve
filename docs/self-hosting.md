@@ -13,7 +13,7 @@ boundary.
 | GitHub repo with Actions | reeve runs inside workflows | yes |
 | IAM role trusting GitHub's OIDC provider | short-lived creds for IaC | strongly recommended |
 | GitHub App | higher rate limits, cross-repo install | optional |
-| Slack workspace + bot | PR-scoped notifications + drift sinks | optional |
+| Slack workspace + bot | PR-scoped notifications + drift channels | optional |
 | OTEL collector | traces + metrics | optional |
 | PagerDuty / incident system | drift escalation | optional |
 
@@ -210,7 +210,7 @@ runners start empty, so locks don't persist across runs.
 permissions:
   contents: read
   pull-requests: write      # upsert PR comment
-  issues: write             # /reeve apply via issue_comment; github_issue drift sink
+  issues: write             # /reeve apply via issue_comment; github_issue drift channel
   id-token: write           # only when using aws_oidc / gcp_wif / azure_federated
 ```
 
@@ -219,10 +219,10 @@ permissions:
 reeve expects these events:
 
 - `pull_request` (`opened`, `reopened`, `synchronize`) - fires `preview`
-- `pull_request` (`ready_for_review`) - fires `ready` (if `auto_ready: true` and plan succeeded)
+- `pull_request` (`ready_for_review`) - fires `ready` (notifies for approval when a plan has succeeded)
 - `pull_request` (any other action, e.g. `labeled`, `assigned`, `edited`) - no-op
 - `pull_request_review` (`submitted`, state `approved`) - fires `approved` (Slack status update), **only** when the action input `run-on-approval` is `"true"`; skipped by default since the apply gate re-checks approvals anyway
-- `issue_comment` (`created`, first word matches a `command-prefix` entry - default `/reeve` or `@reeve` - followed by `apply` (or `up`), `ready`, `preview` (or `plan`), or `help`) - fires respective command; comments authored by bots (user type `Bot` or login ending in `[bot]`) are always skipped to prevent self-trigger loops
+- `issue_comment` (`created`, first word matches a `command-prefix` entry - default `/reeve` only; `@reeve` is a real person's GitHub account and is no longer accepted by default - followed by `apply` (or `up`), `ready`, `preview` (or `plan`), `approve`, or `help`) - fires respective command; comments authored by bots (user type `Bot` or login ending in `[bot]`) are always skipped to prevent self-trigger loops. `approve` fires `approved` (the Slack "ready to apply" refresh) and only counts as an approval when the opt-in `pr_comment` source is enabled in `approvals.sources`; the apply gate re-reads the comment and re-checks `author_association` at apply time
 - `schedule` - fires `drift run`
 - `workflow_dispatch` - manual re-runs
 
@@ -309,9 +309,9 @@ overriding the workflow's default token.
 ## Distribution
 
 Tagged releases (`vX.Y.Z`) ship per-platform tarballs with a
-`checksums.txt` signed via cosign keyless, a container image on GHCR, and
-a Homebrew tap - all produced by goreleaser from
-`.github/workflows/release.yml`. Building from source
+`checksums.txt` signed via cosign keyless, plus a container image on GHCR
+and a Homebrew cask push to `FynxLabs/brew-tap` - all produced by
+goreleaser from `.github/workflows/release.yml`. Building from source
 (`go build ./cmd/reeve`) always remains supported.
 
 ### Pinning and binaries (GitHub Action)
@@ -320,20 +320,24 @@ The composite action resolves its binary in three tiers, cache first:
 
 | Pin                 | Binary source                                                                    |
 | ------------------- | -------------------------------------------------------------------------------- |
-| `@vX.Y.Z`           | Signed release tarball, verified against the release's `checksums.txt`           |
-| `@master` / `@next` | Rolling edge binary from the `edge-<branch>` prerelease, matched to the action's exact source hash (unsigned, auto-fallback to source build) |
+| `@vX.Y.Z`           | Release tarball, verified against the release's cosign-signed `checksums.txt`    |
+| `@master` / `@next` | Newest per-push `<branch>-<sha>` prerelease binary, verified against its checksum + cosign signature (auto-fallback to source build) |
 | anything else       | Built from source on the runner (SHA pins, branches, forks)                      |
 
 A per-runner cache keyed `reeve-<os>-<arch>-<source hash>` fronts all
 three paths; only a cache miss triggers a download or build. The edge
 assets are published by `.github/workflows/edge-build.yml` on every push
-to `master`/`next` and are named after the source hash they were built
-from, so the action can prove an edge binary corresponds to the source it
-checked out - no hash match means it silently builds from source instead.
-Prebuilt binaries save the ~30s+ Go toolchain + build cost on cache
-misses. Edge builds are unsigned; if your supply-chain policy requires
-signatures, pin `@vX.Y.Z` (or a commit SHA, which always builds from the
-pinned source).
+to `master`/`next` as a per-commit prerelease tagged `<branch>-<sha>`
+(the newest ten are kept). The action resolves the newest such prerelease,
+verifies its `checksums.txt` and — when `cosign` is present — the keyless
+`checksums.txt.bundle`, then installs the binary; any failure silently
+falls back to a source build. Because it takes the *newest* prerelease, an
+edge binary can come from a slightly newer commit than the pinned action
+source. Prebuilt binaries save the ~30s+ Go toolchain + build cost on cache
+misses. For reproducible, version-pinned, always-signed distribution pin
+`@vX.Y.Z` (or a commit SHA, which always builds from the pinned source); set
+`REEVE_REQUIRE_SIGNATURE=1` to make the fast-path refuse an unsigned edge
+binary.
 
 ---
 
@@ -341,7 +345,8 @@ pinned source).
 
 ### Binary
 
-`brew upgrade reeve`, or grab the latest release tarball. CI jobs pick up
+Grab the latest release tarball (or `brew upgrade reeve` if you installed
+via the cask). CI jobs pick up
 new binaries per the pinning table above: `@vX.Y.Z` pins move when you
 edit the workflow; `@master`/`@next` pins track each push via edge
 binaries (or a source build while the edge build is still running).

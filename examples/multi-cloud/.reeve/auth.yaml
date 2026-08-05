@@ -40,12 +40,16 @@ providers:
     secret_id: reeve/cloudflare/api-token
     region: us-east-1
     ttl: 1h
+    env_map:
+      CLOUDFLARE_API_TOKEN: ""     # "" = whole (plain-string) secret value
 
   datadog-key:
     type: aws_ssm_parameter
     source: aws-prod
     parameter: /reeve/datadog/api-key
     region: us-east-1
+    env_map:
+      DATADOG_API_KEY: ""
 
   # ── GitHub App ───────────────────────────────────────────────────
   github-app:

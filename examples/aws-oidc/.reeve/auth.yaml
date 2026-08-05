@@ -6,7 +6,7 @@ providers:
   aws-prod:
     type: aws_oidc
     role_arn: arn:aws:iam::111111111111:role/reeve-prod
-    session_name: reeve-${context:pr_number}
+    session_name: reeve-prod
     duration: 1h
     region: us-east-1
 

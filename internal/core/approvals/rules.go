@@ -20,7 +20,15 @@ type Approval struct {
 	Source      string // "pr_review" | "pr_comment" | ...
 	Approver    string // user login (no leading @)
 	SubmittedAt time.Time
-	CommitSHA   string // HEAD SHA at time of approval; used for dismissal
+	CommitSHA   string // the commit this approval is bound to; used for dismissal
+	// Pinned reports whether CommitSHA authoritatively identifies the approved
+	// commit. A pr_review is always pinned (GitHub records its commit_id). A
+	// pr_comment is pinned only when the commenter named the SHA explicitly
+	// (`/reeve approve <sha>`); a bare `/reeve approve` is unpinned, because the
+	// SHA that was HEAD when the comment was posted cannot be reconstructed
+	// from forgeable git timestamps. Evaluate dismisses unpinned approvals when
+	// dismiss_on_new_commit is enabled.
+	Pinned bool
 }
 
 // Source is a pluggable approval backend (v1: pr_review, pr_comment).
@@ -36,7 +44,11 @@ type PR struct {
 	Author  string
 	BaseRef string
 	IsFork  bool
-	Changed []string // changed file paths; feeds CODEOWNERS
+	// RepoPrivate mirrors vcs.PR.RepoPrivate. False (public) is the
+	// fail-closed default and triggers the unlisted-approval gate below.
+	RepoPrivate bool
+	OpenedAt    time.Time // when the PR was opened; zero if the adapter didn't supply it
+	Changed     []string  // changed file paths; feeds CODEOWNERS
 }
 
 // Rules is the merged approvals.yaml-ish surface for a single stack.
@@ -46,7 +58,22 @@ type Rules struct {
 	Codeowners         bool
 	RequireAllGroups   bool // approvers list treated as groups
 	DismissOnNewCommit bool
-	Freshness          time.Duration // 0 = no freshness requirement
+	// AllowUnpinnedComments, when true, counts an unpinned comment approval (a
+	// bare `/reeve approve` with no SHA) even under DismissOnNewCommit. Off by
+	// default: an unpinned approval is not bound to a reviewed commit, so the
+	// secure default dismisses it. Has no effect on pr_review approvals (always
+	// pinned) or when DismissOnNewCommit is off.
+	AllowUnpinnedComments bool
+	Freshness             time.Duration // 0 = no freshness requirement
+	// AllowUnlistedApprovalsOnPublic opts a public repository into counting
+	// approvals from reviewers who are not on an approvers list and not a
+	// CODEOWNER. It is a repo-wide policy (rides on the default rule) and is
+	// off by default: on a public repo, any GitHub user can submit an
+	// approving review, so the no-allow-list "count any distinct approver"
+	// path is not a real gate. With this false (default), such a repo must
+	// configure an approvers list or CODEOWNERS; with it true, the operator
+	// has explicitly accepted unlisted reviews.
+	AllowUnlistedApprovalsOnPublic bool
 	// TeamMembers is the optional pre-resolved team-slug → member-logins
 	// map. Populated by the caller before Evaluate so a rule like
 	// `approvers: [my-org/sre]` matches when an SRE team member approves.
@@ -104,6 +131,9 @@ func Resolve(cfg Config, ref string) Rules {
 		if r.Present["dismiss_on_new_commit"] {
 			out.DismissOnNewCommit = r.Rules.DismissOnNewCommit
 		}
+		if r.Present["allow_unpinned_comment_approvals"] {
+			out.AllowUnpinnedComments = r.Rules.AllowUnpinnedComments
+		}
 		if r.Present["freshness"] {
 			out.Freshness = r.Rules.Freshness
 		}
@@ -144,9 +174,19 @@ func Evaluate(rules Rules, approvals []Approval, pr PR, codeowners map[string][]
 	effective := make([]Approval, 0, len(approvals))
 	var stale []string
 	for _, a := range approvals {
-		if rules.DismissOnNewCommit && a.CommitSHA != "" && a.CommitSHA != pr.HeadSHA {
-			res.Trace = append(res.Trace, fmt.Sprintf("dismissed %s (approval on %s, HEAD is %s)", a.Approver, short(a.CommitSHA), short(pr.HeadSHA)))
-			continue
+		if rules.DismissOnNewCommit {
+			if !a.Pinned {
+				// An unpinned approval (a bare `/reeve approve`) is not bound to
+				// a reviewed commit. Dismiss it unless the operator opted into
+				// accepting bare approvals as approve-and-stick.
+				if !rules.AllowUnpinnedComments {
+					res.Trace = append(res.Trace, fmt.Sprintf("dismissed %s (approval not pinned to a commit; re-approve naming the SHA, e.g. `approve %s`, or set approvals.allow_unpinned_comment_approvals)", a.Approver, short(pr.HeadSHA)))
+					continue
+				}
+			} else if a.CommitSHA != "" && a.CommitSHA != pr.HeadSHA {
+				res.Trace = append(res.Trace, fmt.Sprintf("dismissed %s (approval on %s, HEAD is %s)", a.Approver, short(a.CommitSHA), short(pr.HeadSHA)))
+				continue
+			}
 		}
 		if a.Approver == author {
 			res.Trace = append(res.Trace, fmt.Sprintf("ignored %s (self-approval)", a.Approver))
@@ -214,23 +254,42 @@ func Evaluate(rules Rules, approvals []Approval, pr PR, codeowners map[string][]
 	// distinct non-author approver counts - GitHub's "require N approvals"
 	// semantics, and never an unsatisfiable gate.
 	if rules.RequiredApprovals > 0 {
+		// On a public repo, any GitHub user can submit an approving review,
+		// so the no-allow-list path ("count any distinct approver") is not a
+		// real gate. Refuse to count unlisted reviews there unless the
+		// operator explicitly opted in - and say exactly how to fix it.
+		publicUnlisted := len(rules.Approvers) == 0 &&
+			!pr.RepoPrivate && !rules.AllowUnlistedApprovalsOnPublic
+
 		var hits []string
-		if len(rules.Approvers) == 0 {
+		switch {
+		case publicUnlisted:
+			// hits stays empty; the gate cannot be met by unlisted reviews.
+		case len(rules.Approvers) == 0:
 			hits = distinct(approvers)
-		} else {
+		default:
 			hits = intersect(approvers, rules.Approvers, rules.TeamMembers)
 		}
-		res.Trace = append(res.Trace, fmt.Sprintf("required_approvals=%d, matched=%d (%s)",
-			rules.RequiredApprovals, len(hits), strings.Join(hits, ",")))
 		res.Got += len(hits)
 		res.TotalNeeded += rules.RequiredApprovals
-		if len(hits) < rules.RequiredApprovals {
-			need := rules.RequiredApprovals - len(hits)
-			if len(rules.Approvers) == 0 {
-				res.Missing = append(res.Missing, fmt.Sprintf("%d more approval(s)", need))
-			} else {
-				res.Missing = append(res.Missing,
-					fmt.Sprintf("%d more approval(s) from %s", need, strings.Join(rules.Approvers, "|")))
+
+		if publicUnlisted {
+			res.Trace = append(res.Trace,
+				"public repo: unlisted reviews not counted (anyone can approve); add approvals.default.approvers or codeowners, or set approvals.allow_unlisted_approvals_on_public: true")
+			res.Missing = append(res.Missing, fmt.Sprintf(
+				"%d approval(s) from a configured approvers list or CODEOWNERS — public repo: unlisted reviews are not counted; set approvals.allow_unlisted_approvals_on_public: true to override",
+				rules.RequiredApprovals))
+		} else {
+			res.Trace = append(res.Trace, fmt.Sprintf("required_approvals=%d, matched=%d (%s)",
+				rules.RequiredApprovals, len(hits), strings.Join(hits, ",")))
+			if len(hits) < rules.RequiredApprovals {
+				need := rules.RequiredApprovals - len(hits)
+				if len(rules.Approvers) == 0 {
+					res.Missing = append(res.Missing, fmt.Sprintf("%d more approval(s)", need))
+				} else {
+					res.Missing = append(res.Missing,
+						fmt.Sprintf("%d more approval(s) from %s", need, strings.Join(rules.Approvers, "|")))
+				}
 			}
 		}
 	}

@@ -8,12 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/FynxLabs/reeve/internal/core/envref"
 )
 
-// EventType is the subscription key sinks filter on.
+// EventType is the subscription key channels filter on.
 type EventType string
 
 const (
@@ -92,9 +93,9 @@ func (g *Grafana) Post(ctx context.Context, e Event) error {
 		"text": summary(e),
 	}
 	buf, _ := json.Marshal(body)
-	url := strings.TrimRight(expandEnv(g.BaseURL), "/") + "/api/annotations"
+	url := strings.TrimRight(envref.Expand(g.BaseURL), "/") + "/api/annotations"
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
-	req.Header.Set("Authorization", "Bearer "+expandEnv(g.APIKey))
+	req.Header.Set("Authorization", "Bearer "+envref.Expand(g.APIKey))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := g.Client.Do(req)
 	if err != nil {
@@ -132,13 +133,13 @@ func (d *Datadog) Post(ctx context.Context, e Event) error {
 		"source_type_name": "reeve",
 	}
 	buf, _ := json.Marshal(body)
-	base := expandEnv(d.BaseURL)
+	base := envref.Expand(d.BaseURL)
 	if base == "" {
 		base = "https://api.datadoghq.com"
 	}
 	url := strings.TrimRight(base, "/") + "/api/v1/events"
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
-	req.Header.Set("DD-API-KEY", expandEnv(d.APIKey))
+	req.Header.Set("DD-API-KEY", envref.Expand(d.APIKey))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.Client.Do(req)
 	if err != nil {
@@ -170,10 +171,10 @@ func (w *Webhook) Post(ctx context.Context, e Event) error {
 		w.Client = http.DefaultClient
 	}
 	buf, _ := json.Marshal(e)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, expandEnv(w.Endpoint), bytes.NewReader(buf))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, envref.Expand(w.Endpoint), bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range w.Headers {
-		req.Header.Set(k, expandEnv(v))
+		req.Header.Set(k, envref.Expand(v))
 	}
 	resp, err := w.Client.Do(req)
 	if err != nil {
@@ -229,11 +230,4 @@ func tagSlice(m map[string]string) []string {
 		out = append(out, k+":"+v)
 	}
 	return out
-}
-
-func expandEnv(s string) string {
-	if strings.HasPrefix(s, "${env:") && strings.HasSuffix(s, "}") {
-		return os.Getenv(strings.TrimSuffix(strings.TrimPrefix(s, "${env:"), "}"))
-	}
-	return s
 }

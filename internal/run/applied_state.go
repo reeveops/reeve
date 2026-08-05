@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/thefynx/reeve/internal/blob"
+	"github.com/FynxLabs/reeve/internal/blob"
 )
 
 // AppliedState is the durable record written after a fully-successful apply.

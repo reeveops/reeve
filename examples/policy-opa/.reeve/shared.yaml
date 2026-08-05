@@ -21,4 +21,4 @@ preconditions:
   preview_freshness: 2h
 
 apply:
-  command: "/reeve apply"
+  trigger: comment            # comment (default): apply on /reeve apply | merge: apply on PR merge

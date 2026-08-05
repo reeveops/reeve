@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	corelocks "github.com/thefynx/reeve/internal/core/locks"
+	corelocks "github.com/FynxLabs/reeve/internal/core/locks"
 )
 
 func TestForceUnlockClearsHolderAndPromotes(t *testing.T) {

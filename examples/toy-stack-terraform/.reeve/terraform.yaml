@@ -1,0 +1,33 @@
+version: 1
+config_type: engine
+
+engine:
+  type: terraform          # works identically with OpenTofu: type: tofu
+  binary:
+    path: terraform        # or tofu
+
+  # A root-module directory is a project; a workspace is a stack.
+  # Declared stacks are authoritative - no init/workspace enumeration
+  # needed, and reeve creates a declared-but-missing workspace on first
+  # use (never an undeclared one).
+  stacks:
+    - project: random-name
+      path: projects/random-name
+      stacks: [dev, prod]
+    - project: null-touch
+      path: projects/null-touch
+      stacks: [default]    # dir-per-env layouts use the default workspace
+
+  filters:
+    exclude: []
+
+  change_mapping:
+    ignore_changes:
+      - "**/*.md"
+      - "**/README*"
+      - "**/.terraform/**"
+
+  execution:
+    max_parallel_stacks: 2
+    preview_timeout: 5m
+    apply_timeout: 10m

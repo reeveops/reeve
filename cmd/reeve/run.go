@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,12 +9,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	authfac "github.com/thefynx/reeve/internal/auth/factory"
-	"github.com/thefynx/reeve/internal/blob/factory"
-	"github.com/thefynx/reeve/internal/config"
-	"github.com/thefynx/reeve/internal/iac/pulumi"
-	"github.com/thefynx/reeve/internal/run"
-	gh "github.com/thefynx/reeve/internal/vcs/github"
+	authfac "github.com/FynxLabs/reeve/internal/auth/factory"
+	"github.com/FynxLabs/reeve/internal/blob/factory"
+	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/FynxLabs/reeve/internal/run"
+	gh "github.com/FynxLabs/reeve/internal/vcs/github"
 )
 
 func newRunCmd() *cobra.Command {
@@ -27,8 +26,10 @@ func newRunCmd() *cobra.Command {
 		RunE:  runPreview,
 	}
 	addPreviewFlags(preview)
+	preview.Flags().Bool("refresh", false,
+		"Reconcile state with live infrastructure before planning, so the diff is against reality rather than possibly-stale state")
 
-	cmd.AddCommand(preview, newApplyCmd(), newReadyCmd(), newApprovedCmd(), newHelpCmd())
+	cmd.AddCommand(preview, newApplyCmd(), newRefreshCmd(), newReadyCmd(), newApprovedCmd(), newHelpCmd())
 	return cmd
 }
 
@@ -71,7 +72,8 @@ func addPreviewFlags(cmd *cobra.Command) {
 }
 
 func runPreview(cmd *cobra.Command, _ []string) error {
-	ctx := context.Background()
+	// Cancelled by SIGINT/SIGTERM via the root signal context (see main.go).
+	ctx := cmd.Context()
 
 	local := flagBool(cmd, "local")
 	pr := flagInt(cmd, "pr")
@@ -111,38 +113,40 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	run.PruneRunArtifactsOpportunistic(ctx, store, cfg.Shared)
 
 	engineCfg := cfg.Engines[0]
-	engine := pulumi.New(engineCfg.Engine.Binary.Path)
+	engine, err := iac.New(engineCfg.Engine)
+	if err != nil {
+		return err
+	}
 
 	authReg, err := authfac.Build(ctx, cfg.Auth)
 	if err != nil {
 		return fmt.Errorf("build auth registry: %w", err)
 	}
 
-	otelProvider, _ := run.BuildOTEL(ctx, cfg.Observability)
-	defer func() {
-		if otelProvider != nil {
-			_ = otelProvider.Shutdown(ctx)
-		}
-	}()
-	annotationEmitters := run.BuildAnnotationEmitters(cfg.Observability)
-
+	// OTEL is NOT built here for preview: run.Preview constructs it after
+	// the pre-approval observability gate (a PR that modifies
+	// observability.yaml must not get an OTLP exporter pointed at its own
+	// collector). Annotation emitters only fire on apply/drift events, so
+	// preview needs none.
 	in := run.PreviewInput{
-		PRNumber:      pr,
-		CommitSHA:     sha,
-		RunNumber:     runNum,
-		CIRunURL:      runURL,
-		RepoRoot:      root,
-		Engine:        engine,
-		Config:        engineCfg,
-		Shared:        cfg.Shared,
-		AuthConfig:    cfg.Auth,
-		AuthRegistry:  authReg,
-		Notifications: cfg.Notifications,
-		OTEL:          otelProvider,
-		Annotations:   annotationEmitters,
-		Blob:          store,
-		Local:         local,
-		Force:         flagBool(cmd, "force"),
+		PRNumber:                 pr,
+		CommitSHA:                sha,
+		RunNumber:                runNum,
+		CIRunURL:                 runURL,
+		RepoRoot:                 root,
+		Engine:                   engine,
+		Config:                   engineCfg,
+		Shared:                   cfg.Shared,
+		AuthConfig:               cfg.Auth,
+		AuthRegistry:             authReg,
+		Notifications:            cfg.Notifications,
+		ChannelSourceFiles:       cfg.ChannelSourceFiles,
+		Observability:            cfg.Observability,
+		ObservabilitySourceFiles: cfg.ObservabilitySourceFiles,
+		Blob:                     store,
+		Local:                    local,
+		Force:                    flagBool(cmd, "force"),
+		Refresh:                  flagBool(cmd, "refresh"),
 	}
 
 	if !local {

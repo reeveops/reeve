@@ -25,8 +25,8 @@ falls back to queue removal.
 ## Queue
 
 FIFO. Queue entries visible in PR comment and via `reeve locks list`.
-"Blocked by PR #X" surfaces in comments on both the waiting PR and the
-holder PR.
+"Blocked by PR #X" surfaces in a comment on the waiting PR (naming the
+holder PR).
 
 ## TTL & Reaper
 
@@ -63,5 +63,5 @@ no starvation under churn.
 - Mid-apply blob unavailability: apply fails, lock state is indeterminate.
   Next invocation detects via TTL or explicit admin override.
 - Clock skew: adapters prefer server-side timestamps (S3 `LastModified`,
-  GCS `updated`) over local clock; filesystem adapter emits drift warning
-  if local clock disagrees with lock `acquired_at` by > 60s.
+  GCS `updated`) over local clock. The filesystem adapter relies on the local
+  clock, so lock TTLs there are only as accurate as the host clock.

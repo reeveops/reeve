@@ -1,16 +1,20 @@
 name: edge-build
 
-# Rolling prebuilt binaries for the GitHub Action fast-path. Every push to
-# master/next builds linux amd64+arm64 binaries, names them after the exact
-# source hash the composite action computes (.github/scripts/source-hash.sh,
-# shared so the two can never drift), and publishes them to a rolling
-# prerelease tagged edge-<branch>. The action, when pinned @master or @next,
-# downloads the asset matching its own source hash - a name match proves the
-# binary was built from exactly the checked-out action source. These builds
-# are unsigned; regular v*.*.* releases remain the signed distribution.
+# Per-push prebuilt binaries for the GitHub Action fast-path. Every push to
+# master/next builds linux amd64+arm64 binaries and publishes them as their
+# OWN prerelease tagged <branch>-<shortsha> (e.g. next-5993c47) - one release
+# per commit, never a rolling dumping ground. The action, when pinned @master
+# or @next, resolves the newest <branch>-* prerelease and downloads its asset.
+# Hand-cut v*.*.* (and vX.Y.Z-rc) tags remain the primary distribution and are
+# entirely the maintainer's call.
 #
-# The edge-<branch> tags do NOT match the release workflow's v*.*.* trigger,
+# The <branch>-<sha> tags do NOT match the release workflow's v*.*.* trigger,
 # so publishing here never starts the goreleaser pipeline.
+#
+# Artifacts are signed: checksums.txt is cosign keyless-signed (Sigstore,
+# GH OIDC) and its bundle is published alongside, exactly like the release
+# workflow. The fast-path (fetch-binary.sh) verifies the bundle when cosign
+# is available, and REEVE_REQUIRE_SIGNATURE=1 makes verification mandatory.
 
 on:
   push:
@@ -19,26 +23,21 @@ on:
 
 permissions:
   contents: write
+  id-token: write # sigstore keyless signing
 
 jobs:
   edge:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Hash reeve source
-        id: hash
-        run: echo "hash=$(.github/scripts/source-hash.sh .)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Build and package (linux amd64 + arm64)
-        env:
-          SRCHASH: ${{ steps.hash.outputs.hash }}
         run: |
           set -euo pipefail
           BRANCH="$GITHUB_REF_NAME"
@@ -49,70 +48,87 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath \
               -ldflags="-s -w -X main.version=${BRANCH}-${SHORTSHA} -X main.commit=${SHORTSHA} -X main.date=${DATE}" \
               -o "dist/${ARCH}/reeve" ./cmd/reeve
-            tar -C "dist/${ARCH}" -czf "dist/reeve_edge_linux_${ARCH}_${SRCHASH}.tar.gz" reeve
+            tar -C "dist/${ARCH}" -czf "dist/reeve_linux_${ARCH}.tar.gz" reeve
           done
-          (cd dist && sha256sum reeve_edge_linux_*_"${SRCHASH}".tar.gz > "checksums_${SRCHASH}.txt")
+          (cd dist && sha256sum reeve_linux_*.tar.gz > checksums.txt)
           ls -l dist
 
-      - name: Publish to rolling edge prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SRCHASH: ${{ steps.hash.outputs.hash }}
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign checksums (keyless)
         run: |
           set -euo pipefail
-          TAG="edge-${GITHUB_REF_NAME}"
+          # Keyless sign-blob over checksums.txt; the bundle carries the
+          # Sigstore certificate + transparency-log proof. Same scheme the
+          # release workflow uses for its checksums.
+          cosign sign-blob --yes \
+            --bundle dist/checksums.txt.bundle \
+            dist/checksums.txt
+          ls -l dist
+
+      - name: Publish per-push prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BRANCH="$GITHUB_REF_NAME"
+          SHORTSHA="${GITHUB_SHA::7}"
+          TAG="${BRANCH}-${SHORTSHA}"
+          # One prerelease per commit. On a re-run of the same commit the tag
+          # already exists; clobber its assets (same source, not accumulation).
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --prerelease \
-              --title "reeve edge (${GITHUB_REF_NAME})" \
+              --title "reeve ${BRANCH} (${SHORTSHA})" \
               --target "$GITHUB_SHA" \
-              --notes "$(cat <<'EOF'
-          Rolling, **unsigned** builds of this branch, consumed by the reeve
-          GitHub Action fast-path: when a workflow pins the action to this
-          branch (`@master` / `@next`), the action downloads the asset whose
-          name embeds the sha256 hash of the action source it just checked
-          out, verifies the checksum sidecar, and skips the Go toolchain +
-          source build. If no asset matches (a push's edge build is still
-          running), the action silently builds from source.
+              --notes "$(cat <<EOF
+          Prebuilt binaries for commit \`${SHORTSHA}\` on \`${BRANCH}\`,
+          consumed by the reeve GitHub Action fast-path: a workflow pinned to
+          this branch (\`@${BRANCH}\`) resolves the newest \`${BRANCH}-*\`
+          prerelease, downloads the matching linux binary, verifies its
+          checksum, and skips the Go toolchain + source build. If resolution
+          fails (edge build still running, unsupported arch), the action
+          silently builds from source.
 
-          Do not consume these assets directly - use the signed `vX.Y.Z` releases.
+          \`checksums.txt\` is cosign keyless-signed; \`checksums.txt.bundle\`
+          carries the Sigstore certificate + transparency-log proof. The
+          fast-path verifies it when cosign is present, and
+          \`REEVE_REQUIRE_SIGNATURE=1\` makes verification mandatory. The
+          hand-cut \`vX.Y.Z\` releases remain the primary signed distribution.
           EOF
           )" || echo "release create failed (raced with a concurrent push?) - continuing"
           fi
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            "dist/reeve_edge_linux_amd64_${SRCHASH}.tar.gz" \
-            "dist/reeve_edge_linux_arm64_${SRCHASH}.tar.gz" \
-            "dist/checksums_${SRCHASH}.txt"
+            dist/reeve_linux_amd64.tar.gz \
+            dist/reeve_linux_arm64.tar.gz \
+            dist/checksums.txt \
+            dist/checksums.txt.bundle
 
-      # Keep the newest N source-hashes per platform and delete the rest.
-      # Keep-latest-N (instead of delete-all-but-current) because concurrent
-      # pushes race: an in-flight consumer may still be resolving an asset a
-      # sibling run would otherwise have deleted.
-      - name: Prune old edge assets
+      # Keep the newest N per-push prereleases for this branch and delete the
+      # rest (release + its git tag). Keep-latest-N rather than keep-only-1
+      # because a concurrent consumer may still be resolving the prior release
+      # while this push publishes.
+      - name: Prune old per-push prereleases
         env:
           GH_TOKEN: ${{ github.token }}
-          KEEP: "5"
+          KEEP: "10"
         run: |
           set -euo pipefail
-          TAG="edge-${GITHUB_REF_NAME}"
-          # Newest-first hashes, derived from the checksum sidecars' creation
-          # times; everything past the first $KEEP gets pruned.
-          mapfile -t OLD_HASHES < <(
-            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
-              --jq '.assets | map(select(.name | startswith("checksums_"))) | sort_by(.created_at) | reverse | .[].name' \
-            | sed -nE 's/^checksums_([0-9a-f]+)\.txt$/\1/p' \
+          BRANCH="$GITHUB_REF_NAME"
+          # Newest-first tags for this branch, everything past the first $KEEP
+          # gets its release and tag deleted.
+          mapfile -t OLD_TAGS < <(
+            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq "[.[] | select(.prerelease and (.tag_name | startswith(\"${BRANCH}-\")))] | sort_by(.created_at) | reverse | .[].tag_name" \
             | tail -n +"$((KEEP + 1))"
           )
-          if [ "${#OLD_HASHES[@]}" -eq 0 ]; then
+          if [ "${#OLD_TAGS[@]}" -eq 0 ]; then
             echo "nothing to prune"
             exit 0
           fi
-          for H in "${OLD_HASHES[@]}"; do
-            echo "Pruning edge assets for source hash $H"
-            for A in "reeve_edge_linux_amd64_${H}.tar.gz" \
-                     "reeve_edge_linux_arm64_${H}.tar.gz" \
-                     "checksums_${H}.txt"; do
-              gh release delete-asset "$TAG" "$A" --repo "$GITHUB_REPOSITORY" --yes \
-                || echo "could not delete $A (already pruned by a sibling run?)"
-            done
+          for T in "${OLD_TAGS[@]}"; do
+            echo "Pruning old prerelease $T"
+            gh release delete "$T" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes \
+              || echo "could not delete $T (already pruned by a sibling run?)"
           done

@@ -2,9 +2,8 @@ package drift
 
 import (
 	"context"
-	"time"
 
-	"github.com/thefynx/reeve/internal/core/approvals"
+	"github.com/FynxLabs/reeve/internal/core/approvals"
 )
 
 // ghOverlap wraps *github.Client into a PROverlapFinder.
@@ -25,20 +24,20 @@ func NewGitHubPROverlap(client ghOverlapClient) PROverlapFinder {
 }
 
 func (g *ghOverlap) FindOverlappingPRs(ctx context.Context, paths []string) ([]OverlappingPR, error) {
+	// A non-nil error may accompany PARTIAL results (approvals.OverlapScanError:
+	// some PRs' file lists could not be fetched). Convert whatever WAS found
+	// and propagate the error so the runner can surface a warning instead of
+	// silently reporting "no overlap".
 	prs, err := g.client.ListOpenPRsTouchingPaths(ctx, paths)
-	if err != nil {
-		return nil, err
-	}
 	out := make([]OverlappingPR, 0, len(prs))
 	for _, p := range prs {
-		opened, _ := time.Parse(time.RFC3339, "")
 		out = append(out, OverlappingPR{
 			Number:   p.Number,
 			Author:   p.Author,
 			HeadSHA:  p.HeadSHA,
-			OpenedAt: opened, // VCS PR doesn't carry OpenedAt in core.PR yet - wire in Phase 7.x
+			OpenedAt: p.OpenedAt,
 			Paths:    p.Changed,
 		})
 	}
-	return out, nil
+	return out, err
 }

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thefynx/reeve/internal/auth"
+	"github.com/FynxLabs/reeve/internal/auth"
 )
 
 // Provider is a single azure_federated provider instance.
@@ -71,8 +71,12 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 	}, nil
 }
 
+// loginBase is a package var only so tests can point the exchange at an
+// httptest server; production behavior is unchanged.
+var loginBase = "https://login.microsoftonline.com"
+
 func tokenExchange(ctx context.Context, tenant, clientID, assertion string) (string, time.Time, error) {
-	endpoint := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenant)
+	endpoint := fmt.Sprintf("%s/%s/oauth2/v2.0/token", loginBase, tenant)
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
 	form.Set("client_id", clientID)
@@ -114,9 +118,13 @@ func fetchGitHubOIDC(ctx context.Context, audience string) (string, error) {
 		}
 		u = u + sep + "audience=" + audience
 	}
+	// #nosec G704 -- URL is ACTIONS_ID_TOKEN_REQUEST_URL, injected by the Actions runner, not read
+	// from .reeve config or PR content; the call is refused when it or its paired
+	// token is unset
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/json; api-version=2.0")
+	// #nosec G704 -- same runner-provided endpoint as the request above
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err

@@ -147,6 +147,81 @@ file[0-9].txt @nobody
 	assertOwners(t, got, "file1.txt", "@default-team")
 }
 
+func TestParseInlineComments(t *testing.T) {
+	src := `*.js    @js-owner #This is an inline comment.
+/build/logs/ @doctocat # trailing comment with spaces
+/docs # ownerless entry with a comment
+`
+	rs := Parse(strings.NewReader(src))
+	if len(rs) != 3 {
+		t.Fatalf("expected 3 rules, got %d: %+v", len(rs), rs)
+	}
+	if rs[0].Pattern != "*.js" || len(rs[0].Owners) != 1 || rs[0].Owners[0] != "@js-owner" {
+		t.Fatalf("inline comment leaked into rule: %+v", rs[0])
+	}
+	if rs[1].Pattern != "/build/logs/" || len(rs[1].Owners) != 1 || rs[1].Owners[0] != "@doctocat" {
+		t.Fatalf("inline comment leaked into rule: %+v", rs[1])
+	}
+	if rs[2].Pattern != "/docs" || len(rs[2].Owners) != 0 {
+		t.Fatalf("comment after ownerless pattern must leave it ownerless: %+v", rs[2])
+	}
+}
+
+func TestParseEscapedSpaces(t *testing.T) {
+	src := `docs/getting\ started.md @docs-team
+/spa\ ced/dir/ @dir-team
+`
+	rs := Parse(strings.NewReader(src))
+	if len(rs) != 2 {
+		t.Fatalf("expected 2 rules, got %d: %+v", len(rs), rs)
+	}
+	if rs[0].Pattern != "docs/getting started.md" {
+		t.Fatalf("escaped space mishandled: pattern %q", rs[0].Pattern)
+	}
+	if len(rs[0].Owners) != 1 || rs[0].Owners[0] != "@docs-team" {
+		t.Fatalf("owners mangled by escaped space: %+v", rs[0])
+	}
+	got := Resolve(rs, []string{"docs/getting started.md", "spa ced/dir/file.go"})
+	assertOwners(t, got, "docs/getting started.md", "@docs-team")
+	assertOwners(t, got, "spa ced/dir/file.go", "@dir-team")
+}
+
+func TestParseEscapedHash(t *testing.T) {
+	src := `\#readme @hash-team
+`
+	rs := Parse(strings.NewReader(src))
+	if len(rs) != 1 || rs[0].Pattern != "#readme" {
+		t.Fatalf("escaped # must be a literal pattern char, got %+v", rs)
+	}
+}
+
+func TestParseTrailingWhitespace(t *testing.T) {
+	src := "*.go   @go-team   \t \n   \t\n"
+	rs := Parse(strings.NewReader(src))
+	if len(rs) != 1 {
+		t.Fatalf("expected 1 rule (whitespace-only line skipped), got %+v", rs)
+	}
+	if rs[0].Pattern != "*.go" || len(rs[0].Owners) != 1 || rs[0].Owners[0] != "@go-team" {
+		t.Fatalf("trailing whitespace mishandled: %+v", rs[0])
+	}
+}
+
+func TestParseEscapedGlobMetacharPassesThrough(t *testing.T) {
+	// `\*` escapes the glob metachar; the matcher (doublestar) must still
+	// see the backslash, so a literal-star pattern doesn't become a wildcard.
+	src := `\*.go @literal-team
+`
+	rs := Parse(strings.NewReader(src))
+	if len(rs) != 1 || rs[0].Pattern != `\*.go` {
+		t.Fatalf("glob escape must pass through unchanged, got %+v", rs)
+	}
+	got := Resolve(rs, []string{"main.go", "*.go"})
+	if _, ok := got["main.go"]; ok {
+		t.Fatalf("escaped star must not act as a wildcard: %v", got)
+	}
+	assertOwners(t, got, "*.go", "@literal-team")
+}
+
 func assertOwners(t *testing.T, got map[string][]string, path string, owners ...string) {
 	t.Helper()
 	have := got[path]

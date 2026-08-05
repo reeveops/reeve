@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/thefynx/reeve/internal/log"
+	"github.com/FynxLabs/reeve/internal/log"
 )
 
 // Build metadata, overridden at link time by goreleaser via
@@ -52,6 +52,7 @@ No control plane, no SaaS backend, no telemetry, no account. The user owns all s
 		"log format: text | json (default text; env REEVE_LOG_FORMAT)")
 
 	root.AddCommand(
+		newInitCmd(),
 		newLintCmd(),
 		newStacksCmd(),
 		newRulesCmd(),

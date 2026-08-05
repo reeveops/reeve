@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thefynx/reeve/internal/core/render"
+	"github.com/FynxLabs/reeve/internal/core/render"
 )
 
 func TestBuildHelpComment_ContainsCommands(t *testing.T) {

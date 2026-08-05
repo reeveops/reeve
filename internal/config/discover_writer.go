@@ -8,7 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/thefynx/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/core/discovery"
 )
 
 // WriteClusteredStacks updates the `engine.stacks:` block of the given
@@ -22,17 +22,52 @@ import (
 //   - A `.bak` copy of the original file is written alongside.
 //   - dryRun=true returns the new YAML bytes without touching disk.
 func WriteClusteredStacks(path string, decls []discovery.Declaration, dryRun bool) ([]byte, error) {
-	data, err := os.ReadFile(path)
+	// Scoped to the engine config's own directory so the file name cannot
+	// resolve through a symlink to somewhere else. This protects the final
+	// component, which is the realistic case (a committed
+	// `.reeve/pulumi.yaml -> ...`); a symlinked .reeve/ itself is still
+	// followed, since that is the directory the operator pointed us at.
+	dirRoot, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
 		return nil, err
 	}
+	defer dirRoot.Close()
+	name := filepath.Base(path)
+
+	data, err := dirRoot.ReadFile(name)
+	if err != nil {
+		return nil, err
+	}
+	out, err := ClusteredStacksBytes(data, decls)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+
+	if dryRun {
+		return out, nil
+	}
+	if err := dirRoot.WriteFile(name+".bak", data, 0o600); err != nil {
+		return nil, fmt.Errorf("backup: %w", err)
+	}
+	if err := dirRoot.WriteFile(name, out, 0o600); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ClusteredStacksBytes is the in-memory core of WriteClusteredStacks: it
+// replaces (or inserts) the `engine.stacks:` block inside the given YAML
+// document and returns the re-encoded bytes. Comments on sibling keys are
+// preserved via yaml.v3 node manipulation. Used by `stacks discover --write`
+// and by `reeve init` to pre-fill a freshly scaffolded engine config.
+func ClusteredStacksBytes(data []byte, decls []discovery.Declaration) ([]byte, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, err
 	}
 	engine := findMapValue(&root, "engine")
 	if engine == nil {
-		return nil, fmt.Errorf("%s: missing top-level engine: block", path)
+		return nil, fmt.Errorf("missing top-level engine: block")
 	}
 	stacksNode := buildStacksNode(decls)
 
@@ -51,18 +86,7 @@ func WriteClusteredStacks(path string, decls []discovery.Declaration, dryRun boo
 		return nil, err
 	}
 	_ = enc.Close()
-	out := buf.Bytes()
-
-	if dryRun {
-		return out, nil
-	}
-	if err := os.WriteFile(path+".bak", data, 0o600); err != nil {
-		return nil, fmt.Errorf("backup: %w", err)
-	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return buf.Bytes(), nil
 }
 
 // buildStacksNode constructs a sequence node matching the schema:
@@ -146,7 +170,12 @@ func replaceMapChild(m *yaml.Node, key string, newVal *yaml.Node) bool {
 // DryRunDiff produces a unified diff between the current and proposed
 // contents. Small shim used by `reeve stacks discover --diff`.
 func DryRunDiff(path string, proposed []byte) (string, error) {
-	cur, err := os.ReadFile(path)
+	dirRoot, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	defer dirRoot.Close()
+	cur, err := dirRoot.ReadFile(filepath.Base(path))
 	if err != nil {
 		return "", err
 	}

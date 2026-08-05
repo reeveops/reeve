@@ -35,6 +35,15 @@ type Holder struct {
 	Actor      string `json:"actor"`
 	AcquiredAt string `json:"acquired_at"` // RFC3339
 	ExpiresAt  string `json:"expires_at"`  // RFC3339
+	// Promoted marks provenance: true when this holder was installed from
+	// the queue by promoteNext (release/unlock/reaper), not by its own
+	// TryAcquire. Queued runs have already exited (blocked runs don't
+	// wait), so a promoted holder is a dead reservation for its PR - the
+	// next run of that PR may adopt it instead of being refused with
+	// ErrHeldBySamePR. Cleared the moment a live run (re)acquires. Old
+	// lock blobs without the field decode to false, which is correct:
+	// their holders were actively acquired.
+	Promoted bool `json:"promoted,omitempty"`
 }
 
 // QueueItem is a waiting applicant.
@@ -77,37 +86,42 @@ func NewLock(project, stack string, now time.Time) Lock {
 // - acquired=true: caller is now the holder
 // - acquired=false: caller is queued (or already queued)
 //
-// Expired holders are evicted. Holder identity is PR+RunID: re-acquire by
-// the same PR AND same RunID refreshes the expires_at; a different run of
-// the same PR is refused with ErrHeldBySamePR while the holder's lease is
-// unexpired (two runs of one PR must never apply concurrently).
+// Expired holders are evicted. Holder identity is PR+RunID:
+//   - same PR + same RunID: idempotent refresh of expires_at.
+//   - same PR + different RunID + holder PROMOTED from the queue: the
+//     applicant adopts the reservation (queued runs already exited, so a
+//     promoted holder can never be a live process) - new RunID, fresh
+//     lease, Promoted cleared.
+//   - same PR + different RunID + holder actively acquired: refused with
+//     ErrHeldBySamePR while the lease is unexpired (two live runs of one
+//     PR must never apply concurrently).
 func TryAcquire(l Lock, applicant Holder, ttl time.Duration, now time.Time) (Lock, bool, error) {
 	l = evictIfExpired(l, now, ttl)
 
-	// Same PR already holds. Same run: idempotent refresh. Different run:
-	// refuse - the unexpired holder wins (an expired one was evicted above).
+	// Same PR already holds.
 	if l.Holder != nil && l.Holder.PR == applicant.PR {
 		if l.Holder.RunID != applicant.RunID {
-			return l, false, ErrHeldBySamePR
+			if !l.Holder.Promoted {
+				return l, false, ErrHeldBySamePR
+			}
+			// Promoted dead reservation: adopt it as a fresh acquire.
+			return install(l, applicant, ttl, now), true, nil
 		}
 		refreshed := *l.Holder
 		refreshed.ExpiresAt = now.Add(ttl).UTC().Format(time.RFC3339)
 		refreshed.CommitSHA = applicant.CommitSHA
 		refreshed.RunID = applicant.RunID
 		refreshed.Actor = applicant.Actor
+		// A live run is refreshing: whatever the provenance was, the holder
+		// is actively held now.
+		refreshed.Promoted = false
 		l.Holder = &refreshed
 		l.UpdatedAt = now.UTC().Format(time.RFC3339)
 		return l, true, ErrAlreadyHolder
 	}
 
 	if l.Holder == nil {
-		applicant.AcquiredAt = now.UTC().Format(time.RFC3339)
-		applicant.ExpiresAt = now.Add(ttl).UTC().Format(time.RFC3339)
-		l.Holder = &applicant
-		// If applicant was also queued (race), remove from queue.
-		l.Queue = removePR(l.Queue, applicant.PR)
-		l.UpdatedAt = now.UTC().Format(time.RFC3339)
-		return l, true, nil
+		return install(l, applicant, ttl, now), true, nil
 	}
 
 	// Already held by someone else - enqueue.
@@ -208,6 +222,19 @@ func promoteTTL(ttl time.Duration) time.Duration {
 	return ttl
 }
 
+// install makes applicant the holder with a fresh lease. Direct acquire
+// provenance: Promoted is always cleared.
+func install(l Lock, applicant Holder, ttl time.Duration, now time.Time) Lock {
+	applicant.AcquiredAt = now.UTC().Format(time.RFC3339)
+	applicant.ExpiresAt = now.Add(ttl).UTC().Format(time.RFC3339)
+	applicant.Promoted = false
+	l.Holder = &applicant
+	// If applicant was also queued (race), remove from queue.
+	l.Queue = removePR(l.Queue, applicant.PR)
+	l.UpdatedAt = now.UTC().Format(time.RFC3339)
+	return l
+}
+
 func evictIfExpired(l Lock, now time.Time, ttl time.Duration) Lock {
 	if l.Holder != nil && expired(l.Holder, now) {
 		l.Holder = nil
@@ -229,6 +256,10 @@ func promoteNext(l Lock, now time.Time, ttl time.Duration) Lock {
 		Actor:      next.Actor,
 		AcquiredAt: now.UTC().Format(time.RFC3339),
 		ExpiresAt:  now.Add(ttl).UTC().Format(time.RFC3339),
+		// The queued run already exited (blocked runs don't wait): mark the
+		// reservation so the next run of this PR can adopt it instead of
+		// being locked out by ErrHeldBySamePR for a full ttl.
+		Promoted: true,
 	}
 	return l
 }

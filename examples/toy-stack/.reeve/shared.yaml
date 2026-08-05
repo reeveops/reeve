@@ -46,5 +46,4 @@ freeze_windows:
 
 apply:
   trigger: comment
-  command: "/reeve apply"
   allow_fork_prs: false

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/thefynx/reeve/internal/core/summary"
+	"github.com/FynxLabs/reeve/internal/core/summary"
 )
 
 // Marker is the hidden HTML comment that identifies reeve's PR comment.
@@ -146,7 +146,7 @@ func writeHeader(b *strings.Builder, in PreviewInput) {
 	if op == "" {
 		op = "preview"
 	}
-	fmt.Fprintf(b, "## %s reeve · %s · run #%d · [commit %s]\n\n", icon, op, in.RunNumber, shortSHA(in.CommitSHA))
+	fmt.Fprintf(b, "## %s reeve · %s · %s · [commit %s]\n\n", icon, op, runRef(in.RunNumber, in.CIRunURL), shortSHA(in.CommitSHA))
 
 	// "X stacks changed" counts only stacks that actually have planned/applied
 	// changes -- no-op stacks appear in the per-stack table for completeness
@@ -166,11 +166,7 @@ func writeHeader(b *strings.Builder, in PreviewInput) {
 	if in.DurationSec > 0 {
 		durBit = fmt.Sprintf(" · ⏱ %ds", in.DurationSec)
 	}
-	runBit := ""
-	if in.CIRunURL != "" {
-		runBit = fmt.Sprintf(" · [View run](%s)", in.CIRunURL)
-	}
-	fmt.Fprintf(b, "**%d %s changed**%s%s\n\n", n, noun, durBit, runBit)
+	fmt.Fprintf(b, "**%d %s changed**%s\n\n", n, noun, durBit)
 }
 
 func writeTable(b *strings.Builder, in PreviewInput) {
@@ -320,6 +316,18 @@ func shortSHA(sha string) string {
 		return sha[:7]
 	}
 	return sha
+}
+
+// runRef renders the "run #N" header token. GitHub auto-links a bare commit
+// SHA, but never the run number, so when the CI run URL is known we hyperlink
+// the run number straight to its run; otherwise it stays plain text. This is
+// the single link to the run - callers no longer append a separate
+// "[View run]" bit.
+func runRef(runNumber int, ciRunURL string) string {
+	if ciRunURL != "" {
+		return fmt.Sprintf("[run #%d](%s)", runNumber, ciRunURL)
+	}
+	return fmt.Sprintf("run #%d", runNumber)
 }
 
 // sorted returns a copy of ss in the requested order.

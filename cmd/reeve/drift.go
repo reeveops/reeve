@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,17 +13,17 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/thefynx/reeve/internal/auth"
-	authfac "github.com/thefynx/reeve/internal/auth/factory"
-	"github.com/thefynx/reeve/internal/blob/factory"
-	"github.com/thefynx/reeve/internal/config"
-	"github.com/thefynx/reeve/internal/config/schemas"
-	"github.com/thefynx/reeve/internal/core/discovery"
-	"github.com/thefynx/reeve/internal/drift"
-	sinkfac "github.com/thefynx/reeve/internal/drift/sinks/factory"
-	"github.com/thefynx/reeve/internal/iac/pulumi"
-	"github.com/thefynx/reeve/internal/run"
-	gh "github.com/thefynx/reeve/internal/vcs/github"
+	"github.com/FynxLabs/reeve/internal/auth"
+	authfac "github.com/FynxLabs/reeve/internal/auth/factory"
+	"github.com/FynxLabs/reeve/internal/blob/factory"
+	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/FynxLabs/reeve/internal/drift"
+	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/FynxLabs/reeve/internal/notify"
+	"github.com/FynxLabs/reeve/internal/run"
+	gh "github.com/FynxLabs/reeve/internal/vcs/github"
 )
 
 func newDriftCmd() *cobra.Command {
@@ -74,7 +75,8 @@ func loadDriftCtx(cmd *cobra.Command) (context.Context, *config.Config, string, 
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, "", err
 	}
-	return context.Background(), cfg, root, nil
+	// Cancelled by SIGINT/SIGTERM via the root signal context (see main.go).
+	return cmd.Context(), cfg, root, nil
 }
 
 func driftRun(cmd *cobra.Command, _ []string) error { return runDrift(cmd, false) }
@@ -95,7 +97,10 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 		return err
 	}
 	engineCfg := cfg.Engines[0]
-	engine := pulumi.New(engineCfg.Engine.Binary.Path)
+	engine, err := iac.New(engineCfg.Engine)
+	if err != nil {
+		return err
+	}
 
 	// Build the auth resolver on top of the auth registry.
 	authReg, err := authfac.Build(ctx, cfg.Auth)
@@ -141,11 +146,16 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	}()
 
 	// Optional PR-overlap support (drift reports link back to open PRs).
+	// A client construction failure disables the feature EXPLICITLY - a
+	// silent skip would read as "no overlapping PRs".
 	var overlap drift.PROverlapFinder
 	repoFullForOverlap := os.Getenv("GITHUB_REPOSITORY")
 	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" && repoFullForOverlap != "" {
 		if parts := strings.SplitN(repoFullForOverlap, "/", 2); len(parts) == 2 {
-			if client, err := gh.New(ctx, tok, parts[0], parts[1]); err == nil {
+			client, err := gh.New(ctx, tok, parts[0], parts[1])
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: PR-overlap scan disabled (github client: %v)\n", err)
+			} else {
 				overlap = drift.NewGitHubPROverlap(client)
 			}
 		}
@@ -168,8 +178,27 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	if cfg.Drift != nil {
 		opts.RefreshFirst = cfg.Drift.Behavior.RefreshBeforeCheck
 		opts.Parallel = cfg.Drift.Behavior.MaxParallelStacks
+		opts.RetryOnTransientError = cfg.Drift.Behavior.RetryOnTransientError
+		opts.RetryBackoff = 2 * time.Second // base; grows exponentially, ctx-aware
+		opts.Classification = buildClassification(cfg.Drift.Classification)
+		opts.PermanentSuppressions = buildPermanentSuppressions(cfg.Drift.PermanentSuppressions)
 		if cfg.Drift.Behavior.StateBootstrap.Mode != "" {
 			opts.BootstrapMode = cfg.Drift.Behavior.StateBootstrap.Mode
+		}
+		if ra := cfg.Drift.Behavior.RenotifyAfter; ra != "" {
+			// Validated at config load (validateDurations, extended units).
+			if d, err := config.ParseDurationExtended(ra); err == nil {
+				opts.RenotifyAfter = d
+			}
+		}
+		if to := cfg.Drift.Behavior.TimeoutPerStack; to != "" {
+			// Validated at config load (validateDurations, extended units,
+			// must be positive); parse the same way here.
+			d, perr := config.ParseDurationExtended(to)
+			if perr != nil {
+				return fmt.Errorf("drift.yaml: behavior.timeout_per_stack %q: %w", to, perr)
+			}
+			opts.PerStackTimeout = d
 		}
 		if w := cfg.Drift.Freshness.Window; w != "" && (cfg.Drift.Freshness.Enabled || flagBool(cmd, "if-stale")) {
 			if d, err := time.ParseDuration(w); err == nil {
@@ -201,43 +230,157 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	// and the runner writes it as the workflow user; tighter perms break
 	// the runner's own reader.
 	if p := os.Getenv("GITHUB_STEP_SUMMARY"); p != "" {
-		_ = os.WriteFile(p, []byte(report), 0o644) // #nosec G306
+		// Two rules are suppressed on the line below, space-separated in one
+		// directive: gosec honors a single rule list per node, so a second
+		// annotation on the same statement would silently replace the first.
+		// G306 is the deliberate 0644 explained above; G703 is the path,
+		// which is $GITHUB_STEP_SUMMARY as provided by the Actions runner.
+		_ = os.WriteFile(p, []byte(report), 0o644) // #nosec G306 G703 -- runner-provided path; 0644 required by the Actions UI reader
 	}
 
-	// Bootstrap is silent by design: state is recorded, no sinks fire.
+	// Bootstrap is silent by design: state is recorded, no channels fire.
 	if bootstrap {
 		fmt.Fprintf(cmd.OutOrStdout(), "baseline recorded for %d stack(s); drift runs will now compare against it\n", len(out.Items))
 		fmt.Fprintln(cmd.OutOrStdout(), report)
 		return nil
 	}
 
-	// Dispatch to configured drift sinks.
+	// Dispatch to configured channels via the shared notify framework:
+	// drift.yaml channels plus any notifications.yaml channels subscribed to
+	// drift events.
 	repoFull := os.Getenv("GITHUB_REPOSITORY")
-	owner, repo := "", ""
-	if parts := strings.SplitN(repoFull, "/", 2); len(parts) == 2 {
-		owner, repo = parts[0], parts[1]
+	var issues notify.IssueClient
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		if parts := strings.SplitN(repoFull, "/", 2); len(parts) == 2 {
+			client, err := gh.New(ctx, tok, parts[0], parts[1])
+			if err != nil {
+				// Without a client the github_issue channel is skipped at
+				// build time; say so instead of silently dropping alerts.
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: github_issue channel disabled (github client: %v)\n", err)
+			} else {
+				issues = client
+			}
+		}
 	}
-	annotationEmitters := run.BuildAnnotationEmitters(cfg.Observability)
-	sinks, serr := sinkfac.Build(ctx, cfg.Drift, sinkfac.Options{
-		SlackToken:         os.Getenv("SLACK_BOT_TOKEN"),
-		GitHubToken:        os.Getenv("GITHUB_TOKEN"),
-		GitHubOwner:        owner,
-		GitHubRepo:         repo,
-		AnnotationEmitters: annotationEmitters,
+	var channelCfgs []schemas.ChannelYAML
+	if cfg.Drift != nil {
+		channelCfgs = append(channelCfgs, cfg.Drift.Channels...)
+	}
+	if cfg.Notifications != nil {
+		channelCfgs = append(channelCfgs, cfg.Notifications.Channels...)
+	}
+	channels, serr := notify.Build(ctx, channelCfgs, notify.Deps{
+		Blob:       store,
+		Issues:     issues,
+		Emitters:   run.BuildAnnotationEmitters(cfg.Observability),
+		SlackToken: os.Getenv("SLACK_BOT_TOKEN"),
+		RepoFull:   repoFull,
 	})
 	if serr != nil {
 		return serr
 	}
-	if len(sinks) > 0 {
-		// Import the sinks package from its own path to avoid a cycle.
-		errs := dispatchSinks(ctx, sinks, out)
+	if len(channels) > 0 {
+		// Durable dispatch: payloads persist as undelivered markers before
+		// delivery and clear only on success, so a crash or channel outage
+		// after the baseline advanced still redelivers on the next run
+		// (at-least-once; see internal/drift/pending.go).
+		pending := &drift.PendingStore{Blob: store}
+		leftover, perrs := pending.List(ctx)
+		for _, e := range perrs {
+			fmt.Fprintf(cmd.ErrOrStderr(), "pending-event error: %v\n", e)
+		}
+		payloads := drift.MergePending(leftover, drift.NotifyPayloads(out))
+		errs := drift.DispatchDurable(ctx, channels, payloads, pending)
 		for _, e := range errs {
-			fmt.Fprintf(cmd.ErrOrStderr(), "sink error: %v\n", e)
+			fmt.Fprintf(cmd.ErrOrStderr(), "channel error: %v\n", e)
 		}
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), report)
-	return nil
+	return driftExitError(cfg, out)
+}
+
+// driftExitError maps drift.yaml behavior.exit_on onto the process exit
+// code: when a configured condition occurred this run, a non-nil error is
+// returned so `reeve drift run` exits nonzero and CI can gate on it. All
+// conditions default to off (exit 0), matching the previous behavior.
+func driftExitError(cfg *config.Config, out *drift.RunOutput) error {
+	if cfg.Drift == nil {
+		return nil
+	}
+	eo := cfg.Drift.Behavior.ExitOn
+	countEvent := func(want drift.Event) int {
+		n := 0
+		for _, ev := range out.Events {
+			if ev == want {
+				n++
+			}
+		}
+		return n
+	}
+	var reasons []string
+	if eo.DriftDetected {
+		if n := countEvent(drift.EventDriftDetected); n > 0 {
+			reasons = append(reasons, fmt.Sprintf("new drift on %d stack(s) (exit_on.drift_detected)", n))
+		}
+	}
+	if eo.DriftOngoing {
+		if n := countEvent(drift.EventDriftOngoing); n > 0 {
+			reasons = append(reasons, fmt.Sprintf("ongoing drift on %d stack(s) (exit_on.drift_ongoing)", n))
+		}
+	}
+	if eo.RunError {
+		if n := countEvent(drift.EventCheckFailed); n > 0 {
+			reasons = append(reasons, fmt.Sprintf("%d check(s) failed (exit_on.run_error)", n))
+		}
+	}
+	if len(reasons) == 0 {
+		return nil
+	}
+	return fmt.Errorf("drift run exit condition met: %s", strings.Join(reasons, "; "))
+}
+
+// buildClassification maps the drift.yaml classification block onto the
+// runner's filter. treat_as_drift.orphaned_state / missing_state default to
+// true (a resource that has gone missing, or exists untracked, is drift);
+// only an explicit `false` opts that category out.
+func buildClassification(c schemas.DriftClassification) *drift.Classification {
+	out := &drift.Classification{
+		IgnoreResources:      c.IgnoreResources,
+		TreatOrphanedAsDrift: c.TreatAsDrift.OrphanedState == nil || *c.TreatAsDrift.OrphanedState,
+		TreatMissingAsDrift:  c.TreatAsDrift.MissingState == nil || *c.TreatAsDrift.MissingState,
+	}
+	for _, ip := range c.IgnoreProperties {
+		out.IgnoreProperties = append(out.IgnoreProperties, drift.IgnoreProperty{
+			ResourceType: ip.ResourceType,
+			Properties:   ip.Properties,
+		})
+	}
+	return out
+}
+
+// buildPermanentSuppressions maps drift.yaml permanent_suppressions onto the
+// runner. `until` is an optional RFC3339 expiry; omitted means permanent. An
+// unparseable `until` is treated as permanent (logged), never as "no
+// suppression", so a typo can't silently un-suppress accepted drift.
+func buildPermanentSuppressions(sups []schemas.SuppressionYAML) []drift.PermanentSuppression {
+	out := make([]drift.PermanentSuppression, 0, len(sups))
+	for _, s := range sups {
+		if s.Stack == "" {
+			continue
+		}
+		ps := drift.PermanentSuppression{Stack: s.Stack, Reason: s.Reason}
+		if s.Until != "" {
+			if t, err := time.Parse(time.RFC3339, s.Until); err == nil {
+				ps.Until = t
+			} else {
+				slog.Warn("drift: permanent suppression has an unparseable until (want RFC3339 date); treating as permanent",
+					"stack", s.Stack, "until", s.Until)
+			}
+		}
+		out = append(out, ps)
+	}
+	return out
 }
 
 func buildScope(cfg *config.Config, cmd *cobra.Command) (include, exclude []string, err error) {
