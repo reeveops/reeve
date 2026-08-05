@@ -20,8 +20,8 @@ jobs:
         id: tap-token
         uses: actions/create-github-app-token@v3
         with:
-          client-id: ${{ secrets.TAP_APP_CLIENT_ID }}
-          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          client-id: ${{ vars.HOMEBREW_TAP_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_KEY }}
           owner: reeveops
           repositories: tap
 
