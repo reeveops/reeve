@@ -11,16 +11,16 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/auth/factory"
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	"github.com/FynxLabs/reeve/internal/config"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/core/summary"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/auth/factory"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/iac"
 
 	// Compile in the webhook channel so BuildNotifyChannels can resolve it.
-	_ "github.com/FynxLabs/reeve/internal/notify/channels/webhook"
+	_ "github.com/reeveops/reeve/internal/notify/channels/webhook"
 )
 
 // writeNotificationsConfig writes a .reeve/notifications.yaml declaring a

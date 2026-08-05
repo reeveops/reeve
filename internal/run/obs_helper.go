@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/observability/annotations"
-	reeveotel "github.com/FynxLabs/reeve/internal/observability/otel"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/observability/annotations"
+	reeveotel "github.com/reeveops/reeve/internal/observability/otel"
 )
 
 // BuildOTEL returns an OTEL provider if observability.yaml has

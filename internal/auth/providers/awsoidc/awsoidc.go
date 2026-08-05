@@ -17,7 +17,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
-	"github.com/FynxLabs/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/auth"
 )
 
 // Provider is a single aws_oidc provider instance.

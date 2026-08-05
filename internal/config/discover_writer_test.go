@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/discovery"
 )
 
 const original = `version: 1

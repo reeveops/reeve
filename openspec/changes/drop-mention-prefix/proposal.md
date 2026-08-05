@@ -32,7 +32,7 @@ Repos that relied on the default and use `@reeve ...` comments will find
 those comments stop dispatching. The fix is one input:
 
 ```yaml
-- uses: FynxLabs/reeve@master
+- uses: reeveops/reeve@master
   with:
     command-prefix: "/reeve,@reeve"
 ```

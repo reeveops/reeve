@@ -3,8 +3,8 @@ package all
 import (
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // TestAdvertisedEngineTypesResolve pins the engine.type strings that config

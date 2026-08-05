@@ -13,7 +13,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/FynxLabs/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/auth"
 )
 
 // Provider is a single github_app provider instance.

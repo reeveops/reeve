@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // retentionPrefix is the blob namespace reeve owns for run artifacts:

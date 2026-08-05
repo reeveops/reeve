@@ -9,8 +9,8 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/FynxLabs/reeve/internal/config"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/core/discovery"
 )
 
 // loadRendered writes the rendered files into a fresh <tmp>/.reeve and

@@ -14,7 +14,7 @@ import (
 	gh "github.com/google/go-github/v66/github"
 	"golang.org/x/oauth2"
 
-	"github.com/FynxLabs/reeve/internal/vcs"
+	"github.com/reeveops/reeve/internal/vcs"
 )
 
 // Client wraps a go-github Client. Authentication is via personal access

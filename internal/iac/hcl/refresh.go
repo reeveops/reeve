@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // Refresh reconciles state with live infrastructure for one stack:

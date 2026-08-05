@@ -7,8 +7,8 @@
 package terraform
 
 import (
-	"github.com/FynxLabs/reeve/internal/iac"
-	"github.com/FynxLabs/reeve/internal/iac/hcl"
+	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/iac/hcl"
 )
 
 // Dialect is Terraform's declaration of how it differs from its siblings.

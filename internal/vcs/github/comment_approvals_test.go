@@ -6,8 +6,8 @@ import (
 
 	gh "github.com/google/go-github/v66/github"
 
-	"github.com/FynxLabs/reeve/internal/core/approvals"
-	"github.com/FynxLabs/reeve/internal/vcs"
+	"github.com/reeveops/reeve/internal/core/approvals"
+	"github.com/reeveops/reeve/internal/vcs"
 )
 
 func issueComment(login, assoc, body, typ string, at time.Time) *gh.IssueComment {

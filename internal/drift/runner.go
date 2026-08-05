@@ -12,11 +12,11 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/core/redact"
-	"github.com/FynxLabs/reeve/internal/iac"
-	reeveotel "github.com/FynxLabs/reeve/internal/observability/otel"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/redact"
+	"github.com/reeveops/reeve/internal/iac"
+	reeveotel "github.com/reeveops/reeve/internal/observability/otel"
 )
 
 // Engine is the subset of iac capabilities the drift runner needs.

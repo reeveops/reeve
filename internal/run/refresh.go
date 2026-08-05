@@ -6,17 +6,17 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/audit"
-	"github.com/FynxLabs/reeve/internal/auth"
-	"github.com/FynxLabs/reeve/internal/blob"
-	blocks "github.com/FynxLabs/reeve/internal/blob/locks"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	corelocks "github.com/FynxLabs/reeve/internal/core/locks"
-	"github.com/FynxLabs/reeve/internal/core/render"
-	"github.com/FynxLabs/reeve/internal/core/summary"
-	"github.com/FynxLabs/reeve/internal/iac"
-	"github.com/FynxLabs/reeve/internal/vcs"
+	"github.com/reeveops/reeve/internal/audit"
+	"github.com/reeveops/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/blob"
+	blocks "github.com/reeveops/reeve/internal/blob/locks"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	corelocks "github.com/reeveops/reeve/internal/core/locks"
+	"github.com/reeveops/reeve/internal/core/render"
+	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/vcs"
 )
 
 // refreshEngine is what run/refresh.go needs from an IaC adapter.

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
 )
 
 func TestWriteOnce(t *testing.T) {

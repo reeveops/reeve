@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/core/approvals"
+	"github.com/reeveops/reeve/internal/core/approvals"
 )
 
 func TestListOpenPRsTouchingPathsPartialFailure(t *testing.T) {

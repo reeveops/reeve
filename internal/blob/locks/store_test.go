@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	corelocks "github.com/FynxLabs/reeve/internal/core/locks"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	corelocks "github.com/reeveops/reeve/internal/core/locks"
 )
 
 func newStore(t *testing.T, now time.Time) *Store {

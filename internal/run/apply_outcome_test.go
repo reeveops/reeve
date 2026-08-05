@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/approvals"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	corelocks "github.com/FynxLabs/reeve/internal/core/locks"
-	"github.com/FynxLabs/reeve/internal/core/summary"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/approvals"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	corelocks "github.com/reeveops/reeve/internal/core/locks"
+	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // failEngine is a fake applyEngine whose Apply fails for selected refs.

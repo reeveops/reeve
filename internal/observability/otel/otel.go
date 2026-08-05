@@ -21,7 +21,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/FynxLabs/reeve/internal/core/envref"
+	"github.com/reeveops/reeve/internal/core/envref"
 )
 
 // CardinalityMode controls the stack label.
@@ -127,8 +127,8 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 		propagation.TraceContext{}, propagation.Baggage{},
 	))
 
-	tracer := tp.Tracer("github.com/FynxLabs/reeve")
-	meter := mp.Meter("github.com/FynxLabs/reeve")
+	tracer := tp.Tracer("github.com/reeveops/reeve")
+	meter := mp.Meter("github.com/reeveops/reeve")
 
 	p := &Provider{
 		tp:          tp,

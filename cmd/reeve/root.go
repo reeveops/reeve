@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/FynxLabs/reeve/internal/log"
+	"github.com/reeveops/reeve/internal/log"
 )
 
 // Build metadata, overridden at link time by goreleaser via

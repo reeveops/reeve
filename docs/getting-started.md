@@ -18,12 +18,12 @@ see [configuration.md](configuration.md) and [auth.md](auth.md).
 ## 1. Install reeve locally
 
 Grab a prebuilt tarball from the
-[releases page](https://github.com/FynxLabs/reeve/releases) (verify its
+[releases page](https://github.com/reeveops/reeve/releases) (verify its
 sha256 against the release's cosign-signed `checksums.txt`), or build
 from source:
 
 ```bash
-git clone https://github.com/FynxLabs/reeve
+git clone https://github.com/reeveops/reeve
 cd reeve
 mise install           # go + tooling (go, golangci-lint, govulncheck, gosec, hk)
 go build -o ./bin/reeve ./cmd/reeve
@@ -174,7 +174,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: FynxLabs/reeve@master
+      - uses: reeveops/reeve@master
         with:
           pulumi-version: latest
           # slack-token: ${{ secrets.SLACK_BOT_TOKEN }}   # optional: enables Slack notifications
@@ -356,7 +356,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with: { repository: FynxLabs/reeve, path: _reeve }
+        with: { repository: reeveops/reeve, path: _reeve }
       - uses: actions/checkout@v6
         with: { path: _src }
       - uses: actions/setup-go@v6

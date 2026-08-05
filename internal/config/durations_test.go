@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // validBase returns a minimal Config that passes Validate, for per-field

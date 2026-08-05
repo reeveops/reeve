@@ -15,9 +15,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // init self-registers the pulumi engine; blank-importing this package

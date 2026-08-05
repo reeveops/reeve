@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
 )
 
 func TestAppliedStateRoundTrip(t *testing.T) {

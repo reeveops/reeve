@@ -27,9 +27,9 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // Dialect declares how one HCL engine differs from the others. It is data

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // Constructor builds an engine from its config body.

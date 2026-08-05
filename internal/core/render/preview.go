@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/core/summary"
 )
 
 // Marker is the hidden HTML comment that identifies reeve's PR comment.

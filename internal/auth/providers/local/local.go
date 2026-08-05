@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/FynxLabs/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/auth"
 )
 
 // AWSProfile reads credentials from the AWS config profile.

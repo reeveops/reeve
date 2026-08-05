@@ -9,11 +9,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/FynxLabs/reeve/internal/config"
-	"github.com/FynxLabs/reeve/internal/config/scaffold"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/iac/hcl"
-	"github.com/FynxLabs/reeve/internal/iac/pulumi"
+	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config/scaffold"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/iac/hcl"
+	"github.com/reeveops/reeve/internal/iac/pulumi"
 )
 
 // stdinIsTTY reports whether stdin is an interactive terminal. Package var so
@@ -292,7 +292,7 @@ Next steps:
            runs-on: ubuntu-latest
            steps:
              - uses: actions/checkout@v4
-             - uses: FynxLabs/reeve@master
+             - uses: reeveops/reeve@master
                with:
                  pulumi-version: latest
 

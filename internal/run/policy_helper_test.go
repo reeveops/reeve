@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/redact"
-	"github.com/FynxLabs/reeve/internal/policy"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/redact"
+	"github.com/reeveops/reeve/internal/policy"
 )
 
 func boolPtr(b bool) *bool { return &b }

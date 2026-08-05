@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config"
 )
 
 func newMigrateConfigCmd() *cobra.Command {

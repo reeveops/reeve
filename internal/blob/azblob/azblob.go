@@ -16,7 +16,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 
-	reeveblob "github.com/FynxLabs/reeve/internal/blob"
+	reeveblob "github.com/reeveops/reeve/internal/blob"
 )
 
 // Store implements reeveblob.Store against an Azure Blob container.

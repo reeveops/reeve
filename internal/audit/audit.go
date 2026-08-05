@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob"
 )
 
 // Schema version lives in every entry. Bumping requires a migration.

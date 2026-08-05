@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/core/envref"
+	"github.com/reeveops/reeve/internal/core/envref"
 )
 
 // EventType is the subscription key channels filter on.

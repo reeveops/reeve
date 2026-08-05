@@ -17,8 +17,8 @@ import (
 
 	"github.com/charmbracelet/huh"
 
-	"github.com/FynxLabs/reeve/internal/config/scaffold"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/config/scaffold"
+	"github.com/reeveops/reeve/internal/core/discovery"
 )
 
 // runInitWizard walks the optional gates and returns the scaffold options.

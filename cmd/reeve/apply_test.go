@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/run"
+	"github.com/reeveops/reeve/internal/run"
 )
 
 func TestApplyFailedErrorNamesStacks(t *testing.T) {

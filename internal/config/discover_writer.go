@@ -8,7 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/discovery"
 )
 
 // WriteClusteredStacks updates the `engine.stacks:` block of the given

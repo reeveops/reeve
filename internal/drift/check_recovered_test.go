@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/core/redact"
-	"github.com/FynxLabs/reeve/internal/notify"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/redact"
+	"github.com/reeveops/reeve/internal/notify"
 )
 
 func TestRunOneCheckRecoveredAfterError(t *testing.T) {

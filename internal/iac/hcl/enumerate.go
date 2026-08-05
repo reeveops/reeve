@@ -13,7 +13,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
-	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/discovery"
 )
 
 // DefaultWorkspace is the workspace every root module has without being

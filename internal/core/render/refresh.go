@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/core/summary"
 )
 
 // RefreshMarker identifies reeve's refresh PR comment slot. Refresh gets its

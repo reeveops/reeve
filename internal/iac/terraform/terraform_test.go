@@ -3,10 +3,10 @@ package terraform
 import (
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/iac"
-	"github.com/FynxLabs/reeve/internal/iac/enginetest"
-	"github.com/FynxLabs/reeve/internal/iac/hcltest"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/iac/enginetest"
+	"github.com/reeveops/reeve/internal/iac/hcltest"
 )
 
 // Importing this package must make engine.type: terraform resolvable, since

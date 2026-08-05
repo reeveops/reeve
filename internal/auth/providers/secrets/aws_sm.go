@@ -18,7 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
-	"github.com/FynxLabs/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/auth"
 )
 
 // AWSSecretsManager pulls a secret and exposes it via env vars.

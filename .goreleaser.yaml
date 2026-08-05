@@ -60,7 +60,7 @@ changelog:
 
 release:
   github:
-    owner: FynxLabs
+    owner: reeveops
     name: reeve
   # Publish immediately on tag push. A draft release does NOT surface the
   # Marketplace publish checkbox and GoReleaser will not commit the Homebrew
@@ -77,15 +77,15 @@ homebrew_casks:
 - name: reeve
   binaries: [ reeve ]
   repository:
-    owner: FynxLabs
+    owner: reeveops
     name: brew-tap
     git:
-      url: "ssh://git@github.com/FynxLabs/brew-tap.git"
+      url: "ssh://git@github.com/reeveops/brew-tap.git"
       private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}"
   directory: Casks
   # Skip the cask push for prerelease tags (e.g. v1.0.0-rc1), matching release.prerelease.
   skip_upload: "auto"
-  homepage: "https://github.com/FynxLabs/reeve"
+  homepage: "https://github.com/reeveops/reeve"
   description: "PR-native, self-hosted GitOps orchestrator for Pulumi"
   # strip the quarantine xattr so the unsigned binary runs without Gatekeeper prompt
   hooks:
@@ -100,7 +100,7 @@ dockers_v2:
   ids: [ reeve ]
   dockerfile: Dockerfile.release
   images:
-  - "ghcr.io/fynxlabs/reeve"
+  - "ghcr.io/reeveops/reeve"
   tags:
   - "{{ .Tag }}"
   - "v{{ .Major }}"
@@ -109,6 +109,6 @@ dockers_v2:
   - linux/amd64
   - linux/arm64
   labels:
-    org.opencontainers.image.source: "https://github.com/FynxLabs/reeve"
+    org.opencontainers.image.source: "https://github.com/reeveops/reeve"
     org.opencontainers.image.version: "{{ .Version }}"
     org.opencontainers.image.licenses: MIT

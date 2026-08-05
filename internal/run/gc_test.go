@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 func TestResolveRetention(t *testing.T) {

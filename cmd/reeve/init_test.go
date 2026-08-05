@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config"
 )
 
 // fakeTTY overrides the injected TTY probe for one test.
@@ -68,7 +68,7 @@ func TestInitNonInteractiveScaffolds(t *testing.T) {
 		"wrote   .reeve/shared.yaml",
 		"wrote   .reeve/pulumi.yaml",
 		"reeve lint",
-		"FynxLabs/reeve@master", // GitHub Action snippet
+		"reeveops/reeve@master", // GitHub Action snippet
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

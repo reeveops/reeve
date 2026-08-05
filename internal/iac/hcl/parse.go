@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/FynxLabs/reeve/internal/core/summary"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // planJSON is the subset of `terraform show -json <planfile>` output we

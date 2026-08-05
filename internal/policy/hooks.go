@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/core/redact"
+	"github.com/reeveops/reeve/internal/core/redact"
 )
 
 // Hook is one configured policy hook.

@@ -14,8 +14,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/FynxLabs/reeve/internal/config"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/core/discovery"
 )
 
 // Approval-mode values for Options.ApprovalMode.

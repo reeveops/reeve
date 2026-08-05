@@ -9,12 +9,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	authfac "github.com/FynxLabs/reeve/internal/auth/factory"
-	"github.com/FynxLabs/reeve/internal/blob/factory"
-	"github.com/FynxLabs/reeve/internal/config"
-	"github.com/FynxLabs/reeve/internal/iac"
-	"github.com/FynxLabs/reeve/internal/run"
-	gh "github.com/FynxLabs/reeve/internal/vcs/github"
+	authfac "github.com/reeveops/reeve/internal/auth/factory"
+	"github.com/reeveops/reeve/internal/blob/factory"
+	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/run"
+	gh "github.com/reeveops/reeve/internal/vcs/github"
 )
 
 func newRunCmd() *cobra.Command {

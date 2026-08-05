@@ -10,9 +10,9 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/notify"
-	"github.com/FynxLabs/reeve/internal/slack"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/notify"
+	"github.com/reeveops/reeve/internal/slack"
 )
 
 // attachment sidebar colors.

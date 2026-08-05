@@ -9,8 +9,8 @@
 package tofu
 
 import (
-	"github.com/FynxLabs/reeve/internal/iac"
-	"github.com/FynxLabs/reeve/internal/iac/hcl"
+	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/iac/hcl"
 )
 
 // Dialect is OpenTofu's declaration of how it differs from Terraform.

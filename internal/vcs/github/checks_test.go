@@ -11,7 +11,7 @@ import (
 
 	gh "github.com/google/go-github/v66/github"
 
-	"github.com/FynxLabs/reeve/internal/vcs"
+	"github.com/reeveops/reeve/internal/vcs"
 )
 
 // newFakeClient returns a Client whose go-github transport points at the

@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // DriftCheck runs `plan -refresh-only -detailed-exitcode` and parses the

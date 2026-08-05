@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 const planJSONNoChanges = `{"format_version":"1.2","resource_changes":[],"resource_drift":[]}`

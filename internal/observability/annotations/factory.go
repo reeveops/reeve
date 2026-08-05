@@ -1,7 +1,7 @@
 package annotations
 
 import (
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // Build returns the configured emitters.

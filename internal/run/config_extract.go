@@ -5,13 +5,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/approvals"
-	"github.com/FynxLabs/reeve/internal/core/breakglass"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/core/freeze"
-	"github.com/FynxLabs/reeve/internal/core/preconditions"
-	"github.com/FynxLabs/reeve/internal/core/render"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/approvals"
+	"github.com/reeveops/reeve/internal/core/breakglass"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/freeze"
+	"github.com/reeveops/reeve/internal/core/preconditions"
+	"github.com/reeveops/reeve/internal/core/render"
 )
 
 // PreviewTimeoutSec returns engine.execution.preview_timeout as whole seconds

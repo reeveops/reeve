@@ -1,4 +1,4 @@
-module github.com/FynxLabs/reeve
+module github.com/reeveops/reeve
 
 go 1.26.5
 

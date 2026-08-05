@@ -5,7 +5,7 @@
 **Do not open a public GitHub issue for security reports.**
 
 Use GitHub's private vulnerability reporting:
-<https://github.com/FynxLabs/reeve/security/advisories/new>.
+<https://github.com/reeveops/reeve/security/advisories/new>.
 
 Expect an acknowledgement within 72 hours. We aim to triage and respond
 with a remediation plan within 7 days of acknowledgement.

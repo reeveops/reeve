@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/core/summary"
 )
 
 var update = flag.Bool("update", false, "update golden files")

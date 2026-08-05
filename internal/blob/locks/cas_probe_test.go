@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	corelocks "github.com/FynxLabs/reeve/internal/core/locks"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	corelocks "github.com/reeveops/reeve/internal/core/locks"
 )
 
 // unconditionalStore simulates an S3-compatible backend that accepts

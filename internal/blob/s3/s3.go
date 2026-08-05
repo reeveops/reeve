@@ -22,7 +22,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/FynxLabs/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob"
 )
 
 // Store implements blob.Store against an S3 bucket.

@@ -5,7 +5,7 @@
 package all
 
 import (
-	_ "github.com/FynxLabs/reeve/internal/iac/pulumi"
-	_ "github.com/FynxLabs/reeve/internal/iac/terraform"
-	_ "github.com/FynxLabs/reeve/internal/iac/tofu"
+	_ "github.com/reeveops/reeve/internal/iac/pulumi"
+	_ "github.com/reeveops/reeve/internal/iac/terraform"
+	_ "github.com/reeveops/reeve/internal/iac/tofu"
 )

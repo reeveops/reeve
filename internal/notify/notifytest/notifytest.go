@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/notify"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/notify"
 )
 
 // Sink records what a channel emitted, whatever seam it emitted through.

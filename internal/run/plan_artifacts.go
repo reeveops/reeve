@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // maxPlanArtifactBytes caps what reeve will carry from preview to apply. A

@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/core/render"
-	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/core/render"
+	"github.com/reeveops/reeve/internal/core/summary"
 )
 
 // applyTimeline maintains ONE PR comment per commit SHA (not per run): every

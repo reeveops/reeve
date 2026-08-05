@@ -150,7 +150,7 @@ description = "Bump Go toolchain + all deps to latest, tidy, and re-scan for vul
 run = "rm -rf bin/ dist/"
 description = "Remove build artifacts"
 
-# ── fynxlabs standard verb set ────────────────────────────────────────
+# ── reeveops standard verb set ────────────────────────────────────────
 
 [tasks.format]
 depends = ["fmt"]

@@ -9,10 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/FynxLabs/reeve/internal/blob/factory"
-	blocks "github.com/FynxLabs/reeve/internal/blob/locks"
-	"github.com/FynxLabs/reeve/internal/config"
-	"github.com/FynxLabs/reeve/internal/run"
+	"github.com/reeveops/reeve/internal/blob/factory"
+	blocks "github.com/reeveops/reeve/internal/blob/locks"
+	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/run"
 )
 
 func newLocksCmd() *cobra.Command {

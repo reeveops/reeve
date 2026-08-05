@@ -11,8 +11,8 @@ package main
 import (
 	"errors"
 
-	"github.com/FynxLabs/reeve/internal/config/scaffold"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/config/scaffold"
+	"github.com/reeveops/reeve/internal/core/discovery"
 )
 
 // runInitWizard is unavailable in minimal builds.

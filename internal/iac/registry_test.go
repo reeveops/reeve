@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/discovery"
 )
 
 // fakeEngine is a minimal full-contract engine for registry tests.

@@ -3,8 +3,8 @@ package iac
 import (
 	"context"
 
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/summary"
 )
 
 // RefreshOpts configures a refresh call.

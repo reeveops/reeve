@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/blob/azblob"
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	"github.com/FynxLabs/reeve/internal/blob/gcs"
-	"github.com/FynxLabs/reeve/internal/blob/s3"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob/azblob"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/blob/gcs"
+	"github.com/reeveops/reeve/internal/blob/s3"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // Open returns a blob.Store backed by the configured bucket.

@@ -1,9 +1,9 @@
 package run
 
 import (
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/redact"
-	"github.com/FynxLabs/reeve/internal/policy"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/redact"
+	"github.com/reeveops/reeve/internal/policy"
 )
 
 // BuildRedactor constructs a central Redactor from shared.yaml (Phase 6+).

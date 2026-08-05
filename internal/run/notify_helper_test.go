@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/core/summary"
-	"github.com/FynxLabs/reeve/internal/notify"
+	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/notify"
 )
 
 type captureChannel struct {

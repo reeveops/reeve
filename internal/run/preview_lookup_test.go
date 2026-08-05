@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/core/summary"
 )
 
 func TestFindPreviewForStack_NoManifest(t *testing.T) {

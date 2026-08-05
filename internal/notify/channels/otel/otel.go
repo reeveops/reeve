@@ -6,9 +6,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/notify"
-	"github.com/FynxLabs/reeve/internal/observability/annotations"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/notify"
+	"github.com/reeveops/reeve/internal/observability/annotations"
 )
 
 func init() {

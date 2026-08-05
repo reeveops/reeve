@@ -9,7 +9,7 @@ package notify
 import (
 	"context"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // Event names a lifecycle event a channel can subscribe to. The string values

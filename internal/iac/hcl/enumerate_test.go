@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 func writeTree(t *testing.T, root string, files map[string]string) {

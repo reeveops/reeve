@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FynxLabs/reeve/internal/blob/filesystem"
-	"github.com/FynxLabs/reeve/internal/core/render"
+	"github.com/reeveops/reeve/internal/blob/filesystem"
+	"github.com/reeveops/reeve/internal/core/render"
 )
 
 // TestApplyTimelineConsolidatesPerCommit: two apply runs of the SAME commit

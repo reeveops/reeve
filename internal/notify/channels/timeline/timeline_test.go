@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/notify"
-	slackchannel "github.com/FynxLabs/reeve/internal/notify/channels/slack"
-	slackapi "github.com/FynxLabs/reeve/internal/slack"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/notify"
+	slackchannel "github.com/reeveops/reeve/internal/notify/channels/slack"
+	slackapi "github.com/reeveops/reeve/internal/slack"
 )
 
 // --- fakes ---------------------------------------------------------------

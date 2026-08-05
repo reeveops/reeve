@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: FynxLabs/reeve@master
+      - uses: reeveops/reeve@master
         with:
           command: preview
           pulumi-version: "3.231.0"
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ steps.pr.outputs.ref }}
-      - uses: FynxLabs/reeve@master
+      - uses: reeveops/reeve@master
         with:
           command: apply
           pulumi-version: "3.231.0"

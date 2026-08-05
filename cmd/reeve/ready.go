@@ -8,11 +8,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/FynxLabs/reeve/internal/blob/factory"
-	"github.com/FynxLabs/reeve/internal/config"
-	"github.com/FynxLabs/reeve/internal/notify"
-	"github.com/FynxLabs/reeve/internal/run"
-	gh "github.com/FynxLabs/reeve/internal/vcs/github"
+	"github.com/reeveops/reeve/internal/blob/factory"
+	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/notify"
+	"github.com/reeveops/reeve/internal/run"
+	gh "github.com/reeveops/reeve/internal/vcs/github"
 )
 
 func newReadyCmd() *cobra.Command {

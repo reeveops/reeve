@@ -9,17 +9,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/auth"
-	"github.com/FynxLabs/reeve/internal/blob"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
-	"github.com/FynxLabs/reeve/internal/core/approvals"
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/core/render"
-	"github.com/FynxLabs/reeve/internal/core/summary"
-	"github.com/FynxLabs/reeve/internal/iac"
-	"github.com/FynxLabs/reeve/internal/notify"
-	reeveotel "github.com/FynxLabs/reeve/internal/observability/otel"
-	"github.com/FynxLabs/reeve/internal/vcs"
+	"github.com/reeveops/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/approvals"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/render"
+	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/notify"
+	reeveotel "github.com/reeveops/reeve/internal/observability/otel"
+	"github.com/reeveops/reeve/internal/vcs"
 )
 
 // prReader is the subset of VCS we need for preview.

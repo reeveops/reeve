@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/core/discovery"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // Refresh runs `pulumi refresh` for one stack, reconciling stack state with

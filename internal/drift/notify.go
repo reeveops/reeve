@@ -1,6 +1,6 @@
 package drift
 
-import "github.com/FynxLabs/reeve/internal/notify"
+import "github.com/reeveops/reeve/internal/notify"
 
 // NotifyPayloads flattens a RunOutput into notification payloads, one per
 // item with a non-silent NOTIFICATION event (Item.NotifyEvent - the

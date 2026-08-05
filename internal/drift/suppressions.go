@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/FynxLabs/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob"
 )
 
 // Suppression is an active drift suppression for a stack.

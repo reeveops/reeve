@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/FynxLabs/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/core/summary"
 )
 
 // ApplyMarker identifies reeve's apply-specific PR comment slot.

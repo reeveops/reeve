@@ -1,8 +1,8 @@
 package drift
 
 import (
-	"github.com/FynxLabs/reeve/internal/core/summary"
-	"github.com/FynxLabs/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // Classification is drift-noise filtering applied to an engine diff before it

@@ -112,7 +112,7 @@ Install conftest in the workflow:
 
 ```yaml
 - uses: instrumenta/conftest-action@master
-- uses: FynxLabs/reeve@master
+- uses: reeveops/reeve@master
   with:
     command: apply
 ```

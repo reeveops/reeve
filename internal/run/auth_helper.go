@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/FynxLabs/reeve/internal/auth"
-	"github.com/FynxLabs/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // CleanupFunc runs all on-disk cleanups registered by credential providers.

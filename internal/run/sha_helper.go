@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/FynxLabs/reeve/internal/vcs"
+	"github.com/reeveops/reeve/internal/vcs"
 )
 
 // prHeadReader is the minimal VCS surface needed to resolve the PR head SHA.
