@@ -13,6 +13,18 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # Mint a short-lived token from the reeve-tap GitHub App. The app is
+      # installed on reeveops/reeve and reeveops/tap with write access to code,
+      # which is what GoReleaser needs to commit the Homebrew cask.
+      - name: Mint tap token
+        id: tap-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: reeveops
+          repositories: tap
+
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -47,7 +59,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          TAP_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token }}
 
       # Point the floating major tag (v0, v1, ...) at this release so consumers
       # who pin @master always get the latest v0.x. Skipped for prerelease tags

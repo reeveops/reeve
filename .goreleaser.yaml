@@ -79,9 +79,9 @@ homebrew_casks:
   repository:
     owner: reeveops
     name: tap
-    git:
-      url: "ssh://git@github.com/reeveops/tap.git"
-      private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}"
+    # Token minted by the reeve-tap GitHub App, which is installed on
+    # reeveops/tap with read+write access to code.
+    token: "{{ .Env.TAP_GITHUB_TOKEN }}"
   directory: Casks
   # Skip the cask push for prerelease tags (e.g. v1.0.0-rc1), matching release.prerelease.
   skip_upload: "auto"
