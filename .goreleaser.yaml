@@ -70,8 +70,8 @@ release:
   header: |
     # reeve {{ .Version }}
 
-    PR-native, self-hosted GitOps orchestrator for Pulumi. No control plane,
-    no telemetry, MIT-licensed.
+    PR-native, self-hosted GitOps orchestrator for Pulumi, Terraform, and
+    OpenTofu. No control plane, no telemetry, MIT-licensed.
 
 homebrew_casks:
 - name: reeve
@@ -86,7 +86,7 @@ homebrew_casks:
   # Skip the cask push for prerelease tags (e.g. v1.0.0-rc1), matching release.prerelease.
   skip_upload: "auto"
   homepage: "https://github.com/reeveops/reeve"
-  description: "PR-native, self-hosted GitOps orchestrator for Pulumi"
+  description: "PR-native, self-hosted GitOps orchestrator for Pulumi, Terraform, and OpenTofu"
   # strip the quarantine xattr so the unsigned binary runs without Gatekeeper prompt
   hooks:
     post:

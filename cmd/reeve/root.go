@@ -35,7 +35,7 @@ func applyLogConfig(cfgLevel, cfgFormat string) {
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "reeve",
-		Short: "PR-native, self-hosted GitOps orchestrator for Pulumi",
+		Short: "PR-native, self-hosted GitOps orchestrator for Pulumi, Terraform, and OpenTofu",
 		Long: `reeve is a single-binary GitOps orchestrator that runs inside your CI.
 No control plane, no SaaS backend, no telemetry, no account. The user owns all state.`,
 		Version:       fmt.Sprintf("%s (commit %s, built %s)", version, commit, date),
