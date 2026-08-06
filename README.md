@@ -48,16 +48,16 @@ Every arrow leaves your trust boundary. `reeve` holds nothing.
 
 ## Status
 
-Alpha. [v0.2.0](https://github.com/reeveops/reeve/releases/latest) is the
-current release: per-platform tarballs (linux/darwin, amd64/arm64) with a
-sha256 `checksums.txt` whose cosign keyless signature ships alongside as
+Alpha. The [latest release](https://github.com/reeveops/reeve/releases/latest)
+ships per-platform tarballs (linux/darwin, amd64/arm64) with a sha256
+`checksums.txt` whose cosign keyless signature ships alongside as
 `checksums.txt.bundle`. Per-push `<branch>-<sha>` prerelease builds (one per
 commit, cosign-signed) back the GitHub Action fast-path (see the pinning
 table below).
 The release pipeline also publishes a container image
-(`ghcr.io/reeveops/reeve`) and is wired to push a Homebrew cask to
-`reeveops/brew-tap`. Expect breaking config changes until 1.0 (`reeve
-migrate-config` covers renames).
+(`ghcr.io/reeveops/reeve`) and pushes a Homebrew cask to
+[`reeveops/tap`](https://github.com/reeveops/tap). Expect breaking config
+changes until 1.0 (`reeve migrate-config` covers renames).
 
 Or build from source:
 
