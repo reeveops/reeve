@@ -389,6 +389,16 @@ runs:
                   EXTRA="$EXTRA --force"
                 fi
                 ;;
+              explain)
+                CMD="run explain"
+                # Optional "project/stack" token limits the report to one
+                # stack; bare "/reeve explain" covers every stack this PR
+                # maps to. Report-only either way.
+                read -r FIRST _ <<< "$REST"
+                if [[ -n "$FIRST" && "$FIRST" != -* && "$FIRST" == */* ]]; then
+                  EXTRA="$EXTRA --stack $FIRST"
+                fi
+                ;;
               help)          CMD="pr-help" ;;
               *)
                 echo "Unknown reeve command '${VERB:-}', skipping."
@@ -459,6 +469,10 @@ runs:
           pr-help|"run pr-help")
             PR_NUMBER=$(jq -r '.issue.number // 0' < "$GITHUB_EVENT_PATH")
             "$REEVE_BIN" run pr-help --pr "$PR_NUMBER" $EXTRA
+            ;;
+          "run explain")
+            PR_NUMBER=$(jq -r '.issue.number // 0' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run explain --pr "$PR_NUMBER" $EXTRA
             ;;
           *)
             "$REEVE_BIN" $CMD $EXTRA
