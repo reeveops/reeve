@@ -254,6 +254,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 				lockBlockedBy = lock.Holder.PR
 			}
 		} else {
+			slog.Warn("explain: no lock store; lock state not evaluated", "stack", s.Ref())
 			es.LockStatus = "unknown (no lock store)"
 		}
 
@@ -292,6 +293,12 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 			case string(preconditions.GateUpToDate):
 				if upToDateReason != "" {
 					es.Gates[i].Reason = upToDateReason
+				}
+			case string(preconditions.GateLock):
+				// No lock store: the default "acquirable" would be a claim
+				// this run never verified. Say so instead.
+				if in.Locks == nil {
+					es.Gates[i].Reason = "lock store unavailable - not evaluated"
 				}
 			}
 		}

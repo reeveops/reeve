@@ -110,7 +110,11 @@ func TestExplainUnknownStackPostsError(t *testing.T) {
 }
 
 func TestExplainValidStackFilter(t *testing.T) {
-	_, fv, in := explainFixture(t)
+	engine, fv, in := explainFixture(t)
+	// A second affected stack proves the filter excludes, not just includes.
+	engine.enum = append(engine.enum,
+		discovery.Stack{Project: "api", Name: "staging", Env: "staging", Path: "projects/api"})
+	in.Config.Engine.Stacks[0].Stacks = append(in.Config.Engine.Stacks[0].Stacks, "staging")
 	in.StackFilter = "api/prod"
 	out, err := Explain(context.Background(), in)
 	if err != nil {
@@ -118,6 +122,9 @@ func TestExplainValidStackFilter(t *testing.T) {
 	}
 	if !strings.Contains(out.Body, "api/prod") {
 		t.Fatalf("filtered report must cover api/prod:\n%s", out.Body)
+	}
+	if strings.Contains(out.Body, "api/staging") {
+		t.Fatalf("filtered report must not cover api/staging:\n%s", out.Body)
 	}
 	if strings.Contains(out.Body, "unknown stack") {
 		t.Fatalf("valid filter must not error:\n%s", out.Body)
@@ -141,9 +148,9 @@ func TestExplainNilLockStore(t *testing.T) {
 	if !strings.Contains(body, "unknown (no lock store)") {
 		t.Fatalf("nil lock store must render as unknown:\n%s", body)
 	}
-	// Lock gate defaults to acquirable; blocked (if any) comes from other gates.
-	if !strings.Contains(out.Body, "lock_acquirable") {
-		t.Fatalf("gate trace must still include the lock gate:\n%s", out.Body)
+	// The gate must not claim "acquirable" - that was never verified.
+	if !strings.Contains(out.Body, "lock store unavailable - not evaluated") {
+		t.Fatalf("lock gate must state it was not evaluated:\n%s", out.Body)
 	}
 }
 
