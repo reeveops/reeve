@@ -76,11 +76,10 @@ func Explain(in ExplainInput) string {
 			s.RequireAllGroups, s.Codeowners, s.DismissOnNewCommit)
 
 		b.WriteString("**Lock**\n\n")
-		switch {
-		case s.LockHolderPR > 0:
+		if s.LockHolderPR > 0 {
 			fmt.Fprintf(&b, "- %s by PR #%d (run %s, acquired %s, expires %s)\n",
 				s.LockStatus, s.LockHolderPR, orDash(s.LockHolderRun), orDash(s.LockAcquiredAt), orDash(s.LockExpiresAt))
-		default:
+		} else {
 			fmt.Fprintf(&b, "- %s\n", s.LockStatus)
 		}
 		if len(s.LockQueuePRs) > 0 {

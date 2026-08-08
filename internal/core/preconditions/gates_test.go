@@ -1,6 +1,7 @@
 package preconditions
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -324,7 +325,7 @@ func TestEvaluateAllMatchesEvaluateWhenClean(t *testing.T) {
 	if a.Blocked || b.Blocked {
 		t.Fatalf("clean inputs should not block: %v %v", a.Blocked, b.Blocked)
 	}
-	if len(a.Gates) != len(b.Gates) {
-		t.Fatalf("clean run: traces should match, got %d vs %d", len(a.Gates), len(b.Gates))
+	if !reflect.DeepEqual(a.Gates, b.Gates) {
+		t.Fatalf("clean run: traces should match exactly (order and outcomes),\nEvaluate:    %+v\nEvaluateAll: %+v", a.Gates, b.Gates)
 	}
 }

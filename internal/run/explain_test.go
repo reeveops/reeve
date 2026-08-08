@@ -17,7 +17,10 @@ import (
 
 func explainFixture(t *testing.T) (*bgEngine, *bgVCS, ExplainInput) {
 	t.Helper()
-	store, _ := filesystem.New(t.TempDir())
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("filesystem store: %v", err)
+	}
 	engine := &bgEngine{enum: []discovery.Stack{
 		{Project: "api", Name: "prod", Env: "prod", Path: "projects/api"},
 	}}
@@ -103,6 +106,44 @@ func TestExplainUnknownStackPostsError(t *testing.T) {
 	body := fv.allComments()
 	if !strings.Contains(body, "unknown stack") || !strings.Contains(body, "api/prod") {
 		t.Fatalf("error comment must name valid refs:\n%s", body)
+	}
+}
+
+func TestExplainValidStackFilter(t *testing.T) {
+	_, fv, in := explainFixture(t)
+	in.StackFilter = "api/prod"
+	out, err := Explain(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Body, "api/prod") {
+		t.Fatalf("filtered report must cover api/prod:\n%s", out.Body)
+	}
+	if strings.Contains(out.Body, "unknown stack") {
+		t.Fatalf("valid filter must not error:\n%s", out.Body)
+	}
+	if got := strings.Count(out.Body, "#### "); got != 1 {
+		t.Fatalf("expected exactly one stack section, got %d:\n%s", got, out.Body)
+	}
+	if len(fv.comments[render.ExplainMarker(shortSHA(bgSHA))]) != 1 {
+		t.Fatal("expected one posted comment")
+	}
+}
+
+func TestExplainNilLockStore(t *testing.T) {
+	_, fv, in := explainFixture(t)
+	in.Locks = nil
+	out, err := Explain(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := fv.comments[render.ExplainMarker(shortSHA(bgSHA))][0]
+	if !strings.Contains(body, "unknown (no lock store)") {
+		t.Fatalf("nil lock store must render as unknown:\n%s", body)
+	}
+	// Lock gate defaults to acquirable; blocked (if any) comes from other gates.
+	if !strings.Contains(out.Body, "lock_acquirable") {
+		t.Fatalf("gate trace must still include the lock gate:\n%s", out.Body)
 	}
 }
 

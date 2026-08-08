@@ -48,3 +48,30 @@ func TestExplainGolden_Basic(t *testing.T) {
 		t.Fatal("explain comment must state it is report-only")
 	}
 }
+
+func TestExplainGolden_NoRunURLHeldLockNoTimestamps(t *testing.T) {
+	// Exercises the no-run-URL header branch and the orDash fallback for a
+	// held lock whose holder carries no run id or timestamps.
+	in := ExplainInput{
+		CommitSHA: "3f9a1c2deadbeef",
+		Stacks: []ExplainStack{
+			{
+				Ref:               "api/prod",
+				RequiredApprovals: 1, ApprovalsGot: 0, ApprovalsNeeded: 1,
+				LockStatus: "held", LockHolderPR: 7,
+				Gates: []summary.GateTrace{
+					{Gate: "lock_acquirable", Outcome: "fail", Reason: "blocked by lock held by PR #7"},
+				},
+			},
+		},
+	}
+	got := Explain(in)
+	assertGolden(t, "explain_no_run_url.md", got)
+
+	if strings.Contains(got, "[run](") {
+		t.Fatal("no RunURL: header must not link a run")
+	}
+	if !strings.Contains(got, "held by PR #7 (run -, acquired -, expires -)") {
+		t.Fatalf("empty holder fields must render as dashes:\n%s", got)
+	}
+}

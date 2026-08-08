@@ -16,7 +16,13 @@ the output to that stack. An unknown stack ref MUST produce an error
 comment naming the valid refs.
 
 The command MUST be read-only: no engine invocation, no lock
-acquisition, no state writes, no credential exchange.
+acquisition, no state writes, no per-stack cloud credential exchange.
+It MAY read reeve's own state bucket (preview manifests, lock records)
+with the bucket credentials the runner already holds.
+
+Comment dispatch goes through the same `allowed-associations`
+authorization gate as every other `/reeve` verb: an unauthorized
+commenter's `/reeve explain` is skipped, not answered.
 
 #### Scenario: Blocked contributor asks why
 
@@ -32,9 +38,9 @@ acquisition, no state writes, no credential exchange.
 
 #### Scenario: Fork PR
 
-- **WHEN** `/reeve explain` is dispatched on a fork PR
+- **WHEN** an authorized commenter dispatches `/reeve explain` on a fork PR
 - **THEN** the command runs identically to a trusted PR, because it
-  requires no credentials and mutates nothing
+  exchanges no per-stack cloud credentials and mutates nothing
 
 #### Scenario: Repeat invocation at the same commit
 

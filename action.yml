@@ -393,9 +393,16 @@ runs:
                 CMD="run explain"
                 # Optional "project/stack" token limits the report to one
                 # stack; bare "/reeve explain" covers every stack this PR
-                # maps to. Report-only either way.
-                read -r FIRST _ <<< "$REST"
-                if [[ -n "$FIRST" && "$FIRST" != -* && "$FIRST" == */* ]]; then
+                # maps to. Report-only either way. Any non-flag first token
+                # is forwarded so the binary can validate it and post the
+                # valid-refs error comment (no slash requirement here - a
+                # typo'd selector should error visibly, not be dropped).
+                read -r FIRST SECOND _ <<< "$REST"
+                if [[ -n "$SECOND" ]]; then
+                  echo "explain takes at most one project/stack selector, got: $REST - skipping."
+                  exit 0
+                fi
+                if [[ -n "$FIRST" && "$FIRST" != -* ]]; then
                   EXTRA="$EXTRA --stack $FIRST"
                 fi
                 ;;
@@ -471,7 +478,9 @@ runs:
             "$REEVE_BIN" run pr-help --pr "$PR_NUMBER" $EXTRA
             ;;
           "run explain")
-            PR_NUMBER=$(jq -r '.issue.number // 0' < "$GITHUB_EVENT_PATH")
+            # .issue.number on the issue_comment path; .pull_request.number
+            # when a workflow passes command "run explain" on a PR event.
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number // 0' < "$GITHUB_EVENT_PATH")
             "$REEVE_BIN" run explain --pr "$PR_NUMBER" $EXTRA
             ;;
           *)

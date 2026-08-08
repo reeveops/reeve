@@ -13,6 +13,7 @@ import (
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/approvals"
 	"github.com/reeveops/reeve/internal/core/discovery"
+	corelocks "github.com/reeveops/reeve/internal/core/locks"
 	"github.com/reeveops/reeve/internal/core/preconditions"
 	"github.com/reeveops/reeve/internal/core/render"
 	"github.com/reeveops/reeve/internal/vcs"
@@ -65,8 +66,10 @@ type ExplainOutput struct {
 // Explain answers "why?" from the PR: per stack, the resolved approval
 // rules, the lock state from a plain read, and a full gate trace from a
 // report-only evaluation. It never invokes an engine, acquires a lock,
-// exchanges credentials, or writes state - the only side effect is the
-// comment upsert.
+// exchanges per-stack cloud credentials, or writes state - the only side
+// effect is the comment upsert. It does read reeve's own state bucket
+// (preview manifests, locks) with whatever bucket credentials the runner
+// already holds.
 func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	// 1. Resolve the PR's stacks - same discovery pipeline as preview.
 	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
@@ -82,6 +85,19 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	}
 	cm := changeMappingFromConfig(in.Config)
 	target := discovery.AffectedDetailed(declared, changed, cm).Stacks
+
+	// PR facts come before the stack filter so the error comment below and
+	// the success comment share one marker keyed to the PR HEAD: on
+	// issue_comment events $GITHUB_SHA is the base branch, so the caller's
+	// best-effort SHA is overridden the same way apply does it.
+	pr, err := in.VCS.GetPR(ctx, in.PRNumber)
+	if err != nil {
+		return nil, fmt.Errorf("get pr: %w", err)
+	}
+	commitSHA := in.CommitSHA
+	if pr.HeadSHA != "" {
+		commitSHA = pr.HeadSHA
+	}
 
 	if in.StackFilter != "" {
 		var picked []discovery.Stack
@@ -102,8 +118,8 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 			// the error as the explain comment rather than only failing
 			// the run.
 			if in.PRNumber > 0 {
-				body := render.ExplainMarker(shortSHA(in.CommitSHA)) + "\n### 🔎 reeve · explain\n\n❌ " + msg + "\n"
-				if perr := in.VCS.UpsertComment(ctx, in.PRNumber, body, render.ExplainMarker(shortSHA(in.CommitSHA))); perr != nil {
+				body := render.ExplainMarker(shortSHA(commitSHA)) + "\n### 🔎 reeve · explain\n\n❌ " + msg + "\n"
+				if perr := in.VCS.UpsertComment(ctx, in.PRNumber, body, render.ExplainMarker(shortSHA(commitSHA))); perr != nil {
 					slog.Warn("post explain error comment failed", "err", perr)
 				}
 			}
@@ -115,26 +131,25 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 		return nil, fmt.Errorf("this PR maps to no stacks; pass an explicit project/stack to explain one anyway")
 	}
 
-	// 2. PR-level facts, all plain reads. The commit of record is the PR
-	// HEAD: on issue_comment events $GITHUB_SHA is the base branch, so the
-	// caller's best-effort SHA is overridden the same way apply does it.
-	pr, err := in.VCS.GetPR(ctx, in.PRNumber)
-	if err != nil {
-		return nil, fmt.Errorf("get pr: %w", err)
-	}
-	commitSHA := in.CommitSHA
-	if pr.HeadSHA != "" {
-		commitSHA = pr.HeadSHA
-	}
-	checksGreen, _, err := in.VCS.ChecksGreen(ctx, commitSHA, vcs.ChecksGreenOpts{
+	// 2. Remaining PR-level facts, all plain reads. Explain is a diagnostic:
+	// a failed read of a gate input degrades that gate to "could not be
+	// evaluated" instead of killing the whole report - the commenter asking
+	// "why?" still gets an answer for everything that could be read.
+	checksGreen, _, cerr := in.VCS.ChecksGreen(ctx, commitSHA, vcs.ChecksGreenOpts{
 		IgnoreRunID: in.CIRunID, IgnoreNames: in.SelfCheckNames,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("evaluate checks_green: %w", err)
+	checksReason := ""
+	if cerr != nil {
+		slog.Warn("explain: checks_green unavailable", "err", cerr)
+		checksGreen = false
+		checksReason = "could not be evaluated: " + cerr.Error()
 	}
-	behind, err := in.VCS.CompareBranches(ctx, pr.BaseRef, commitSHA)
-	if err != nil {
-		return nil, fmt.Errorf("compare branches %s..%s: %w", pr.BaseRef, commitSHA, err)
+	behind, berr := in.VCS.CompareBranches(ctx, pr.BaseRef, commitSHA)
+	upToDateReason := ""
+	if berr != nil {
+		slog.Warn("explain: branch comparison unavailable", "base", pr.BaseRef, "err", berr)
+		behind = -1 // fail the gate closed; the reason override below says why
+		upToDateReason = "could not be evaluated: " + berr.Error()
 	}
 
 	appCfg := toApprovalsConfig(in.Shared)
@@ -208,6 +223,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 
 		prev, lookupErr := FindPreviewForStack(ctx, in.Blob, in.PRNumber, commitSHA, s.Ref())
 		if lookupErr != nil {
+			slog.Warn("explain: preview lookup failed", "stack", s.Ref(), "err", lookupErr)
 			prev = PreviewStatus{}
 		}
 
@@ -222,7 +238,8 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 			if lerr != nil {
 				return nil, fmt.Errorf("read lock %s: %w", s.Ref(), lerr)
 			}
-			es.LockStatus = string(lock.Status(now))
+			status := lock.Status(now)
+			es.LockStatus = string(status)
 			if lock.Holder != nil {
 				es.LockHolderPR = lock.Holder.PR
 				es.LockHolderRun = lock.Holder.RunID
@@ -232,7 +249,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 			for _, q := range lock.Queue {
 				es.LockQueuePRs = append(es.LockQueuePRs, q.PR)
 			}
-			if lock.Status(now) == "held" && lock.Holder != nil && lock.Holder.PR != in.PRNumber {
+			if status == corelocks.StatusHeld && lock.Holder != nil && lock.Holder.PR != in.PRNumber {
 				lockAcquirable = false
 				lockBlockedBy = lock.Holder.PR
 			}
@@ -262,10 +279,19 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 		// PolicyPassed nil renders as "no policy hooks configured"; when
 		// hooks exist that reason is wrong - explain deliberately does not
 		// execute them. Say so.
-		if hooksConfigured {
-			for i := range es.Gates {
-				if es.Gates[i].Gate == string(preconditions.GatePolicy) {
+		for i := range es.Gates {
+			switch es.Gates[i].Gate {
+			case string(preconditions.GatePolicy):
+				if hooksConfigured {
 					es.Gates[i].Reason = "policy hooks run at preview/apply time - not executed by explain"
+				}
+			case string(preconditions.GateChecksGreen):
+				if checksReason != "" {
+					es.Gates[i].Reason = checksReason
+				}
+			case string(preconditions.GateUpToDate):
+				if upToDateReason != "" {
+					es.Gates[i].Reason = upToDateReason
 				}
 			}
 		}
