@@ -1,5 +1,5 @@
 project: reeve
-description: PR-native, self-hosted GitOps orchestrator for Pulumi
+description: PR-native, self-hosted GitOps orchestrator for Pulumi, Terraform, and OpenTofu
 conventions:
   commit_prefix: "spec:"
   change_folder: openspec/changes

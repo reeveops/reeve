@@ -1,6 +1,7 @@
 package preconditions
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -277,5 +278,54 @@ func TestBreakGlassStillEnforcesDraftAndFork(t *testing.T) {
 	in.PRIsFork = true
 	if res := Evaluate(Config{FailOnForkPRs: true}, in); !res.Blocked {
 		t.Fatal("break-glass must not bypass the fork gate")
+	}
+}
+
+func TestEvaluateAllFullTrace(t *testing.T) {
+	// Two failures: preview_succeeded AND approvals. Fail-fast Evaluate
+	// would stop at the first; EvaluateAll must surface both and still
+	// evaluate the gates after them.
+	in := Inputs{
+		StackRef: "api/prod", PreviewSucceeded: false,
+		ApprovalsSatisfied: false, LockAcquirable: true,
+	}
+	res := EvaluateAll(Config{}, in)
+	if !res.Blocked {
+		t.Fatal("expected blocked")
+	}
+	if len(res.Gates) != len(GateOrder) {
+		t.Fatalf("expected all %d gates in trace, got %d", len(GateOrder), len(res.Gates))
+	}
+	fails := map[GateID]bool{}
+	var sawLock GateResult
+	for _, g := range res.Gates {
+		if g.Outcome == OutcomeFail {
+			fails[g.Gate] = true
+		}
+		if g.Gate == GateLock {
+			sawLock = g
+		}
+	}
+	if !fails[GatePreviewOK] || !fails[GateApprovals] {
+		t.Fatalf("expected preview_succeeded and approvals failures, got %v", fails)
+	}
+	if sawLock.Outcome != OutcomePass {
+		t.Fatalf("lock gate after failures should still evaluate and pass: %+v", sawLock)
+	}
+}
+
+func TestEvaluateAllMatchesEvaluateWhenClean(t *testing.T) {
+	in := Inputs{
+		StackRef: "api/prod", UpToDate: true, ChecksGreen: true,
+		PreviewSucceeded: true, HasFreshPreview: true,
+		ApprovalsSatisfied: true, LockAcquirable: true,
+	}
+	cfg := Config{RequireUpToDate: true, RequireChecksPassing: true}
+	a, b := Evaluate(cfg, in), EvaluateAll(cfg, in)
+	if a.Blocked || b.Blocked {
+		t.Fatalf("clean inputs should not block: %v %v", a.Blocked, b.Blocked)
+	}
+	if !reflect.DeepEqual(a.Gates, b.Gates) {
+		t.Fatalf("clean run: traces should match exactly (order and outcomes),\nEvaluate:    %+v\nEvaluateAll: %+v", a.Gates, b.Gates)
 	}
 }
