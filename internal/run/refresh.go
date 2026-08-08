@@ -213,7 +213,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		redactor := BuildRedactor(in.Shared)
 		// ModeApply: a refresh writes state, so it needs write credentials,
 		// not the read-only preview role.
-		authEnv, authCleanup, aerr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModeApply)
+		authEnv, authCleanup, aerr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModeApply, LocalAuth{})
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())

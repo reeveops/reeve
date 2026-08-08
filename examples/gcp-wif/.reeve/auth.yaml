@@ -14,9 +14,15 @@ providers:
     service_account: reeve-drift-readonly@mycompany-prod.iam.gserviceaccount.com
     duration: 2h
 
+  # Application-default credentials for `reeve plan-run` on a laptop
+  # (refuses to run under CI=true).
+  gcp-local:
+    type: gcloud_adc
+
 bindings:
   - match: { stack: "**" }
     providers: [gcp-prod]
+    local: [gcp-local]   # substitutes for gcp-prod in --local runs
 
   - match: { stack: "**", mode: drift }
     providers: [gcp-prod-readonly]

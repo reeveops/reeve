@@ -13,6 +13,16 @@ import (
 // It is safe to call on a nil receiver and safe to call more than once.
 type CleanupFunc func()
 
+// LocalAuth carries --local run auth adjustments into resolution. The zero
+// value means a CI run: bindings' `local:` lists are ignored.
+type LocalAuth struct {
+	// Enabled activates bindings' `local:` substitution lists.
+	Enabled bool
+	// Providers is the --local-auth CLI override; each named provider
+	// replaces same-scope resolved providers, after config substitution.
+	Providers []string
+}
+
 // ResolveAuthEnv returns the merged env var map for a single stack + mode
 // plus a cleanup func the caller defers. If cfg is nil or has no bindings,
 // returns empty env (the engine relies on ambient creds / $GITHUB_TOKEN).
@@ -21,7 +31,7 @@ type CleanupFunc func()
 // (e.g. removing the GCP WIF on-disk credential file). Cleanup errors are
 // logged but never propagated - they happen at end-of-run so the work has
 // already shipped.
-func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Registry, stackRef string, mode auth.Mode) (map[string]string, CleanupFunc, error) {
+func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Registry, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
 	noop := func() {}
 	if cfg == nil || registry == nil {
 		return nil, noop, nil
@@ -33,18 +43,25 @@ func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Regis
 			Mode:         auth.Mode(b.Match.Mode),
 			Providers:    b.Providers,
 			Override:     b.Override,
+			Local:        b.Local,
 		})
 	}
 	decls := make(map[string]auth.ProviderDecl, len(cfg.Providers))
 	for n, p := range cfg.Providers {
 		decls[n] = auth.ProviderDecl{Name: n, Type: p.Type}
 	}
-	names := auth.ResolveWithDecls(bindings, decls, stackRef, mode)
+	names := auth.ResolveWithOpts(bindings, decls, stackRef, mode, auth.ResolveOpts{
+		Local:          local.Enabled,
+		LocalProviders: local.Providers,
+	})
 	if len(names) == 0 {
 		return nil, noop, nil
 	}
 	env, creds, err := registry.AcquireAll(ctx, names)
 	if err != nil {
+		if local.Enabled {
+			return nil, noop, fmt.Errorf("acquire creds for %s (%s): %w\nhint: in --local runs, bind local-safe providers (aws_profile/aws_sso/gcloud_adc) via a `local:` list on the binding in .reeve/auth.yaml, or pass --local-auth <provider>", stackRef, mode, err)
+		}
 		return nil, noop, fmt.Errorf("acquire creds for %s (%s): %w", stackRef, mode, err)
 	}
 	cleanup := func() {

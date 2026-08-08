@@ -88,6 +88,7 @@ func ValidateLint(cfg *schemas.Auth, stackRefs []string) error {
 			Mode:         auth.Mode(b.Match.Mode),
 			Providers:    b.Providers,
 			Override:     b.Override,
+			Local:        b.Local,
 		})
 	}
 	decls := map[string]auth.ProviderDecl{}

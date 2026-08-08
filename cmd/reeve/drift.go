@@ -113,7 +113,7 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 		// cleanup func through. For now an unrun cleanup leaks the GCP WIF
 		// temp file until the process exits, which is bounded by the run's
 		// duration on GitHub Actions.
-		env, _, err := run.ResolveAuthEnv(ctx, cfg.Auth, authReg, ref, auth.ModeDrift)
+		env, _, err := run.ResolveAuthEnv(ctx, cfg.Auth, authReg, ref, auth.ModeDrift, run.LocalAuth{})
 		return env, err
 	}
 

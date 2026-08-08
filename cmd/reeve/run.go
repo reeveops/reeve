@@ -61,6 +61,8 @@ func newRenderCmd() *cobra.Command {
 
 func addPreviewFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("local", false, "Run against real cloud with local artifacts; skip VCS interactions")
+	cmd.Flags().StringSlice("local-auth", nil,
+		"Declared auth provider names that replace same-scope bound providers in --local runs (e.g. --local-auth gcp-local)")
 	cmd.Flags().Int("pr", 0, "PR number")
 	cmd.Flags().String("sha", "", "Commit SHA (default: $GITHUB_SHA)")
 	cmd.Flags().String("run-number", "", "CI run number (default: $GITHUB_RUN_NUMBER)")
@@ -76,6 +78,10 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 
 	local := flagBool(cmd, "local")
+	localAuth, _ := cmd.Flags().GetStringSlice("local-auth")
+	if len(localAuth) > 0 && !local {
+		return fmt.Errorf("--local-auth only applies to --local runs")
+	}
 	pr := flagInt(cmd, "pr")
 	sha := flagStringOrEnv(cmd, "sha", "GITHUB_SHA")
 	runNum := flagIntOrEnv(cmd, "run-number", "GITHUB_RUN_NUMBER")
@@ -145,6 +151,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		ObservabilitySourceFiles: cfg.ObservabilitySourceFiles,
 		Blob:                     store,
 		Local:                    local,
+		LocalAuthProviders:       localAuth,
 		Force:                    flagBool(cmd, "force"),
 		Refresh:                  flagBool(cmd, "refresh"),
 	}

@@ -81,6 +81,10 @@ type PreviewInput struct {
 	ObservabilitySourceFiles []string
 	// Local skips change-mapping (run on all declared stacks).
 	Local bool
+	// LocalAuthProviders is the --local-auth override: declared provider
+	// names that replace same-scope bound providers for every stack. Only
+	// consulted when Local is true.
+	LocalAuthProviders []string
 	// Force re-runs even when this commit is already recorded as applied,
 	// bypassing the already-applied guard.
 	Force bool
@@ -327,7 +331,8 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string) summary.StackSummary {
 	redactor := BuildRedactor(in.Shared)
 
-	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview)
+	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview,
+		LocalAuth{Enabled: in.Local, Providers: in.LocalAuthProviders})
 	if authErr != nil {
 		return summary.StackSummary{
 			Project: s.Project, Stack: s.Name, Env: s.Env,

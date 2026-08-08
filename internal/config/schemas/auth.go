@@ -76,6 +76,11 @@ type BindingYAML struct {
 	Match     BindingMatch `yaml:"match"`
 	Providers []string     `yaml:"providers"`
 	Override  []string     `yaml:"override,omitempty"`
+
+	// Local names providers that replace same-scope resolved providers in
+	// --local runs only (e.g. gcloud_adc standing in for gcp_wif). CI runs
+	// ignore the field. See openspec/specs/auth.
+	Local []string `yaml:"local,omitempty"`
 }
 
 // BindingMatch selects bindings by stack pattern and optional run mode.
