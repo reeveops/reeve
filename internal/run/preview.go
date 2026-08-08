@@ -81,6 +81,10 @@ type PreviewInput struct {
 	ObservabilitySourceFiles []string
 	// Local skips change-mapping (run on all declared stacks).
 	Local bool
+	// LocalAuthProviders is the --local-auth override: declared provider
+	// names that replace same-scope bound providers for every stack. Only
+	// consulted when Local is true.
+	LocalAuthProviders []string
 	// Force re-runs even when this commit is already recorded as applied,
 	// bypassing the already-applied guard.
 	Force bool
@@ -104,6 +108,13 @@ type PreviewOutput struct {
 // renders a PR comment, and - if Comments is non-nil - upserts it.
 func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	start := time.Now()
+
+	// A local run keyed to a real PR would write PR-scoped artifacts (the
+	// preview manifest) that apply's preview-freshness gate trusts - letting
+	// a laptop run stand in for CI. Refuse before credentials or artifacts.
+	if in.Local && in.PRNumber != 0 {
+		return nil, fmt.Errorf("--local previews must not carry a PR number (got %d): local artifacts must stay outside PR context; drop --pr or run without --local", in.PRNumber)
+	}
 
 	in.CommitSHA = resolvePRHeadSHA(ctx, in.VCS, in.PRNumber, in.CommitSHA)
 	slog.Debug("preview starting", "pr", in.PRNumber, "sha", in.CommitSHA, "local", in.Local)
@@ -327,7 +338,8 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string) summary.StackSummary {
 	redactor := BuildRedactor(in.Shared)
 
-	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview)
+	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview,
+		LocalAuth{Enabled: in.Local, Providers: in.LocalAuthProviders})
 	if authErr != nil {
 		return summary.StackSummary{
 			Project: s.Project, Stack: s.Name, Env: s.Env,

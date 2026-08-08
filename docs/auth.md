@@ -64,6 +64,9 @@ bindings:
    regardless of naming).
 5. Two providers of the same logical scope bound to one stack (e.g. two
    `aws_oidc` roles) is an error at lint time.
+6. `local:` names providers that substitute for same-scope providers in
+   `--local` runs only (see [Local development](#local-development)). CI
+   runs ignore the field.
 
 ### Logical scopes
 
@@ -369,8 +372,44 @@ providers:
     type: gcloud_adc
 ```
 
-Use these for `reeve plan-run --local` against live cloud without going
-through OIDC.
+Use these for `reeve plan-run` / `reeve run preview --local` against live
+cloud without going through OIDC.
+
+### Binding local providers (`local:`)
+
+OIDC providers (`aws_oidc`, `gcp_wif`, `azure_federated`) exchange a
+GitHub Actions token and can never acquire on a laptop. To run locally
+against a stack bound to them, name a local substitute on the binding:
+
+```yaml
+bindings:
+  - match: { stack: "prod/*" }
+    providers: [gcp-prod]        # gcp_wif - used in CI
+    local: [gcp-local]           # gcloud_adc - used in --local runs only
+```
+
+In a `--local` run, each `local:` entry replaces the resolved providers of
+the same logical scope (same rule as `override:`). Everything else - a
+`gcp_secret_manager` provider on the same stack, say - passes through
+unchanged. CI runs never consult `local:`.
+
+Rules enforced by `reeve lint`:
+
+- `local:` entries must reference declared providers.
+- `local:` entries must not be CI-only OIDC types - such an entry is dead
+  config.
+
+### `--local-auth`
+
+To substitute without touching config, pass declared provider names on the
+command line; each replaces same-scope resolved providers for every stack,
+after any `local:` lists (the flag wins):
+
+```bash
+reeve plan-run --local-auth gcp-local,aws-local
+```
+
+The flag requires `--local` (`plan-run` and `render` imply it).
 
 ---
 
@@ -432,7 +471,9 @@ workflow as a `workflow_dispatch` against the PR's head ref.
 You're running an OIDC provider (`aws_oidc`, `gcp_wif`, `azure_federated`)
 outside GitHub Actions or without `permissions: id-token: write`.
 
-For local dev, use the `aws_profile` / `gcloud_adc` providers.
+For local dev, declare an `aws_profile` / `gcloud_adc` provider and bind
+it with a `local:` list on the binding (or pass `--local-auth <name>`) -
+see [Local development](#local-development).
 
 ### `lint`: "conflicting providers of scope aws: aws-a vs aws-b"
 

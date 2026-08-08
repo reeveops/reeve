@@ -13,6 +13,18 @@ type Binding struct {
 	Mode         Mode   // "" = all modes; otherwise preview|apply|drift
 	Providers    []string
 	Override     []string // replaces more-general providers of the same scope
+	Local        []string // replaces same-scope providers in --local runs only
+}
+
+// ResolveOpts adjusts resolution for local runs.
+type ResolveOpts struct {
+	// Local activates each matched binding's Local list: entries replace
+	// already-resolved providers of the same scope, after normal resolution.
+	Local bool
+	// LocalProviders is the --local-auth CLI override, applied after the
+	// bindings' Local lists (CLI wins over config). Only consulted when
+	// Local is true.
+	LocalProviders []string
 }
 
 // ProviderDecl declares a named provider. The Type drives which adapter
@@ -42,6 +54,15 @@ func Resolve(bindings []Binding, stackRef string, mode Mode) []string {
 //
 // Pure logic: actual credential acquisition lives in internal/auth/providers.
 func ResolveWithDecls(bindings []Binding, decls map[string]ProviderDecl, stackRef string, mode Mode) []string {
+	return ResolveWithOpts(bindings, decls, stackRef, mode, ResolveOpts{})
+}
+
+// ResolveWithOpts is ResolveWithDecls plus local-run substitution: when
+// opts.Local is set, matched bindings' Local lists (then
+// opts.LocalProviders) each replace already-resolved providers of the same
+// scope. Applied as a second pass so a local substitute wins even over
+// providers added by later, more-specific bindings.
+func ResolveWithOpts(bindings []Binding, decls map[string]ProviderDecl, stackRef string, mode Mode, opts ResolveOpts) []string {
 	// Sort bindings: general → specific. "More specific" = longer pattern
 	// with fewer wildcards, plus mode-matched bindings override mode-agnostic.
 	sorted := append([]Binding{}, bindings...)
@@ -66,6 +87,20 @@ func ResolveWithDecls(bindings []Binding, decls map[string]ProviderDecl, stackRe
 			}
 		}
 	}
+	if !opts.Local {
+		return out
+	}
+	for _, b := range sorted {
+		if !matches(b, stackRef, mode) {
+			continue
+		}
+		for _, repl := range b.Local {
+			out, seen = replaceScope(out, seen, repl, decls)
+		}
+	}
+	for _, repl := range opts.LocalProviders {
+		out, seen = replaceScope(out, seen, repl, decls)
+	}
 	return out
 }
 
@@ -74,6 +109,17 @@ func ResolveWithDecls(bindings []Binding, decls map[string]ProviderDecl, stackRe
 // an error (to avoid "which AWS role did I use?" ambiguity).
 // Phase 4 approximation: same Type must not appear twice.
 func Validate(bindings []Binding, declsByName map[string]ProviderDecl, stacks []string) error {
+	for _, b := range bindings {
+		for _, n := range b.Local {
+			d, ok := declsByName[n]
+			if !ok {
+				return fmt.Errorf("binding local references undeclared provider %q", n)
+			}
+			if IsCIOnlyType(d.Type) {
+				return fmt.Errorf("binding local provider %q has CI-only type %q - it acquires GitHub Actions OIDC tokens and can never succeed in a --local run; use aws_profile/aws_sso/gcloud_adc", n, d.Type)
+			}
+		}
+	}
 	for _, stack := range stacks {
 		for _, mode := range []Mode{ModePreview, ModeApply, ModeDrift} {
 			names := ResolveWithDecls(bindings, declsByName, stack, mode)
@@ -93,6 +139,18 @@ func Validate(bindings []Binding, declsByName map[string]ProviderDecl, stacks []
 		}
 	}
 	return nil
+}
+
+// IsCIOnlyType reports whether the provider type exchanges a GitHub
+// Actions OIDC token for cloud credentials and therefore can never
+// acquire outside CI. Used to lint dead `local:` entries and to hint on
+// local acquire failures.
+func IsCIOnlyType(t string) bool {
+	switch t {
+	case "aws_oidc", "gcp_wif", "azure_federated":
+		return true
+	}
+	return false
 }
 
 // scopeOfType groups providers by the credential "domain" they live in.

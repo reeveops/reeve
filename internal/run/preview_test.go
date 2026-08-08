@@ -374,6 +374,27 @@ func TestPreviewLocalIgnoresChangedFiles(t *testing.T) {
 	}
 }
 
+func TestPreviewLocalRejectsPRNumber(t *testing.T) {
+	// A local run keyed to a real PR could write a preview manifest that
+	// apply's freshness gate trusts. Refused before any work happens.
+	store, _ := filesystem.New(t.TempDir())
+	_, err := Preview(context.Background(), PreviewInput{
+		Local:    true,
+		PRNumber: 7,
+		Engine: &fakeEngine{
+			enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
+		},
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"dev"}}},
+		}},
+		Shared: &schemas.Shared{},
+		Blob:   store,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not carry a PR number") {
+		t.Fatalf("local preview with a PR number must be refused, got: %v", err)
+	}
+}
+
 // TestPreviewLocalSkipsSHAOverride verifies that --local mode (no VCS) does
 // not attempt SHA override and uses CommitSHA as-is.
 func TestPreviewLocalSkipsSHAOverride(t *testing.T) {
@@ -385,7 +406,6 @@ func TestPreviewLocalSkipsSHAOverride(t *testing.T) {
 	store, _ := filesystem.New(t.TempDir())
 	out, err := Preview(ctx, PreviewInput{
 		Local:     true,
-		PRNumber:  1,
 		CommitSHA: sha,
 		RunNumber: 1,
 		Engine:    engine,
