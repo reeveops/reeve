@@ -78,9 +78,9 @@ homebrew_casks:
   binaries: [ reeve ]
   repository:
     owner: reeveops
-    name: tap
+    name: homebrew-tap
     # Token minted by the reeve-tap GitHub App, which is installed on
-    # reeveops/tap with read+write access to code.
+    # reeveops/homebrew-tap with read+write access to code.
     token: "{{ .Env.TAP_GITHUB_TOKEN }}"
   directory: Casks
   # Skip the cask push for prerelease tags (e.g. v1.0.0-rc1), matching release.prerelease.

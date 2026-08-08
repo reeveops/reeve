@@ -310,7 +310,7 @@ overriding the workflow's default token.
 
 Tagged releases (`vX.Y.Z`) ship per-platform tarballs with a
 `checksums.txt` signed via cosign keyless, plus a container image on GHCR
-and a Homebrew cask push to `reeveops/brew-tap` - all produced by
+and a Homebrew cask push to `reeveops/homebrew-tap` - all produced by
 goreleaser from `.github/workflows/release.yml`. Building from source
 (`go build ./cmd/reeve`) always remains supported.
 
