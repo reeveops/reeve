@@ -137,6 +137,26 @@ func Evaluate(cfg Config, in Inputs) Result {
 	return res
 }
 
+// EvaluateAll runs every gate in GateOrder with no fail-fast stop, so the
+// full trace is available even past the first failure. Report-only
+// surfaces (/reeve explain) use this; the apply path keeps Evaluate so a
+// blocked run does not spend VCS calls evaluating gates it will never
+// reach.
+func EvaluateAll(cfg Config, in Inputs) Result {
+	res := Result{StackRef: in.StackRef}
+	for _, g := range GateOrder {
+		gr, overridden := evalGate(g, cfg, in)
+		res.Gates = append(res.Gates, gr)
+		if overridden {
+			res.Overridden = append(res.Overridden, g)
+		}
+		if gr.Outcome == OutcomeFail {
+			res.Blocked = true
+		}
+	}
+	return res
+}
+
 // evalGate evaluates one gate. The second return is true when the gate
 // would have failed but was overridden by break-glass (approvals always;
 // freeze only with BreakGlassOverrideFreeze). Overridden gates come back

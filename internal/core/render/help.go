@@ -18,6 +18,7 @@ func BuildHelpComment(autoReady bool) string {
 	b.WriteString("| `/reeve ready` | Mark PR as ready for approval, notify Slack |\n")
 	b.WriteString("| `/reeve breakglass \"<justification>\" apply` | Emergency apply: overrides approvals (and freeze unless disabled); never bypasses locks or checks. Requires `break_glass:` config; loudly audited |\n")
 	b.WriteString("| `/reeve unlock [project/stack] [--force]` | Free this PR's stack locks; --force if it holds one mid-apply |\n")
+	b.WriteString("| `/reeve explain [project/stack]` | Why: approval rules as resolved, lock state, and a full gate trace, evaluated now. Report-only - runs no engine, takes no lock |\n")
 	b.WriteString("| `/reeve help` | Show this help message |\n")
 	b.WriteString("\n")
 	if autoReady {

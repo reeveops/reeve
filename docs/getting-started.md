@@ -191,6 +191,7 @@ That's it. The action auto-detects the command from the event:
 | `/reeve apply` comment                             | `reeve run apply`        |
 | `/reeve refresh` comment                           | `reeve run refresh`      |
 | `/reeve unlock [project/stack]` comment            | frees this PR's locks    |
+| `/reeve explain [project/stack]` comment           | `reeve run explain` - report-only why: rules, locks, gate trace |
 | `/reeve help` comment                              | posts available commands |
 | Any other comment, or any bot-authored comment     | silent no-op             |
 

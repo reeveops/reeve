@@ -29,7 +29,7 @@ func newRunCmd() *cobra.Command {
 	preview.Flags().Bool("refresh", false,
 		"Reconcile state with live infrastructure before planning, so the diff is against reality rather than possibly-stale state")
 
-	cmd.AddCommand(preview, newApplyCmd(), newRefreshCmd(), newReadyCmd(), newApprovedCmd(), newHelpCmd())
+	cmd.AddCommand(preview, newApplyCmd(), newRefreshCmd(), newReadyCmd(), newApprovedCmd(), newHelpCmd(), newExplainCmd())
 	return cmd
 }
 

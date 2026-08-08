@@ -153,6 +153,7 @@ the run never breaks because a binary wasn't available.
 | `/reeve refresh [--dry-run] [--all]` | Reconciles state with live infrastructure. Changes no infrastructure — a "delete" means the resource was already gone and was dropped from state |
 | `/reeve breakglass "<justification>" apply` | Emergency apply: overrides approvals (and freeze unless disabled), never locks/checks; loudly audited. Requires `break_glass:` config |
 | `/reeve unlock [project/stack]` | Frees this PR's stack locks (all, or just one)               |
+| `/reeve explain [project/stack]` | Report-only why: approval rules, lock state, and a full gate trace. Runs no engine, takes no lock |
 | `/reeve help`                | Posts a comment listing available commands                      |
 
 Accepted comment prefixes are set by the `command-prefix` input (default
