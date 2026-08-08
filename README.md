@@ -56,7 +56,7 @@ commit, cosign-signed) back the GitHub Action fast-path (see the pinning
 table below).
 The release pipeline also publishes a container image
 (`ghcr.io/reeveops/reeve`) and pushes a Homebrew cask to
-[`reeveops/tap`](https://github.com/reeveops/tap). Expect breaking config
+[`reeveops/homebrew-tap`](https://github.com/reeveops/homebrew-tap). Expect breaking config
 changes until 1.0 (`reeve migrate-config` covers renames).
 
 Or build from source:
