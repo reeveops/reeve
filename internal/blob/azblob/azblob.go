@@ -158,6 +158,12 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
+// isNotFound reports whether err means "the blob is not there", which the
+// lock store reads as "this lock is free". Getting that wrong on a
+// transient error hands out a lock someone else already holds, so the
+// fallback is deliberately narrow: no bare "404" substring match, which
+// also fires on unrelated errors that merely contain it (request IDs,
+// byte counts, timestamps). Mirrors the GCS adapter's classifier.
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -169,9 +175,13 @@ func isNotFound(err error) bool {
 	if errors.As(err, &terr) && terr.StatusCode == 404 {
 		return true
 	}
-	return strings.Contains(err.Error(), "BlobNotFound") || strings.Contains(err.Error(), "404")
+	// Fallback for code paths that stringify the error instead of wrapping it.
+	return strings.Contains(err.Error(), string(bloberror.BlobNotFound))
 }
 
+// isPreconditionFailed classifies a conditional-write miss so the caller's
+// mutate loop re-reads and retries instead of aborting. Same narrowness
+// rule as isNotFound: a bare "412" match also fired on unrelated errors.
 func isPreconditionFailed(err error) bool {
 	if err == nil {
 		return false
@@ -183,7 +193,7 @@ func isPreconditionFailed(err error) bool {
 	if bloberror.HasCode(err, bloberror.ConditionNotMet) {
 		return true
 	}
-	return strings.Contains(err.Error(), "ConditionNotMet") || strings.Contains(err.Error(), "412")
+	return strings.Contains(err.Error(), string(bloberror.ConditionNotMet))
 }
 
 // compile-time check

@@ -79,6 +79,14 @@ func TestIsPreconditionFailed(t *testing.T) {
 			err:  errors.New("connection reset by peer"),
 			want: false,
 		},
+		{
+			// A bare "412" substring match also fired on transient errors
+			// that merely contained the digits, turning a network blip into
+			// a phantom CAS conflict.
+			name: "transient error containing 412 in unrelated position",
+			err:  errors.New("read tcp 10.0.0.1:443: connection reset after 412 bytes"),
+			want: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,6 +111,11 @@ func TestIsNotFound(t *testing.T) {
 		{"412 is not not-found", respErr(bloberror.ConditionNotMet, http.StatusPreconditionFailed), false},
 		{"nil", nil, false},
 		{"arbitrary error", errors.New("boom"), false},
+		// A bare "404" substring match also fired on transient errors that
+		// merely contained the digits. The lock store reads not-found as
+		// "lock is free", so misclassifying here hands out a held lock.
+		{"transient error with 404 in a request id", errors.New("dial tcp: server misbehaving (request id 7f404e2a)"), false},
+		{"transient error with 404 in a byte count", errors.New("unexpected EOF after 404 bytes"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
