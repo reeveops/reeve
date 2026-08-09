@@ -41,7 +41,9 @@ reviews:
     enabled: false
     labels: ["review-ready"]
 
-    auto_incremental_review: true
+    # Off. On-push incremental reviews would bypass the CI gate once the
+    # label lands. The gate re-fires a review on each green CI run instead.
+    auto_incremental_review: false
 
     # Pauses incremental review after N reviewed commits. Low, because OSS
     # tier is 1-10 PR reviews per hour depending on project popularity.
