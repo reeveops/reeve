@@ -181,7 +181,7 @@ type flakyProbeStore struct {
 }
 
 func (f *flakyProbeStore) PutIfMatch(ctx context.Context, key string, r io.Reader, etag string) (*blob.Metadata, error) {
-	if strings.HasPrefix(key, "locks/.cas-probe/") {
+	if strings.Contains(key, ".cas-probe/") {
 		f.mu.Lock()
 		inject := f.failures > 0
 		if inject {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/config/schemas"
@@ -50,30 +49,9 @@ func EngineSupportsSavedPlans(e any) bool {
 // no separate lifecycle to forget about.
 func PlanArtifactKey(pr int, runID, stackRef string) string {
 	if pr == 0 {
-		return fmt.Sprintf("runs/local/%s/plans/%s.plan", runID, planSlug(stackRef))
+		return fmt.Sprintf("runs/local/%s/plans/%s.plan", runID, blob.SlugComponent(stackRef, "stack"))
 	}
-	return fmt.Sprintf("runs/pr-%d/%s/plans/%s.plan", pr, runID, planSlug(stackRef))
-}
-
-// planSlug makes a stack ref safe for a key segment. Stack names come from
-// the repo, so they can carry "/", "..", and worse; anything outside a
-// conservative allowlist becomes "_" so a crafted stack name cannot escape
-// the run's prefix or collide with manifest.json.
-func planSlug(stackRef string) string {
-	var b strings.Builder
-	for _, r := range stackRef {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	s := b.String()
-	if s == "" {
-		return "stack"
-	}
-	return s
+	return fmt.Sprintf("runs/pr-%d/%s/plans/%s.plan", pr, runID, blob.SlugComponent(stackRef, "stack"))
 }
 
 // PutPlanArtifact uploads the engine's plan file and returns its blob key.

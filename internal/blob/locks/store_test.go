@@ -3,6 +3,7 @@ package locks
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -304,5 +305,29 @@ func TestPromotedDeadReservationAdoptedByNextSamePRRun(t *testing.T) {
 	// An actively acquired same-PR holder is still the double-apply guard.
 	if _, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "concurrent"}, time.Hour); ok || !errors.Is(err, corelocks.ErrHeldBySamePR) {
 		t.Fatalf("active same-PR holder must refuse: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestLockKeysAreSlugged pins that lock object keys are built from
+// sanitised components. Project and stack names originate in the repo under
+// review (Pulumi.yaml, stack filenames); plan artifacts already slug for
+// the same reason, and lock keys did not.
+func TestLockKeysAreSlugged(t *testing.T) {
+	s := New(nil)
+	got := s.key("../../etc", "a/b")
+	if strings.Contains(got, "..") || strings.Count(got, "/") != 2 {
+		t.Fatalf("hostile names produced key %q", got)
+	}
+	if got != "locks/______etc/a_b.json" {
+		t.Fatalf("key = %q", got)
+	}
+	// parseLockKey feeds its result straight back into Get, which re-derives
+	// the key - so slugging must round-trip.
+	proj, stack, ok := parseLockKey(got)
+	if !ok {
+		t.Fatalf("parseLockKey failed on %q", got)
+	}
+	if again := s.key(proj, stack); again != got {
+		t.Fatalf("key not stable across parse/derive: %q -> %q", got, again)
 	}
 }
