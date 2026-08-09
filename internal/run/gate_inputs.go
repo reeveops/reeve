@@ -127,7 +127,11 @@ func gatherGateInputs(
 		slog.Debug("comment approvals fetched", "count", len(commentApprovals))
 	}
 	g.RawApprovals = approvals.MergeApprovals(reviewApprovals, commentApprovals)
-	slog.Debug("raw approvals fetched", "count", len(g.RawApprovals), "pr_head_sha", commitSHA)
+	// Log the SHA approvals were actually matched against, not the one the
+	// runner checked out - they differ when CI builds a merge commit, and
+	// that difference is the whole point of dismiss_on_new_commit.
+	slog.Debug("raw approvals fetched",
+		"count", len(g.RawApprovals), "pr_head_sha", g.ApprovalPR.HeadSHA)
 
 	// CODEOWNERS is optional: a 404 returns "" with a nil error, so only a
 	// real transport error reaches here - and that must not silently pass
