@@ -262,3 +262,58 @@ func TestWriteAmbientCreds(t *testing.T) {
 		t.Errorf("credentials file mode = %o, want 0600", perm)
 	}
 }
+
+// TestAcquireRejectsUnparseableExpiry pins that a bad expireTime fails
+// rather than being swallowed. Credential.ExpiresAt documents the zero
+// value as "no expiry", so silently defaulting to it advertised a 1-hour
+// impersonation token as one that never expires - and anything downstream
+// deciding whether to refresh would have believed it.
+func TestAcquireRejectsUnparseableExpiry(t *testing.T) {
+	oidc, _ := oidcServer(t)
+	setOIDCEnv(t, oidc.URL)
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"` + fakeSTSToken + `"}`))
+	}))
+	defer sts.Close()
+	setSTSEndpoint(t, sts.URL)
+	iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"accessToken":"sa-token","expireTime":"not-a-timestamp"}`))
+	}))
+	defer iam.Close()
+	setIAMBase(t, iam.URL)
+
+	p := New("gcp", testWIP, testSA, "", 0)
+	cred, err := p.Acquire(context.Background())
+	if err == nil {
+		t.Fatalf("unparseable expireTime accepted; ExpiresAt=%v would read as no-expiry", cred.ExpiresAt)
+	}
+	if !strings.Contains(err.Error(), "expireTime") {
+		t.Fatalf("error should name the field: %v", err)
+	}
+	// The token must not leak while reporting a parse failure.
+	if strings.Contains(err.Error(), "sa-token") {
+		t.Errorf("error leaks the access token: %v", err)
+	}
+}
+
+// TestAcquireRejectsMissingAccessToken guards the sibling case: a 200 with
+// no token must not be handed on as an empty credential.
+func TestAcquireRejectsMissingAccessToken(t *testing.T) {
+	oidc, _ := oidcServer(t)
+	setOIDCEnv(t, oidc.URL)
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"` + fakeSTSToken + `"}`))
+	}))
+	defer sts.Close()
+	setSTSEndpoint(t, sts.URL)
+	iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"expireTime":"2026-01-01T00:00:00Z"}`))
+	}))
+	defer iam.Close()
+	setIAMBase(t, iam.URL)
+
+	p := New("gcp", testWIP, testSA, "", 0)
+	if _, err := p.Acquire(context.Background()); err == nil {
+		t.Fatal("a response with no access token was accepted")
+	}
+}

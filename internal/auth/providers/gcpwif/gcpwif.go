@@ -156,7 +156,16 @@ func generateSAAccessToken(ctx context.Context, stsToken, sa string, ttl time.Du
 	if err := json.Unmarshal(rbody, &out); err != nil {
 		return "", time.Time{}, err
 	}
-	exp, _ := time.Parse(time.RFC3339, out.ExpireTime)
+	if out.AccessToken == "" {
+		return "", time.Time{}, fmt.Errorf("iamcredentials returned no access token")
+	}
+	// Do not swallow this: Credential.ExpiresAt documents the zero value as
+	// "no expiry", so a failed parse would advertise a 1-hour impersonation
+	// token as one that never expires.
+	exp, err := time.Parse(time.RFC3339, out.ExpireTime)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("parse expireTime %q: %w", out.ExpireTime, err)
+	}
 	return out.AccessToken, exp, nil
 }
 
