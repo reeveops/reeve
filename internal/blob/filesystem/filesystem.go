@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -149,7 +150,14 @@ func (s *Store) PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch
 	}
 	defer lock.release()
 
-	current, statErr := hashKeyOrMissing(root, k)
+	current, statErr := hashKey(root, k)
+	// Only "not there" may be read as absence. Any other stat/read failure
+	// (a permissions problem, a truncated read) previously fell through the
+	// ifMatch=="" branch and CREATED the object, overwriting whatever was
+	// really there - a fail-open on the create-if-absent path.
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("read current object %q: %w", key, statErr)
+	}
 	if ifMatch == "" {
 		if statErr == nil {
 			return nil, blob.ErrPreconditionFailed // exists, but we required absence
@@ -213,6 +221,13 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// Lockfiles are internal bookkeeping, not objects. They were
+		// previously unlinked on release, so a concurrent List could still
+		// catch one mid-flight and hand a caller a key that is not an
+		// object - PruneRunArtifacts would then try to read it.
+		if strings.HasSuffix(p, lockSuffix) {
 			return nil
 		}
 		// WalkDir yields slash paths already relative to the bucket root,
@@ -304,30 +319,34 @@ func hashKey(root *os.Root, key string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func hashKeyOrMissing(root *os.Root, key string) (string, error) {
-	h, err := hashKey(root, key)
-	if err != nil && errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	return h, err
-}
-
 type fileLock struct {
 	root *os.Root
 	key  string
 	f    *os.File
 }
 
+// release drops the flock. It deliberately does NOT unlink the lockfile.
+//
+// Unlinking races: with A holding the lock and B already blocked in
+// Flock on the same inode, A's unlink lets B proceed on a now-unlinked
+// inode while C opens the path fresh, creates a NEW inode and locks that.
+// B and C then both believe they hold the lock and their PutIfMatch
+// bodies interleave. Keeping the inode in place means every waiter
+// contends on the same one. The files are empty and are filtered out of
+// List, so leaving them costs a directory entry per key.
 func (l *fileLock) release() {
 	if l.f != nil {
 		_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 		_ = l.f.Close()
-		_ = l.root.Remove(osKey(l.key))
 	}
 }
 
+// lockSuffix marks the sibling lockfile for a key. These are internal
+// bookkeeping, never bucket objects, so List hides them.
+const lockSuffix = ".lock"
+
 func acquireLock(root *os.Root, key string) (*fileLock, error) {
-	lockKey := key + ".lock"
+	lockKey := key + lockSuffix
 	if dir := path.Dir(lockKey); dir != "." {
 		if err := root.MkdirAll(osKey(dir), 0o750); err != nil {
 			return nil, err
