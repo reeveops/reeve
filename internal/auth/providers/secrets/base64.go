@@ -9,3 +9,12 @@ func stdB64Decode(s string) (string, error) {
 	}
 	return string(b), nil
 }
+
+// urlB64Decode handles the URL-safe alphabet (- and _ instead of + and /).
+func urlB64Decode(s string) (string, error) {
+	b, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}

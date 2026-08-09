@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/reeveops/reeve/internal/auth"
 )
@@ -69,8 +70,11 @@ func (p *GcloudADC) Acquire(ctx context.Context) (*auth.Credential, error) {
 		return nil, err
 	}
 	// Default location per `gcloud auth application-default login`.
-	home, _ := os.UserHomeDir()
-	adc := home + "/.config/gcloud/application_default_credentials.json"
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("gcloud_adc %q: cannot locate home directory: %w", p.ProviderName, err)
+	}
+	adc := filepath.Join(home, ".config", "gcloud", "application_default_credentials.json")
 	return &auth.Credential{
 		Env: map[string]string{
 			"GOOGLE_APPLICATION_CREDENTIALS": adc,
@@ -98,7 +102,16 @@ func (p *EnvPassthrough) Acquire(ctx context.Context) (*auth.Credential, error) 
 	fmt.Fprintf(os.Stderr, "⚠️  env_passthrough provider %q in use - long-lived credentials bypass reeve's zero-trust model\n", p.ProviderName)
 	env := map[string]string{}
 	for engineKey, hostKey := range p.EnvVars {
-		env[engineKey] = os.Getenv(hostKey)
+		v, ok := os.LookupEnv(hostKey)
+		if !ok {
+			// Exporting an empty value looks to the engine like a
+			// configured-but-blank credential, which surfaces as a confusing
+			// auth error from the cloud provider instead of a missing var.
+			fmt.Fprintf(os.Stderr, "⚠️  env_passthrough %q: host env %s is not set; not exporting %s\n",
+				p.ProviderName, hostKey, engineKey)
+			continue
+		}
+		env[engineKey] = v
 	}
 	return &auth.Credential{Env: env, Kind: "env-passthrough", Source: p.ProviderName}, nil
 }

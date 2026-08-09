@@ -125,6 +125,15 @@ func TestBase64StdDecode(t *testing.T) {
 		{"padded", "aHVzaA==", "hush", false},
 		{"unpadded gets repadded", "aHVzaA", "hush", false},
 		{"invalid", "!!!", "", true},
+		// The proto3 JSON mapping requires accepting the URL-safe alphabet
+		// too; StdEncoding alone rejects - and _.
+		{"url-safe padded", "Pz8_Pg==", "???>", false},
+		{"url-safe unpadded", "Pz8_Pg", "???>", false},
+		// An empty payload would decode to "" and be exported as a blank
+		// credential.
+		{"empty", "", "", true},
+		{"whitespace only", "   ", "", true},
+		{"surrounding whitespace tolerated", "  aHVzaA==  ", "hush", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

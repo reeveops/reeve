@@ -135,6 +135,18 @@ func TestAnyToInt64(t *testing.T) {
 		{"nil is required", nil, 0, true},
 		{"non-numeric string", "forty-two", 0, true},
 		{"bool unsupported", true, 0, true},
+		// fmt.Sscanf("%d") stops at the first non-digit and reports
+		// success, so these silently became 123 and reeve authenticated as
+		// the wrong GitHub App installation.
+		{"trailing garbage rejected", "123abc", 0, true},
+		{"trailing quote rejected", "123\"", 0, true},
+		{"embedded newline rejected", "123\n456", 0, true},
+		{"surrounding whitespace tolerated", "  123  ", 123, false},
+		// YAML numbers arrive as float64; truncating a fractional value is
+		// the same silent-partial-id bug as Sscanf, via another type.
+		{"fractional float64 rejected", float64(123.5), 0, true},
+		{"out-of-range float64 rejected", 1e19, 0, true},
+		{"whole float64 still accepted", float64(123), 123, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

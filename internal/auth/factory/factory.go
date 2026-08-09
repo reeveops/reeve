@@ -7,7 +7,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/reeveops/reeve/internal/auth"
@@ -197,6 +200,16 @@ func anyToInt64(v any) (int64, error) {
 	case int64:
 		return t, nil
 	case float64:
+		// YAML numbers decode as float64. A fractional or out-of-range
+		// value must not be truncated into a plausible-looking id - that is
+		// the same silent-partial-value bug as Sscanf on strings, just
+		// arriving through a different type.
+		if t != math.Trunc(t) {
+			return 0, fmt.Errorf("not an integer: %v", t)
+		}
+		if t > math.MaxInt64 || t < math.MinInt64 {
+			return 0, fmt.Errorf("out of range for an int64: %v", t)
+		}
 		return int64(t), nil
 	case string:
 		return parseInt64String(t)
@@ -205,10 +218,16 @@ func anyToInt64(v any) (int64, error) {
 	}
 }
 
+// parseInt64String rejects trailing garbage. fmt.Sscanf("%d") stops at the
+// first non-digit and reports success, so an app_id of "123abc" - or a
+// value with a stray quote or newline - silently became 123 and reeve
+// authenticated as the wrong GitHub App installation.
 func parseInt64String(s string) (int64, error) {
-	var n int64
-	_, err := fmt.Sscanf(s, "%d", &n)
-	return n, err
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("not an integer: %q", s)
+	}
+	return n, nil
 }
 
 // loadPrivateKey handles three forms: base64 blob, literal PEM, or a
