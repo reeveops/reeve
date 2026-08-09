@@ -1,0 +1,344 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# reeveops/reeve
+# Validate with: `coderabbit config validate` (CLI) or `@coderabbitai configuration` on a PR.
+
+language: "en-US"
+
+# Anti-Slop is an Early Access feature. Without this it does not run,
+# even though the UI toggle shows "Enabled".
+early_access: true
+
+reviews:
+  # quiet = only the most important feedback. Alpha repo, one maintainer,
+  # OSS rate limits at the low end. Switch to "chill" if this feels too thin.
+  profile: "quiet"
+
+  # Auto-approve once CodeRabbit's comments are resolved and no pre-merge
+  # checks fail. DECIDE: leave false if you don't want a bot approval
+  # satisfying a branch protection rule.
+  request_changes_workflow: false
+
+  # Summary lives in the walkthrough, not the PR description. Keeps your
+  # description text (and reeve's own plan comment) untouched.
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  collapse_walkthrough: true
+
+  # Noise reduction.
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  related_prs: false
+  suggested_reviewers: false
+  review_details: false
+
+  auto_review:
+    # Gated opt-in. Nothing is reviewed until the "review-ready" label lands.
+    # .github/workflows/coderabbit-gate.yml applies it when CI passes AND the
+    # author is OWNER/MEMBER/COLLABORATOR.
+    # External PRs: label them by hand, or comment `@coderabbitai review`.
+    enabled: false
+    labels: ["review-ready"]
+
+    auto_incremental_review: true
+
+    # Pauses incremental review after N reviewed commits. Low, because OSS
+    # tier is 1-10 PR reviews per hour depending on project popularity.
+    auto_pause_after_reviewed_commits: 2
+
+    drafts: false
+
+    # REQUIRED FIX: you push to master and next. base_branches only extends
+    # the default branch, so without this, PRs targeting `next` are never
+    # eligible for auto-review at all.
+    base_branches:
+      - "next"
+
+    ignore_title_keywords:
+      - "WIP"
+      - "[skip review]"
+
+    # renovate.json is in the repo. These would otherwise burn reviews.
+    ignore_usernames:
+      - "renovate[bot]"
+      - "dependabot[bot]"
+      - "github-actions[bot]"
+
+  # Files CodeRabbit already skips by default and are NOT listed here:
+  # go.sum (**/*.sum), *.png, *.svg, *.log, *.map, *.pb.go, *.tfstate,
+  # dist/, node_modules/, all **/generated/** and **/gen/** variants.
+  path_filters:
+    # docs/ and README.md are deliberately NOT filtered. They are in scope
+    # for every behavior change. See path_instructions below.
+    #
+    # Archived OpenSpec proposals. Immutable history, pure prose.
+    - "!openspec/changes/archive/**"
+    # Golden render fixtures. The diff is generated output, not authored code.
+    # DECIDE: these ARE the regression signal for internal/core/render.
+    # Drop this line if you want CodeRabbit to eyeball golden diffs.
+    - "!internal/core/render/testdata/**"
+    # Committed run artifacts from the toy stack.
+    - "!examples/toy-stack/.reeve-state/**"
+    # Vendored Pulumi TS scaffolding in examples. Not your code.
+    - "!examples/**/package.json"
+    - "!examples/**/tsconfig.json"
+
+  path_instructions:
+    - path: "internal/core/**"
+      instructions: |
+        internal/core is the pure core. It must not perform I/O, network
+        calls, filesystem access, time reads, or randomness except through
+        injected interfaces. golangci-lint enforces import purity; you are
+        checking for behavioral leaks it cannot see.
+        - Flag any hidden nondeterminism (map iteration order affecting
+          output, time.Now, rand without a seeded source).
+        - Flag anything that makes core behavior depend on an adapter.
+
+    - path: "internal/core/redact/**"
+      instructions: |
+        This package prevents secrets from reaching PR comments, logs, and
+        audit entries. Treat every gap as high severity.
+        - Flag any path where a value could bypass redaction.
+        - Flag partial-match or substring redaction that could miss a
+          secret split across a line boundary or chunk.
+        - Flag concurrent access to shared redaction state.
+
+    - path: "internal/core/{approvals,preconditions,breakglass,freeze,locks}/**"
+      instructions: |
+        These are reeve's security gates: approval counts, CODEOWNERS,
+        required checks, up-to-date base, preview freshness, freeze windows,
+        break-glass override, and the lock FSM.
+        - Flag any change that could let an apply proceed with fewer
+          approvals or a stale preview than configured.
+        - Flag fail-open behavior. Gate evaluation errors must deny.
+        - Flag lock state transitions that could double-acquire or orphan a
+          lock, especially around CAS and heartbeat.
+        - Break-glass must remain audited and justification-gated on every
+          path.
+
+    - path: "internal/auth/**"
+      instructions: |
+        Credentials are short-lived and federated (AWS OIDC, GCP WIF, Azure
+        federated, GitHub App). reeve must never persist long-lived secrets.
+        - Flag any credential written to disk, env, logs, or blob storage.
+        - Flag missing audience/subject validation on OIDC token exchange.
+        - Flag credentials outliving their intended scope.
+
+    - path: "internal/blob/**"
+      instructions: |
+        - Flag missing conditional-write / compare-and-swap semantics where
+          lock correctness depends on them.
+        - Flag error handling that treats a transient backend failure as a
+          successful write.
+        - Flag path construction that could allow traversal outside the
+          configured prefix.
+
+    - path: "internal/vcs/github/**"
+      instructions: |
+        - Flag unvalidated input taken from PR comments, titles, or bodies
+          that reaches a command path.
+        - Flag missing pagination on GitHub list endpoints.
+        - Flag rate-limit and secondary-rate-limit handling gaps.
+
+    - path: "{.github/workflows/**,action.yml,.github/scripts/**}"
+      instructions: |
+        This repo ships a GitHub Action other people run in their CI. Supply
+        chain issues here are downstream issues for every user.
+        - Flag unpinned or float-tag action references.
+        - Flag `permissions:` broader than the job needs.
+        - Flag pull_request_target combined with checkout of PR head.
+        - Flag script injection via ${{ }} interpolation into run blocks.
+        - Flag any download path that skips checksum or cosign verification.
+
+    - path: "{docs/**,README.md}"
+      instructions: |
+        Docs are how users operate reeve. Treat drift between docs and code
+        as a defect, not a nit.
+        - Flag config keys, CLI flags, or /reeve commands documented here
+          that do not exist in the code on this branch.
+        - Flag examples that would fail against the current binary.
+        - Flag documented defaults that disagree with internal/config.
+        - Flag documentation of unshipped behavior.
+        Style is enforced by CONTRIBUTING.md: nothing longer than two
+        sentences, no qualifier language, bullets over prose, no em dashes.
+        Flag violations.
+
+    - path: "**/*_test.go"
+      instructions: |
+        - Flag tests that assert on error strings instead of error types.
+        - Flag missing t.Parallel where the test is independent.
+        - Flag shared mutable state between subtests.
+        - Flag table tests missing the failure and boundary cases.
+
+  pre_merge_checks:
+    title:
+      mode: "warning"
+      requirements: |
+        Conventional-commit style prefix (feat/fix/docs/refactor/test/chore),
+        under 72 characters, describes the change not the file touched.
+    description:
+      mode: "warning"
+    issue_assessment:
+      mode: "warning"
+    docstrings:
+      mode: "off"
+
+    custom_checks:
+      - name: "OpenSpec for non-trivial changes"
+        mode: "warning"
+        instructions: |
+          CONTRIBUTING.md requires an OpenSpec change for non-trivial work.
+          FAIL if the PR adds or changes behavior in internal/core/**,
+          internal/auth/**, internal/iac/**, or cmd/reeve/** without touching
+          openspec/changes/** or openspec/specs/**.
+          PASS for pure refactors, test-only changes, dependency bumps,
+          docs, and CI config.
+
+      - name: "Docs updated with behavior"
+        mode: "warning"
+        instructions: |
+          Docs must ship with the behavior they describe.
+          FAIL if the PR does any of the following without a matching change
+          under docs/ or in README.md:
+            - adds, renames, or removes a config key in internal/config/**
+            - adds or changes a /reeve command in cmd/reeve/** or
+              internal/run/**
+            - changes approval, freeze, lock, or precondition semantics in
+              internal/core/**
+            - changes auth provider behavior in internal/auth/**
+            - changes drift or notification behavior in internal/drift/** or
+              internal/notify/**
+            - changes inputs or defaults in action.yml
+          PASS for internal refactors with no user-visible change, test-only
+          changes, dependency bumps, and CI config.
+
+      - name: "No new long-lived secret storage"
+        mode: "warning"
+        instructions: |
+          FAIL if the PR introduces code that writes a credential, token, or
+          private key to disk, environment, or blob storage outside the
+          existing short-lived federated credential paths in internal/auth.
+          PASS otherwise.
+
+  slop_detection:
+    enabled: true
+    label: "slop"
+
+  tools:
+    # CI already runs golangci-lint with .golangci.yml, govulncheck, and
+    # gosec. DECIDE whether you want CodeRabbit's duplicate inline pass.
+    # Inline comments are more readable than CI log output; the tradeoff is
+    # two sources of the same finding.
+    golangci-lint:
+      enabled: true
+      config_file: ".golangci.yml"
+
+    # No CI equivalent. Highest value tools for this repo.
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    shellcheck:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    hadolint:
+      enabled: true
+    yamllint:
+      enabled: true
+
+    # docs/ is in review scope, so prose tooling earns its place.
+    markdownlint:
+      enabled: true
+    languagetool:
+      enabled: true
+      level: "default"
+
+    # Overlaps govulncheck + dependency-review-action.
+    osvScanner:
+      enabled: false
+
+    # No source of these languages once examples/ scaffolding is filtered.
+    eslint:
+      enabled: false
+    biome:
+      enabled: false
+    oxc:
+      enabled: false
+    reactDoctor:
+      enabled: false
+    stylelint:
+      enabled: false
+    htmlhint:
+      enabled: false
+    ruff:
+      enabled: false
+    flake8:
+      enabled: false
+    pylint:
+      enabled: false
+    rubocop:
+      enabled: false
+    brakeman:
+      enabled: false
+    phpstan:
+      enabled: false
+    phpmd:
+      enabled: false
+    phpcs:
+      enabled: false
+    detekt:
+      enabled: false
+    swiftlint:
+      enabled: false
+    pmd:
+      enabled: false
+    clang:
+      enabled: false
+    cppcheck:
+      enabled: false
+    fbinfer:
+      enabled: false
+    luacheck:
+      enabled: false
+    prismaLint:
+      enabled: false
+    sqlfluff:
+      enabled: false
+    squawk:
+      enabled: false
+    shopifyThemeCheck:
+      enabled: false
+    smartyLint:
+      enabled: false
+    emberTemplateLint:
+      enabled: false
+    blinter:
+      enabled: false
+    psscriptanalyzer:
+      enabled: false
+    fortitudeLint:
+      enabled: false
+    circleci:
+      enabled: false
+
+chat:
+  # Restricts comment-chat to org members on GitHub org repos.
+  # Does NOT affect auto-review eligibility. Set true if you'd rather let
+  # drive-by contributors ask CodeRabbit questions.
+  allow_non_org_members: false
+  auto_reply: true
+
+knowledge_base:
+  # Public repo, so this already resolves to "local". Pinned for clarity.
+  learnings:
+    scope: "local"
+  issues:
+    scope: "local"
+  code_guidelines:
+    enabled: true
+  web_search:
+    enabled: true

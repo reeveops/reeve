@@ -3,7 +3,11 @@ name: CI
 on:
   push:
     branches: [master, next]
+  # ready_for_review is not a default type. Without it, marking a draft
+  # ready fires no CI run, so coderabbit-gate never labels the PR until
+  # the next push.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
