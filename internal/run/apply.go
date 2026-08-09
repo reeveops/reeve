@@ -28,7 +28,6 @@ import (
 	"github.com/reeveops/reeve/internal/observability/annotations"
 	reeveotel "github.com/reeveops/reeve/internal/observability/otel"
 	"github.com/reeveops/reeve/internal/vcs"
-	"github.com/reeveops/reeve/internal/vcs/codeowners"
 )
 
 // applyEngine is what run/apply.go needs from an IaC adapter.
@@ -298,90 +297,27 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 	slog.Debug("pr fetched", "number", in.PRNumber, "head_sha", pr.HeadSHA, "author", pr.Author, "base_ref", pr.BaseRef, "is_draft", pr.IsDraft, "is_fork", pr.IsFork)
 
-	checksOpts := vcs.ChecksGreenOpts{
-		IgnoreRunID: in.CIRunID,
-		IgnoreNames: in.SelfCheckNames,
-	}
-	checksGreen, failingChecks, err := in.VCS.ChecksGreen(ctx, in.CommitSHA, checksOpts)
+	gi, err := gatherGateInputs(ctx, in.VCS, in.Shared, in.CommentApproval,
+		in.PRNumber, pr, in.CommitSHA, changed,
+		vcs.ChecksGreenOpts{IgnoreRunID: in.CIRunID, IgnoreNames: in.SelfCheckNames})
 	if err != nil {
-		// Fail-closed: an API outage must not silently pass the gate. The
-		// gate-evaluation error is propagated so the caller can distinguish
-		// "checks failed" from "checks could not be evaluated".
-		return nil, fmt.Errorf("evaluate checks_green: %w", err)
+		return nil, err
 	}
-	if !checksGreen {
-		slog.Info("required checks not green", "failing", failingChecks, "sha", in.CommitSHA)
+	// Apply fails closed on an unreadable gate input: an API outage must not
+	// silently pass a gate. The error is propagated so callers can tell
+	// "checks failed" from "checks could not be evaluated".
+	if gi.ChecksErr != nil {
+		return nil, fmt.Errorf("evaluate checks_green: %w", gi.ChecksErr)
 	}
-
-	behind, err := in.VCS.CompareBranches(ctx, pr.BaseRef, in.CommitSHA)
-	if err != nil {
-		// Fail-closed: previously this defaulted to behind=0 which made the
-		// up-to-date gate silently pass on VCS outage.
-		return nil, fmt.Errorf("compare branches %s..%s: %w", pr.BaseRef, in.CommitSHA, err)
+	if gi.CompareErr != nil {
+		return nil, fmt.Errorf("compare branches %s..%s: %w", pr.BaseRef, in.CommitSHA, gi.CompareErr)
 	}
-	upToDate := behind == 0
-
-	// Use pr.HeadSHA (from the VCS API) for approval matching so that
-	// dismiss_on_new_commit compares against the actual PR HEAD, not the
-	// SHA the CI runner happened to check out (which may be a merge commit).
-	approvalHeadSHA := pr.HeadSHA
-	if approvalHeadSHA == "" {
-		approvalHeadSHA = in.CommitSHA
-	}
-	// Approvals config drives which sources count. Extract it before gathering
-	// so we can gather from exactly the enabled sources and union them.
-	appCfg := toApprovalsConfig(in.Shared)
-	approvalPR := approvals.PR{
-		Number: in.PRNumber, HeadSHA: approvalHeadSHA, Author: pr.Author, Changed: changed,
-	}
-
-	// Gather approvals from every enabled source and union them. pr_review is
-	// on by default; pr_comment is opt-in. Deduplication by approver identity
-	// is handled downstream in Evaluate (which counts each login once), so a
-	// human who approves via both a review AND a comment counts a single time.
-	// When no sources block is configured, only pr_review runs - identical to
-	// prior behavior.
-	var reviewApprovals, commentApprovals []approvals.Approval
-	if appCfg.PRReviewEnabled() {
-		reviewApprovals, err = in.VCS.ListApprovals(ctx, approvalPR)
-		if err != nil {
-			// Fail-closed: previously the error was swallowed and rawApprovals
-			// was nil, which made the approvals gate fail with "no approvals"
-			// instead of surfacing the underlying VCS error.
-			return nil, fmt.Errorf("list approvals: %w", err)
-		}
-	}
-	if appCfg.PRCommentEnabled() {
-		commentCfg := in.CommentApproval
-		if commentCfg.Command == "" {
-			commentCfg.Command = appCfg.CommentCommand()
-		}
-		commentApprovals, err = in.VCS.ListCommentApprovals(ctx, approvalPR, commentCfg)
-		if err != nil {
-			// Fail-closed, same as pr_review: a source error blocks rather than
-			// silently dropping approvals.
-			return nil, fmt.Errorf("list comment approvals: %w", err)
-		}
-		slog.Debug("comment approvals fetched", "count", len(commentApprovals))
-	}
-	rawApprovals := approvals.MergeApprovals(reviewApprovals, commentApprovals)
-	slog.Debug("raw approvals fetched", "count", len(rawApprovals), "pr_head_sha", in.CommitSHA)
-	for _, a := range rawApprovals {
-		slog.Debug("raw approval", "approver", a.Approver, "commit_sha", a.CommitSHA, "source", a.Source)
-	}
-
-	// CODEOWNERS (optional). A 404 returns "" with nil error; only a real
-	// transport error reaches here, and that must not silently pass the
-	// codeowners gate.
-	coContent, err := in.VCS.FetchCodeowners(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("fetch codeowners: %w", err)
-	}
-	var coResolved map[string][]string
-	if coContent != "" {
-		rules := codeowners.Parse(strings.NewReader(coContent))
-		coResolved = codeowners.Resolve(rules, changed)
-	}
+	checksGreen := gi.ChecksGreen
+	upToDate := gi.UpToDate()
+	behind := gi.Behind
+	appCfg := gi.ApprovalsCfg
+	rawApprovals := gi.RawApprovals
+	coResolved := gi.Codeowners
 
 	// Freeze config.
 	freezeCfg := toFreezeConfig(in.Shared)
@@ -406,18 +342,8 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	// Also expand any teams referenced in CODEOWNERS so matchesOne can
 	// resolve them. Without this, a path owned by @org/team that isn't in
 	// any stack approval rule never gets expanded and the gate always fails.
-	if len(coResolved) > 0 {
-		coOwners := make(map[string]struct{})
-		for _, owners := range coResolved {
-			for _, o := range owners {
-				coOwners[o] = struct{}{}
-			}
-		}
-		var coApprovers []string
-		for o := range coOwners {
-			coApprovers = append(coApprovers, o)
-		}
-		stackRules = append(stackRules, approvals.Rules{Approvers: coApprovers})
+	if co := codeownerApprovers(coResolved); len(co) > 0 {
+		stackRules = append(stackRules, approvals.Rules{Approvers: co})
 	}
 	teamMembers, err := approvals.ExpandTeams(ctx, in.VCS, stackRules...)
 	if err != nil {
@@ -610,7 +536,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		rules := approvals.Resolve(appCfg, s.Ref())
 		rules.TeamMembers = teamMembers
 		approvalsRes := approvals.Evaluate(rules, rawApprovals, approvals.PR{
-			Number: in.PRNumber, HeadSHA: approvalHeadSHA, Author: pr.Author,
+			Number: in.PRNumber, HeadSHA: gi.ApprovalPR.HeadSHA, Author: pr.Author,
 			RepoPrivate: pr.RepoPrivate,
 		}, coResolved, pr.Author, now)
 		slog.Debug("approvals evaluated",
