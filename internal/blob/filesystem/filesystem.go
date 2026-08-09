@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -79,6 +80,12 @@ func cleanKey(key string) (string, error) {
 	if k == "." {
 		return "", errors.New("blob key is empty")
 	}
+	// The lock namespace is reserved: it holds internal lockfiles, never
+	// objects. Refusing it here is what lets List skip the whole subtree
+	// without ever hiding a real key.
+	if k == lockNamespace || strings.HasPrefix(k, lockNamespace+"/") {
+		return "", fmt.Errorf("blob key %q is inside the reserved lock namespace %q", key, lockNamespace)
+	}
 	return k, nil
 }
 
@@ -149,7 +156,14 @@ func (s *Store) PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch
 	}
 	defer lock.release()
 
-	current, statErr := hashKeyOrMissing(root, k)
+	current, statErr := hashKey(root, k)
+	// Only "not there" may be read as absence. Any other stat/read failure
+	// (a permissions problem, a truncated read) previously fell through the
+	// ifMatch=="" branch and CREATED the object, overwriting whatever was
+	// really there - a fail-open on the create-if-absent path.
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("read current object %q: %w", key, statErr)
+	}
 	if ifMatch == "" {
 		if statErr == nil {
 			return nil, blob.ErrPreconditionFailed // exists, but we required absence
@@ -213,6 +227,13 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			if p == lockNamespace {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		// Lockfiles are internal bookkeeping, not objects.
+		if p == lockNamespace || strings.HasPrefix(p, lockNamespace+"/") {
 			return nil
 		}
 		// WalkDir yields slash paths already relative to the bucket root,
@@ -304,34 +325,49 @@ func hashKey(root *os.Root, key string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func hashKeyOrMissing(root *os.Root, key string) (string, error) {
-	h, err := hashKey(root, key)
-	if err != nil && errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	return h, err
-}
-
 type fileLock struct {
 	root *os.Root
 	key  string
 	f    *os.File
 }
 
+// release drops the flock. It deliberately does NOT unlink the lockfile.
+//
+// Unlinking races: with A holding the lock and B already blocked in
+// Flock on the same inode, A's unlink lets B proceed on a now-unlinked
+// inode while C opens the path fresh, creates a NEW inode and locks that.
+// B and C then both believe they hold the lock and their PutIfMatch
+// bodies interleave. Keeping the inode in place means every waiter
+// contends on the same one. The files are empty and are filtered out of
+// List, so leaving them costs a directory entry per key.
 func (l *fileLock) release() {
 	if l.f != nil {
 		_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 		_ = l.f.Close()
-		_ = l.root.Remove(osKey(l.key))
 	}
 }
 
+// lockNamespace is a reserved directory holding lockfiles. It is NOT part
+// of the object key space: cleanKey refuses keys inside it and List skips
+// it, so a lockfile can never collide with, hide, or be mistaken for an
+// object.
+//
+// Locks used to sit beside their target as "<key>.lock", which put them in
+// the key space: an object legitimately named "foo.lock" collided with the
+// lock for "foo", and classifying by suffix forced List to hide real
+// objects ending in .lock. Naming by hash also keeps this directory flat,
+// so no per-key intermediate directories are created.
+const lockNamespace = ".reeve-locks"
+
+func lockPathFor(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return lockNamespace + "/" + hex.EncodeToString(sum[:])
+}
+
 func acquireLock(root *os.Root, key string) (*fileLock, error) {
-	lockKey := key + ".lock"
-	if dir := path.Dir(lockKey); dir != "." {
-		if err := root.MkdirAll(osKey(dir), 0o750); err != nil {
-			return nil, err
-		}
+	lockKey := lockPathFor(key)
+	if err := root.MkdirAll(osKey(lockNamespace), 0o750); err != nil {
+		return nil, err
 	}
 	f, err := root.OpenFile(osKey(lockKey), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
