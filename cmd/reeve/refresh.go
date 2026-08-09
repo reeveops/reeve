@@ -3,17 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/reeveops/reeve/internal/audit"
-	authfac "github.com/reeveops/reeve/internal/auth/factory"
-	"github.com/reeveops/reeve/internal/blob/factory"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
-	"github.com/reeveops/reeve/internal/config"
-	"github.com/reeveops/reeve/internal/iac"
 	"github.com/reeveops/reeve/internal/run"
 	gh "github.com/reeveops/reeve/internal/vcs/github"
 )
@@ -71,46 +66,22 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 		token = os.Getenv("REEVE_GITHUB_TOKEN")
 	}
 	actor := flagStringOrEnv(cmd, "actor", "GITHUB_ACTOR")
-	root := flagStringOrDefault(cmd, "root", "")
-	if root == "" {
-		root, _ = os.Getwd()
-	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return err
-	}
-	root = abs
-
 	if !local && (pr == 0 || repoFull == "" || token == "") {
 		return fmt.Errorf("refresh requires --pr, --repo (or $GITHUB_REPOSITORY), and --token (or $GITHUB_TOKEN); use --local to refresh every declared stack")
 	}
 
-	cfg, err := config.Load(root)
+	env, err := loadRunEnv(cmd)
 	if err != nil {
 		return err
 	}
-	applyLogConfig(cfg.LogSettings())
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-	store, err := factory.Open(ctx, cfg.Shared.Bucket, root)
-	if err != nil {
-		return err
-	}
+	cfg, root, store, engine, authReg := env.cfg, env.root, env.store, env.engine, env.authReg
+
 	lockStore := blocks.New(store)
 	if n, _ := lockStore.ReapAll(ctx, run.LockTTL(cfg.Shared)); n > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "reaped %d expired lock(s)\n", n)
 	}
 
-	engineCfg := cfg.Engines[0]
-	engine, err := iac.New(engineCfg.Engine)
-	if err != nil {
-		return err
-	}
-	authReg, err := authfac.Build(ctx, cfg.Auth)
-	if err != nil {
-		return fmt.Errorf("build auth registry: %w", err)
-	}
+	engineCfg := env.engineCfg
 
 	in := run.RefreshInput{
 		PRNumber:     pr,

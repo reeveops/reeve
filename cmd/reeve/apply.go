@@ -3,19 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/reeveops/reeve/internal/audit"
-	authfac "github.com/reeveops/reeve/internal/auth/factory"
-	"github.com/reeveops/reeve/internal/blob/factory"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
-	"github.com/reeveops/reeve/internal/config"
 	"github.com/reeveops/reeve/internal/core/breakglass"
-	"github.com/reeveops/reeve/internal/iac"
 	"github.com/reeveops/reeve/internal/run"
 	"github.com/reeveops/reeve/internal/vcs"
 	gh "github.com/reeveops/reeve/internal/vcs/github"
@@ -65,36 +60,16 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	actor := flagStringOrEnv(cmd, "actor", "GITHUB_ACTOR")
 	ciRunID, _ := strconv.ParseInt(os.Getenv("GITHUB_RUN_ID"), 10, 64)
 	selfNames := selfCheckNames()
-	root := flagStringOrDefault(cmd, "root", "")
-	if root == "" {
-		root, _ = os.Getwd()
-	}
-	abs, _ := filepath.Abs(root)
-	root = abs
-
 	if pr == 0 || repoFull == "" || token == "" {
 		return fmt.Errorf("apply requires --pr, --repo (or $GITHUB_REPOSITORY), and --token (or $GITHUB_TOKEN)")
 	}
 
-	cfg, err := config.Load(root)
+	env, err := loadRunEnv(cmd)
 	if err != nil {
 		return err
 	}
-	applyLogConfig(cfg.LogSettings())
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-	// Built here, before the store is touched: this validates the
-	// annotation config, and a bad type must not first reap locks and
-	// prune run artifacts and only then fail.
-	annotationEmitters, err := run.BuildAnnotationEmitters(cfg.Observability)
-	if err != nil {
-		return err
-	}
-	store, err := factory.Open(ctx, cfg.Shared.Bucket, root)
-	if err != nil {
-		return err
-	}
+	cfg, root, store, engine, authReg := env.cfg, env.root, env.store, env.engine, env.authReg
+	annotationEmitters := env.emitters
 
 	// Opportunistic reaper before acquiring any locks.
 	lockStore := blocks.New(store)
@@ -146,16 +121,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		bgReq = &run.BreakGlassRequest{Justification: justification}
 	}
 
-	engineCfg := cfg.Engines[0]
-	engine, err := iac.New(engineCfg.Engine)
-	if err != nil {
-		return err
-	}
-
-	authReg, err := authfac.Build(ctx, cfg.Auth)
-	if err != nil {
-		return fmt.Errorf("build auth registry: %w", err)
-	}
+	engineCfg := env.engineCfg
 
 	otelProvider, _ := run.BuildOTEL(ctx, cfg.Observability)
 	defer func() {

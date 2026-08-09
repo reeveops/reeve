@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -14,13 +13,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/reeveops/reeve/internal/auth"
-	authfac "github.com/reeveops/reeve/internal/auth/factory"
 	"github.com/reeveops/reeve/internal/blob/factory"
 	"github.com/reeveops/reeve/internal/config"
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/drift"
-	"github.com/reeveops/reeve/internal/iac"
 	"github.com/reeveops/reeve/internal/notify"
 	"github.com/reeveops/reeve/internal/run"
 	gh "github.com/reeveops/reeve/internal/vcs/github"
@@ -60,13 +57,14 @@ func newDriftCmd() *cobra.Command {
 	return cmd
 }
 
+// loadDriftCtx is the lightweight sibling of loadRunEnv, for drift
+// subcommands that only read state (status, report, suppress) and have no
+// business opening an engine adapter or an auth registry.
 func loadDriftCtx(cmd *cobra.Command) (context.Context, *config.Config, string, error) {
-	root := flagStringOrDefault(cmd, "root", "")
-	if root == "" {
-		root, _ = os.Getwd()
+	root, err := resolveRoot(cmd)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	abs, _ := filepath.Abs(root)
-	root = abs
 	cfg, err := config.Load(root)
 	if err != nil {
 		return nil, nil, "", err
@@ -88,33 +86,17 @@ func driftRun(cmd *cobra.Command, _ []string) error { return runDrift(cmd, false
 func driftBootstrap(cmd *cobra.Command, _ []string) error { return runDrift(cmd, true) }
 
 func runDrift(cmd *cobra.Command, bootstrap bool) error {
-	ctx, cfg, root, err := loadDriftCtx(cmd)
+	env, err := loadRunEnv(cmd)
 	if err != nil {
 		return err
 	}
-	// Built up front: this validates the annotation config, and it must be
-	// validated before the run writes anything. Bootstrap returns before
-	// the notification section below, so building it there left bootstrap
-	// accepting a config that a normal run rejects.
-	emitters, err := run.BuildAnnotationEmitters(cfg.Observability)
-	if err != nil {
-		return err
-	}
-	store, err := factory.Open(ctx, cfg.Shared.Bucket, root)
-	if err != nil {
-		return err
-	}
-	engineCfg := cfg.Engines[0]
-	engine, err := iac.New(engineCfg.Engine)
-	if err != nil {
-		return err
-	}
+	ctx, cfg, root, store, engine := env.ctx, env.cfg, env.root, env.store, env.engine
+	emitters := env.emitters
+
+	engineCfg := env.engineCfg
 
 	// Build the auth resolver on top of the auth registry.
-	authReg, err := authfac.Build(ctx, cfg.Auth)
-	if err != nil {
-		return err
-	}
+	authReg := env.authReg
 	resolver := func(ctx context.Context, ref string) (map[string]string, error) {
 		// Drift currently doesn't expose a per-call cleanup hook; once the
 		// drift runner gains stack-scoped lifecycles we should plumb the

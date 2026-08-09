@@ -45,8 +45,11 @@ is applied **uniformly** across sources before that identity dedup.
 A `/reeve approve` comment only counts when **all** hold:
 
 - The comment's first line is `<prefix> approve`, where `<prefix>` exactly
-  matches a configured command prefix (default `/reeve`, `@reeve`) - parsed the
-  same way every other `/reeve` command is.
+  matches a configured command prefix (default `/reeve` alone) - parsed the
+  same way every other `/reeve` command is. `@`-prefixed entries are
+  supported but never defaulted: `@` in a GitHub comment is a mention, so an
+  accepted `@handle` notifies whoever owns that account, and reeve is an
+  Action with no account of its own.
 - The commenter's `author_association` is in the same allowlist that gates
   command dispatch (default `OWNER`, `MEMBER`, `COLLABORATOR`). The source
   re-checks this itself because it reads historical comments directly, not the
