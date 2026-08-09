@@ -192,7 +192,7 @@ func TestListHidesLockfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range keys {
-		if strings.HasSuffix(k, lockSuffix) {
+		if strings.HasPrefix(k, lockNamespace) {
 			t.Fatalf("List returned an internal lockfile: %q (all keys: %v)", k, keys)
 		}
 	}
@@ -220,7 +220,7 @@ func TestLockfileSurvivesRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lockPath := filepath.Join(dir, "locks", "api", "prod.json"+lockSuffix)
+	lockPath := filepath.Join(dir, osKey(lockPathFor("locks/api/prod.json")))
 	before, err := os.Stat(lockPath)
 	if err != nil {
 		t.Fatalf("lockfile missing after a completed PutIfMatch: %v", err)
@@ -273,5 +273,60 @@ func TestPutIfMatchCreateFailsClosedOnReadError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read current object") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestLockNamespaceIsReserved pins that lockfiles live outside the object
+// key space entirely.
+//
+// They used to sit beside their target as "<key>.lock", which put them IN
+// the key space: an object legitimately named "foo.lock" collided with the
+// lock for "foo", and List had to classify by suffix - hiding real objects
+// that happened to end in .lock.
+func TestLockNamespaceIsReserved(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// An object may legitimately be named "<something>.lock" and must
+	// round-trip and list like any other key.
+	if _, err := s.PutIfMatch(ctx, "runs/foo", strings.NewReader("object"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutIfMatch(ctx, "runs/foo.lock", strings.NewReader("also an object"), ""); err != nil {
+		t.Fatalf("an object named *.lock was rejected: %v", err)
+	}
+	keys, err := s.List(ctx, "runs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawDotLock bool
+	for _, k := range keys {
+		if k == "runs/foo.lock" {
+			sawDotLock = true
+		}
+	}
+	if !sawDotLock {
+		t.Fatalf("List hid a real object ending in .lock: %v", keys)
+	}
+
+	// The reserved namespace itself is not addressable as an object.
+	if _, err := s.PutIfMatch(ctx, lockNamespace+"/anything", strings.NewReader("x"), ""); err == nil {
+		t.Fatal("writing into the reserved lock namespace was allowed")
+	}
+	if _, _, err := s.Get(ctx, lockNamespace+"/anything"); err == nil {
+		t.Fatal("reading from the reserved lock namespace was allowed")
+	}
+	// ...and never surfaces from a whole-bucket walk.
+	all, err := s.List(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range all {
+		if strings.HasPrefix(k, lockNamespace) {
+			t.Fatalf("lock namespace leaked into List: %q", k)
+		}
 	}
 }

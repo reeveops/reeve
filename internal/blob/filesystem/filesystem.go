@@ -80,6 +80,12 @@ func cleanKey(key string) (string, error) {
 	if k == "." {
 		return "", errors.New("blob key is empty")
 	}
+	// The lock namespace is reserved: it holds internal lockfiles, never
+	// objects. Refusing it here is what lets List skip the whole subtree
+	// without ever hiding a real key.
+	if k == lockNamespace || strings.HasPrefix(k, lockNamespace+"/") {
+		return "", fmt.Errorf("blob key %q is inside the reserved lock namespace %q", key, lockNamespace)
+	}
 	return k, nil
 }
 
@@ -221,13 +227,13 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			if p == lockNamespace {
+				return fs.SkipDir
+			}
 			return nil
 		}
-		// Lockfiles are internal bookkeeping, not objects. They were
-		// previously unlinked on release, so a concurrent List could still
-		// catch one mid-flight and hand a caller a key that is not an
-		// object - PruneRunArtifacts would then try to read it.
-		if strings.HasSuffix(p, lockSuffix) {
+		// Lockfiles are internal bookkeeping, not objects.
+		if p == lockNamespace || strings.HasPrefix(p, lockNamespace+"/") {
 			return nil
 		}
 		// WalkDir yields slash paths already relative to the bucket root,
@@ -341,16 +347,27 @@ func (l *fileLock) release() {
 	}
 }
 
-// lockSuffix marks the sibling lockfile for a key. These are internal
-// bookkeeping, never bucket objects, so List hides them.
-const lockSuffix = ".lock"
+// lockNamespace is a reserved directory holding lockfiles. It is NOT part
+// of the object key space: cleanKey refuses keys inside it and List skips
+// it, so a lockfile can never collide with, hide, or be mistaken for an
+// object.
+//
+// Locks used to sit beside their target as "<key>.lock", which put them in
+// the key space: an object legitimately named "foo.lock" collided with the
+// lock for "foo", and classifying by suffix forced List to hide real
+// objects ending in .lock. Naming by hash also keeps this directory flat,
+// so no per-key intermediate directories are created.
+const lockNamespace = ".reeve-locks"
+
+func lockPathFor(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return lockNamespace + "/" + hex.EncodeToString(sum[:])
+}
 
 func acquireLock(root *os.Root, key string) (*fileLock, error) {
-	lockKey := key + lockSuffix
-	if dir := path.Dir(lockKey); dir != "." {
-		if err := root.MkdirAll(osKey(dir), 0o750); err != nil {
-			return nil, err
-		}
+	lockKey := lockPathFor(key)
+	if err := root.MkdirAll(osKey(lockNamespace), 0o750); err != nil {
+		return nil, err
 	}
 	f, err := root.OpenFile(osKey(lockKey), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
