@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -199,6 +200,16 @@ func anyToInt64(v any) (int64, error) {
 	case int64:
 		return t, nil
 	case float64:
+		// YAML numbers decode as float64. A fractional or out-of-range
+		// value must not be truncated into a plausible-looking id - that is
+		// the same silent-partial-value bug as Sscanf on strings, just
+		// arriving through a different type.
+		if t != math.Trunc(t) {
+			return 0, fmt.Errorf("not an integer: %v", t)
+		}
+		if t > math.MaxInt64 || t < math.MinInt64 {
+			return 0, fmt.Errorf("out of range for an int64: %v", t)
+		}
 		return int64(t), nil
 	case string:
 		return parseInt64String(t)

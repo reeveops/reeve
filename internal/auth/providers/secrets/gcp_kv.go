@@ -143,8 +143,19 @@ func NewAzureKeyVault(p *AzureKeyVault) auth.Provider       { return &azShim{p} 
 // out of spec. Do not "tighten" this without checking that mapping.
 func base64StdDecode(s string) (string, error) {
 	s = strings.TrimSpace(s)
+	if s == "" {
+		// An empty payload would otherwise decode to "" and be exported as
+		// a blank credential, which the cloud provider rejects with a
+		// confusing error instead of "the secret is empty".
+		return "", fmt.Errorf("secret payload is empty")
+	}
 	if mod := len(s) % 4; mod != 0 {
 		s += strings.Repeat("=", 4-mod)
 	}
-	return stdB64Decode(s)
+	if out, err := stdB64Decode(s); err == nil {
+		return out, nil
+	}
+	// The URL-safe alphabet (- and _) is the other half of what the proto3
+	// JSON mapping requires decoders to accept; StdEncoding rejects it.
+	return urlB64Decode(s)
 }

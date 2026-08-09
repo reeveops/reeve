@@ -81,3 +81,27 @@ func TestEnvPassthroughSkipsUnsetHostVars(t *testing.T) {
 		t.Error("unset host var was exported; it must be omitted so the engine sees it as absent, not blank")
 	}
 }
+
+// TestEnvPassthroughExportsExplicitlyEmptyHostVars pins the other half of
+// the contract: an unset variable is skipped, but one deliberately set to
+// the empty string is a value the operator chose and is passed through.
+func TestEnvPassthroughExportsExplicitlyEmptyHostVars(t *testing.T) {
+	t.Setenv("REEVE_TEST_EMPTY", "")
+
+	p := &EnvPassthrough{
+		ProviderName: "danger",
+		IUnderstand:  true,
+		EnvVars:      map[string]string{"SOME_KEY": "REEVE_TEST_EMPTY"},
+	}
+	cred, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := cred.Env["SOME_KEY"]
+	if !ok {
+		t.Fatal("an explicitly empty host var was skipped; only UNSET vars should be")
+	}
+	if v != "" {
+		t.Fatalf("value = %q, want empty", v)
+	}
+}
