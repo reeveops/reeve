@@ -11,6 +11,7 @@ import (
 
 	authfac "github.com/reeveops/reeve/internal/auth/factory"
 	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/iac"
 	"github.com/reeveops/reeve/internal/vcs/codeowners"
@@ -62,6 +63,12 @@ func newLintCmd() *cobra.Command {
 			// by cfg.Validate() above (validateChannels), which is drift-event
 			// strict for drift.yaml and exempts channels with default
 			// subscriptions - one source of truth, so lint and runtime agree.
+			// Preconditions: require_checks_passing and require_up_to_date
+			// are *bool and default to DISABLED when omitted, which is
+			// deliberate (reeve favours an easy first run). But a repo that
+			// has wired up an apply flow and never set them will apply with
+			// red CI, and the omission is invisible. Say so once.
+			lintPreconditionGates(cfg.Shared)
 			// CODEOWNERS: email owners cannot be matched to VCS logins, so
 			// reeve's codeowners gate ignores them. Flag them here so a
 			// path owned only by emails isn't silently unenforced.
@@ -130,5 +137,27 @@ func lintCodeownersEmails(root string) {
 			}
 		}
 		return // first candidate found wins, matching FetchCodeowners
+	}
+}
+
+// lintPreconditionGates warns when a gate that defaults to disabled was
+// never given an explicit value. Only an *omitted* setting warns - an
+// explicit `false` is an informed choice and stays silent, which is what
+// the *bool in the schema is for.
+func lintPreconditionGates(shared *schemas.Shared) {
+	if shared == nil {
+		return
+	}
+	if shared.Preconditions.RequireChecksPassing == nil {
+		fmt.Fprintf(os.Stderr, "⚠️  preconditions.require_checks_passing is not set: "+
+			"applies will proceed with failing CI checks. Set it explicitly to silence this.\n")
+	}
+	// require_up_to_date is intentionally off under merge-then-apply: after
+	// the merge the base has advanced past the PR HEAD, so the gate can only
+	// ever block. Only nag in the comment-triggered (apply-then-merge) flow.
+	if shared.Apply.TriggerMode() == schemas.ApplyTriggerComment &&
+		shared.Preconditions.RequireUpToDate == nil {
+		fmt.Fprintf(os.Stderr, "⚠️  preconditions.require_up_to_date is not set: "+
+			"applies will proceed from a branch behind base. Set it explicitly to silence this.\n")
 	}
 }

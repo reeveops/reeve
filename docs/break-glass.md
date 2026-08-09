@@ -31,11 +31,15 @@ or unchecked code:
 | Approvals (incl. CODEOWNERS review rules) | **Overridden** — always |
 | Freeze windows | **Overridden** when `override_freeze: true` (the default); binding when `false` |
 | Per-stack locks | **NEVER bypassed** — a held lock still blocks |
-| Required checks green | Still enforced |
-| Up-to-date with base | Still enforced |
+| Required checks green | Still enforced — **when enabled**; `require_checks_passing` defaults to off, see [configuration.md](configuration.md#preconditions) |
+| Up-to-date with base | Still enforced — **when enabled**; `require_up_to_date` defaults to off, see [configuration.md](configuration.md#preconditions) |
 | Preview succeeded / preview freshness | Still enforced |
 | Policy hooks | Still enforced |
 | Fork-PR / draft-PR gates | Still enforced |
+
+Note the distinction: break-glass never *disables* the gates above, but a
+gate you never turned on was not protecting you before break-glass either.
+`reeve lint` warns when either is left unset.
 
 Overridden gates show up as **warnings** in the gate trace — visible in the
 PR comment, never silent.
