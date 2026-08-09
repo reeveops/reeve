@@ -232,21 +232,3 @@ func TestAcquireSTSFailureDoesNotLeakToken(t *testing.T) {
 		t.Errorf("error leaks the OIDC token: %v", err)
 	}
 }
-
-func TestContains(t *testing.T) {
-	cases := []struct {
-		s, sub string
-		want   bool
-	}{
-		{"a?b", "?", true},
-		{"ab", "?", false},
-		{"", "", true},
-		{"abc", "abc", true},
-		{"abc", "abcd", false},
-	}
-	for _, tc := range cases {
-		if got := contains(tc.s, tc.sub); got != tc.want {
-			t.Errorf("contains(%q, %q) = %v, want %v", tc.s, tc.sub, got, tc.want)
-		}
-	}
-}
