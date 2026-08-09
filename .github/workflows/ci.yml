@@ -113,6 +113,11 @@ jobs:
           terraform version
 
       - name: Engine contract conformance
+        # REEVE_ENGINE_TESTS_REQUIRED turns "engine unavailable" from a skip
+        # into a failure. Without it this job stays green when an engine goes
+        # missing - the suite quietly skips and nothing contract-level runs.
+        env:
+          REEVE_ENGINE_TESTS_REQUIRED: "1"
         run: go test -run TestContract -v ./internal/iac/...
 
   govet-extended:

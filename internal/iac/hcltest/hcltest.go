@@ -12,13 +12,16 @@
 package hcltest
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/discovery"
@@ -38,49 +41,71 @@ const (
 // installed still gets skips.
 const RequireEnginesEnv = "REEVE_ENGINE_TESTS_REQUIRED"
 
+// engineProbeTimeout bounds the version probe. A wedged shim, or a binary
+// that blocks waiting on stdin, would otherwise hang the suite instead of
+// reporting the engine as unavailable.
+const engineProbeTimeout = 30 * time.Second
+
 // ResolveBinary finds the dialect's CLI, or skips the test. An explicit
 // override wins so a contributor can point at a specific build; otherwise the
 // dialect's own binary name is looked up, never a sibling engine's - running
 // the terraform suite against tofu would prove nothing about terraform.
+// Either way the binary is probed before it is handed back.
 func ResolveBinary(t *testing.T, d hcl.Dialect, overrideEnv string) string {
 	t.Helper()
+	var bin string
 	if overrideEnv != "" {
-		if bin := os.Getenv(overrideEnv); bin != "" {
-			return bin
+		bin = os.Getenv(overrideEnv)
+	}
+	if bin == "" {
+		found, err := exec.LookPath(d.Binary)
+		if err != nil {
+			unavailable(t, "%s not installed (set %s to override)", d.Binary, overrideEnv)
 		}
+		bin = found
 	}
-	bin, err := exec.LookPath(d.Binary)
+	// Resolving a path - from PATH or from an override - is not the same as
+	// being runnable. A version-manager shim (mise, asdf) with no version
+	// pinned for the tool resolves happily and then fails on every real
+	// invocation, which turned "engine not available" into a wall of
+	// contract failures blaming the adapter. An override pointing at a
+	// stale or misspelled path fails the same way. Prove it runs first,
+	// whichever path it came from.
+	ctx, cancel := context.WithTimeout(t.Context(), engineProbeTimeout)
+	defer cancel()
+	// #nosec G204,G702 -- test-only helper. bin is either resolved by LookPath from the
+	// dialect's own hardcoded binary name or supplied by the contributor running the suite
+	// via REEVE_*_BIN; neither is reachable from .reeve config or PR content, and the only
+	// argument is the literal "version". Taint analysis flags the env-var path (G702), which
+	// is the point of the override - a developer naming their own build.
+	out, err := exec.CommandContext(ctx, bin, "version").CombinedOutput()
 	if err != nil {
-		unavailable(t, "%s not installed (set %s to override) - conformance suite skipped", d.Binary, overrideEnv)
-	}
-	// Being on PATH is not the same as being runnable. A version-manager
-	// shim (mise, asdf) with no version pinned for the tool resolves here
-	// happily and then fails on every real invocation, which turned "engine
-	// not available" into a wall of contract failures blaming the adapter.
-	// Prove it runs before telling the suite it exists.
-	// #nosec G204 -- bin is from LookPath or the contributor's own override env var, not config or PR content
-	if out, err := exec.Command(bin, "version").CombinedOutput(); err != nil {
-		unavailable(t, "%s found at %s but is not runnable (%v): %s - conformance suite skipped",
-			d.Binary, bin, err, firstLine(out))
+		unavailable(t, "%s found at %s but is not runnable (%v): %s", d.Binary, bin, err, firstLine(out))
 	}
 	return bin
 }
 
-// unavailable skips, or fails when RequireEnginesEnv demands the engines.
+// unavailable reports that an engine cannot be exercised: a skip normally,
+// a hard failure when RequireEnginesEnv is set. Callers pass the reason
+// only - the outcome wording belongs to whichever branch runs, so a
+// required failure never claims it was skipped.
 func unavailable(t *testing.T, format string, args ...any) {
 	t.Helper()
+	reason := fmt.Sprintf(format, args...)
 	if os.Getenv(RequireEnginesEnv) != "" {
-		t.Fatalf(format, args...)
+		t.Fatalf("%s - %s is set, so this is a failure rather than a skip", reason, RequireEnginesEnv)
 	}
-	t.Skipf(format, args...)
+	t.Skipf("%s - conformance suite skipped", reason)
 }
 
+// firstLine returns the leading line of command output, trimmed. The second
+// trim matters: on CRLF output the split leaves a trailing \r.
 func firstLine(b []byte) string {
 	s := strings.TrimSpace(string(b))
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
+		s = s[:i]
 	}
-	return s
+	return strings.TrimSpace(s)
 }
 
 // Fixture is a real root module on disk backed by the local backend.
