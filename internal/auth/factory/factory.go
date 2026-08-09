@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/reeveops/reeve/internal/auth"
@@ -205,10 +207,16 @@ func anyToInt64(v any) (int64, error) {
 	}
 }
 
+// parseInt64String rejects trailing garbage. fmt.Sscanf("%d") stops at the
+// first non-digit and reports success, so an app_id of "123abc" - or a
+// value with a stray quote or newline - silently became 123 and reeve
+// authenticated as the wrong GitHub App installation.
 func parseInt64String(s string) (int64, error) {
-	var n int64
-	_, err := fmt.Sscanf(s, "%d", &n)
-	return n, err
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("not an integer: %q", s)
+	}
+	return n, nil
 }
 
 // loadPrivateKey handles three forms: base64 blob, literal PEM, or a

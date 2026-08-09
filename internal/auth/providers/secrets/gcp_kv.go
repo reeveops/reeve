@@ -134,10 +134,15 @@ func (s *azShim) Acquire(ctx context.Context) (*auth.Credential, error) {
 func NewGCPSecretManager(p *GCPSecretManager) auth.Provider { return &gcpShim{p} }
 func NewAzureKeyVault(p *AzureKeyVault) auth.Provider       { return &azShim{p} }
 
-// base64StdDecode is isolated for testing and to avoid pulling encoding/base64
-// into every file; re-use stdlib via a small helper.
+// base64StdDecode decodes a Secret Manager payload.
+//
+// The re-padding is deliberate, not sloppiness: SecretPayload.data is a
+// proto3 `bytes` field, and the proto3 JSON mapping requires decoders to
+// accept standard *or* URL-safe base64, padded or not. Google emits padded
+// standard today, but a decoder that rejects the unpadded form would be
+// out of spec. Do not "tighten" this without checking that mapping.
 func base64StdDecode(s string) (string, error) {
-	// Pad if needed.
+	s = strings.TrimSpace(s)
 	if mod := len(s) % 4; mod != 0 {
 		s += strings.Repeat("=", 4-mod)
 	}

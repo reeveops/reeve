@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -48,5 +49,35 @@ func TestEnvPassthroughCopiesVars(t *testing.T) {
 	}
 	if c.Env["MY_SECRET_OUT"] != "hush" {
 		t.Fatalf("passthrough failed: %+v", c.Env)
+	}
+}
+
+// TestEnvPassthroughSkipsUnsetHostVars pins that an unset host variable is
+// not exported as an empty string. An empty value looks to the engine like
+// a configured-but-blank credential, so the failure surfaced as a confusing
+// auth rejection from the cloud provider instead of "you did not set this".
+func TestEnvPassthroughSkipsUnsetHostVars(t *testing.T) {
+	t.Setenv("REEVE_TEST_PRESENT", "value-here")
+	if err := os.Unsetenv("REEVE_TEST_ABSENT"); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &EnvPassthrough{
+		ProviderName: "danger",
+		IUnderstand:  true,
+		EnvVars: map[string]string{
+			"AWS_ACCESS_KEY_ID":     "REEVE_TEST_PRESENT",
+			"AWS_SECRET_ACCESS_KEY": "REEVE_TEST_ABSENT",
+		},
+	}
+	cred, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cred.Env["AWS_ACCESS_KEY_ID"]; got != "value-here" {
+		t.Errorf("present var = %q, want %q", got, "value-here")
+	}
+	if _, ok := cred.Env["AWS_SECRET_ACCESS_KEY"]; ok {
+		t.Error("unset host var was exported; it must be omitted so the engine sees it as absent, not blank")
 	}
 }
