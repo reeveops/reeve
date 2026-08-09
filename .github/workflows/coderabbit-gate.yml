@@ -1,0 +1,84 @@
+name: coderabbit-gate
+
+# Drives CodeRabbit's `review-ready` label so that a review only fires when:
+#   1. The CI workflow concluded successfully, and
+#   2. The PR author is OWNER, MEMBER, or COLLABORATOR.
+#
+# Everyone else's PR is never auto-reviewed. Label it by hand, or comment
+# `@coderabbitai review` on it, when you want a review.
+#
+# workflow_run (not pull_request) is required: a pull_request trigger on a
+# fork PR gets a read-only token and cannot add labels.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  # Labels ride the issues API under the hood.
+  issues: write
+
+concurrency:
+  group: coderabbit-gate-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR and set label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          LABEL: review-ready
+        run: |
+          set -euo pipefail
+
+          # workflow_run.pull_requests is empty for fork PRs, so resolve by
+          # head SHA instead.
+          pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+                --jq '[.[] | select(.state == "open")][0] // empty')
+
+          if [ -z "$pr" ]; then
+            echo "No open PR for $HEAD_SHA. Nothing to do."
+            exit 0
+          fi
+
+          number=$(jq -r '.number'             <<<"$pr")
+          assoc=$(jq  -r '.author_association' <<<"$pr")
+          draft=$(jq  -r '.draft'              <<<"$pr")
+
+          echo "PR #$number  author_association=$assoc  draft=$draft  ci=$CONCLUSION"
+
+          # CI red, cancelled, or timed out: strip the label so the next
+          # green run re-applies it and re-triggers the review.
+          if [ "$CONCLUSION" != "success" ]; then
+            gh pr edit "$number" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null \
+              || echo "Label not present."
+            exit 0
+          fi
+
+          case "$assoc" in
+            OWNER|MEMBER|COLLABORATOR) ;;
+            *)
+              echo "External contributor ($assoc). Not labeling."
+              exit 0
+              ;;
+          esac
+
+          if [ "$draft" = "true" ]; then
+            echo "Draft PR. Not labeling."
+            exit 0
+          fi
+
+          # Remove-then-add so a re-run on the same PR re-fires the label
+          # event and triggers a fresh incremental review.
+          gh pr edit "$number" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
+          gh pr edit "$number" --repo "$REPO" --add-label "$LABEL"
+          echo "Labeled PR #$number with $LABEL."

@@ -59,8 +59,9 @@ into `openspec/specs/`.
 ## Docs
 
 - Nothing longer than 2 sentences; say more with less.
-- No qualifier language — state the facts.
+- No qualifier language. State the facts.
 - Bullets over prose.
+- No em dashes.
 
 ## Dev setup
 
