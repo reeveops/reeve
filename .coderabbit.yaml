@@ -10,9 +10,7 @@ language: "en-US"
 early_access: true
 
 reviews:
-  # quiet = only the most important feedback. Alpha repo, one maintainer,
-  # OSS rate limits at the low end. Switch to "chill" if this feels too thin.
-  profile: "quiet"
+  profile: "chill"
 
   # Auto-approve once CodeRabbit's comments are resolved and no pre-merge
   # checks fail. DECIDE: leave false if you don't want a bot approval
