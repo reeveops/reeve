@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/reeveops/reeve/internal/config/schemas"
@@ -31,6 +32,12 @@ const (
 	fixtureStackPath = "stacks/demo"
 )
 
+// RequireEnginesEnv, when set to a non-empty value, turns "engine binary
+// unavailable" from a skip into a hard failure. CI sets it so the contract
+// suite cannot silently stop running; a workstation without every engine
+// installed still gets skips.
+const RequireEnginesEnv = "REEVE_ENGINE_TESTS_REQUIRED"
+
 // ResolveBinary finds the dialect's CLI, or skips the test. An explicit
 // override wins so a contributor can point at a specific build; otherwise the
 // dialect's own binary name is looked up, never a sibling engine's - running
@@ -44,9 +51,36 @@ func ResolveBinary(t *testing.T, d hcl.Dialect, overrideEnv string) string {
 	}
 	bin, err := exec.LookPath(d.Binary)
 	if err != nil {
-		t.Skipf("%s not installed (set %s to override) - conformance suite skipped", d.Binary, overrideEnv)
+		unavailable(t, "%s not installed (set %s to override) - conformance suite skipped", d.Binary, overrideEnv)
+	}
+	// Being on PATH is not the same as being runnable. A version-manager
+	// shim (mise, asdf) with no version pinned for the tool resolves here
+	// happily and then fails on every real invocation, which turned "engine
+	// not available" into a wall of contract failures blaming the adapter.
+	// Prove it runs before telling the suite it exists.
+	// #nosec G204 -- bin is from LookPath or the contributor's own override env var, not config or PR content
+	if out, err := exec.Command(bin, "version").CombinedOutput(); err != nil {
+		unavailable(t, "%s found at %s but is not runnable (%v): %s - conformance suite skipped",
+			d.Binary, bin, err, firstLine(out))
 	}
 	return bin
+}
+
+// unavailable skips, or fails when RequireEnginesEnv demands the engines.
+func unavailable(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv(RequireEnginesEnv) != "" {
+		t.Fatalf(format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
+func firstLine(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // Fixture is a real root module on disk backed by the local backend.
