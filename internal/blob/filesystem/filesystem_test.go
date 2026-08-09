@@ -268,11 +268,23 @@ func TestPutIfMatchCreateFailsClosedOnReadError(t *testing.T) {
 	if err == nil {
 		t.Fatal("create-if-absent succeeded over an existing but unreadable object (fail-open)")
 	}
-	if errors.Is(err, blob.ErrPreconditionFailed) {
-		return // also acceptable: refused
-	}
-	if !strings.Contains(err.Error(), "read current object") {
+	if !errors.Is(err, blob.ErrPreconditionFailed) &&
+		!strings.Contains(err.Error(), "read current object") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Returning an error is not enough: the object must be untouched. A
+	// regression that writes and then reports failure would satisfy the
+	// assertion above while having already destroyed the data.
+	if err := os.Chmod(target, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("object was modified by a failed write: %q, want %q", got, "original")
 	}
 }
 
