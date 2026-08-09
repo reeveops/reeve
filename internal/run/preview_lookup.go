@@ -31,39 +31,18 @@ type PreviewStatus struct {
 
 // PlanSucceededForPR returns true if the most recent preview manifest for the
 // given PR and commit SHA exists and has no stacks in error state.
+//
+// Selection goes through newestPreviewManifest for the same reason
+// FindPreviewForStack does: if the "which manifest is authoritative"
+// answers ever disagreed, `reeve ready` could report a green plan from one
+// run while apply gated against another. This function used to re-implement
+// the scan and had already drifted - it was missing the RunID tie-break for
+// manifests written in the same second.
 func PlanSucceededForPR(ctx context.Context, store blob.Store, prNumber int, commitSHA string) bool {
 	if store == nil || prNumber == 0 {
 		return false
 	}
-	prefix := fmt.Sprintf("runs/pr-%d/", prNumber)
-	keys, err := store.List(ctx, prefix)
-	if err != nil {
-		return false
-	}
-	var manifests []string
-	for _, k := range keys {
-		if strings.HasSuffix(k, "/manifest.json") {
-			manifests = append(manifests, k)
-		}
-	}
-	var best *manifest
-	for _, k := range manifests {
-		data, _, err := filesystem.ReadBytes(ctx, store, k)
-		if err != nil {
-			continue
-		}
-		var m manifest
-		if err := json.Unmarshal(data, &m); err != nil {
-			continue
-		}
-		if m.Op != "preview" || m.CommitSHA != commitSHA {
-			continue
-		}
-		if best == nil || m.CreatedAt > best.CreatedAt {
-			c := m
-			best = &c
-		}
-	}
+	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
 	if best == nil {
 		return false
 	}
