@@ -62,7 +62,7 @@ not add new static provider imports to a factory.
 
 ## Layout
 
-```
+```text
 cmd/reeve/          CLI wiring, cobra commands, dependency injection
 internal/core/      PURE. discovery, approvals, preconditions, locks,
                     freeze, breakglass, redact, render, summary, envref
@@ -109,7 +109,7 @@ tests.
 
 **Non-trivial changes** need a proposal first:
 
-```
+```text
 openspec/changes/<name>/
 ├── proposal.md              why, what, scope
 ├── design.md                technical approach

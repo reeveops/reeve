@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 #
 # reeveops/reeve
-# Validate with: `coderabbit config validate` (CLI) or `@coderabbitai configuration` on a PR.
+# Validate with `@coderabbitai configuration` on a PR.
 
 language: "en-US"
 
@@ -19,10 +19,10 @@ reviews:
   # satisfying a branch protection rule.
   request_changes_workflow: false
 
-  # Summary lives in the walkthrough, not the PR description. Keeps your
-  # description text (and reeve's own plan comment) untouched.
+  # Summary goes into the PR description, standard CodeRabbit placement.
+  # It appends below your own description text.
   high_level_summary: true
-  high_level_summary_in_walkthrough: true
+  high_level_summary_in_walkthrough: false
   collapse_walkthrough: true
 
   # Noise reduction.
