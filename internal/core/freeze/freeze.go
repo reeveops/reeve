@@ -38,7 +38,7 @@ func ActiveFor(cfg Config, ref string, now time.Time) (string, bool, error) {
 		if !match {
 			continue
 		}
-		firing, err := mostRecentFire(w.Cron, now)
+		firing, err := mostRecentFire(w.Cron, w.Duration, now)
 		if err != nil {
 			return "", false, fmt.Errorf("freeze %q: %w", w.Name, err)
 		}
@@ -52,26 +52,45 @@ func ActiveFor(cfg Config, ref string, now time.Time) (string, bool, error) {
 	return "", false, nil
 }
 
-// mostRecentFire walks back at most 2*MaxFreezeWindow to find the
-// most recent scheduled fire for the cron expression.
-func mostRecentFire(expr string, now time.Time) (time.Time, error) {
+// maxFireScan bounds the forward walk in mostRecentFire so a pathological
+// cron (say, every minute across a year-long window) cannot spin. Hitting it
+// is safe by construction - see the comment at the end of mostRecentFire.
+const maxFireScan = 10_000
+
+// mostRecentFire returns the most recent scheduled fire at or before now, or
+// the zero time if the window's cron has not fired within `window` of now.
+//
+// The scan-back horizon is the window's own duration, not a fixed span: a
+// fire older than now-window cannot freeze anything, because ActiveFor's
+// test is `now < fire+window`. The previous implementation hardcoded a
+// 14-day horizon, so any window longer than 14 days silently stopped firing
+// in the back half of its own range - a 21-day holiday freeze lifted itself
+// around day 15 and let applies through. That was a fail-open in a gate.
+func mostRecentFire(expr string, window time.Duration, now time.Time) (time.Time, error) {
 	sched, err := cron.ParseStandard(expr)
 	if err != nil {
 		return time.Time{}, err
 	}
-	// Robfig cron's Next takes "from t, return next occurrence after t".
-	// We want the last occurrence at-or-before now. Strategy: scan Next()
-	// starting from `now - window size * 2` until we overshoot now.
-	start := now.Add(-14 * 24 * time.Hour) // two weeks window - sufficient for typical freezes
+	if window <= 0 {
+		// A non-positive duration cannot freeze anything. Config validation
+		// rejects these (durations.go checkPos), so this is belt-and-braces.
+		return time.Time{}, nil
+	}
+	// Robfig cron's Next takes "from t, return next occurrence after t", so
+	// walk forward from the oldest fire that could still be freezing.
+	cur := now.Add(-window)
 	last := time.Time{}
-	cur := start
-	for i := 0; i < 10_000; i++ {
+	for i := 0; i < maxFireScan; i++ {
 		next := sched.Next(cur)
 		if next.After(now) {
-			break
+			return last, nil
 		}
 		last = next
 		cur = next
 	}
+	// Scan cap exhausted: there are further fires between `last` and now,
+	// but every one of them is inside [now-window, now], so `last` already
+	// proves the freeze is active and ActiveFor reports frozen. Truncating
+	// here keeps the gate closed rather than open.
 	return last, nil
 }
