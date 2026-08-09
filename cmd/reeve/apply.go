@@ -156,7 +156,10 @@ func runApply(cmd *cobra.Command, _ []string) error {
 			_ = otelProvider.Shutdown(ctx)
 		}
 	}()
-	annotationEmitters := run.BuildAnnotationEmitters(cfg.Observability)
+	annotationEmitters, err := run.BuildAnnotationEmitters(cfg.Observability)
+	if err != nil {
+		return err
+	}
 
 	out, err := run.Apply(ctx, run.ApplyInput{
 		PRNumber:        pr,

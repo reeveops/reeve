@@ -4,6 +4,7 @@ package otel
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/reeveops/reeve/internal/config/schemas"
@@ -45,7 +46,7 @@ func (s *Channel) Deliver(ctx context.Context, p notify.Payload) error {
 		if t == "" {
 			return nil
 		}
-		annotations.Dispatch(ctx, s.emitters, annotations.Event{
+		s.dispatch(ctx, annotations.Event{
 			Type:    t,
 			When:    time.Now(),
 			Project: p.Drift.Project,
@@ -63,7 +64,7 @@ func (s *Channel) Deliver(ctx context.Context, p notify.Payload) error {
 		if t == "" {
 			return nil
 		}
-		annotations.Dispatch(ctx, s.emitters, annotations.Event{
+		s.dispatch(ctx, annotations.Event{
 			Type:      t,
 			When:      time.Now(),
 			PR:        p.PR.PR,
@@ -94,4 +95,16 @@ func prEventType(e notify.Event) annotations.EventType {
 		return annotations.EventApplyFailed
 	}
 	return ""
+}
+
+// dispatch posts an annotation to every subscribed emitter. A delivery
+// failure does not fail notification delivery - annotations are auxiliary -
+// but it is logged rather than dropped. These errors used to be discarded
+// entirely, so a misconfigured collector was indistinguishable from a
+// healthy one.
+func (s *Channel) dispatch(ctx context.Context, e annotations.Event) {
+	for _, err := range annotations.Dispatch(ctx, s.emitters, e) {
+		slog.Warn("annotation delivery failed",
+			"channel", s.name, "event", string(e.Type), "error", err)
+	}
 }

@@ -269,10 +269,14 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	if cfg.Notifications != nil {
 		channelCfgs = append(channelCfgs, cfg.Notifications.Channels...)
 	}
+	emitters, aerr := run.BuildAnnotationEmitters(cfg.Observability)
+	if aerr != nil {
+		return aerr
+	}
 	channels, serr := notify.Build(ctx, channelCfgs, notify.Deps{
 		Blob:       store,
 		Issues:     issues,
-		Emitters:   run.BuildAnnotationEmitters(cfg.Observability),
+		Emitters:   emitters,
 		SlackToken: os.Getenv("SLACK_BOT_TOKEN"),
 		RepoFull:   repoFull,
 	})

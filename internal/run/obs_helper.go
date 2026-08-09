@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/reeveops/reeve/internal/config/schemas"
@@ -24,13 +25,16 @@ func BuildOTEL(ctx context.Context, cfg *schemas.Observability) (*reeveotel.Prov
 	})
 }
 
-// BuildAnnotationEmitters returns configured annotation emitters.
-func BuildAnnotationEmitters(cfg *schemas.Observability) []annotations.Emitter {
+// BuildAnnotationEmitters returns configured annotation emitters, or an
+// error if observability.yaml names an annotation type that does not exist.
+func BuildAnnotationEmitters(cfg *schemas.Observability) ([]annotations.Emitter, error) {
 	return annotations.Build(cfg)
 }
 
-// PostAnnotation dispatches an event across all emitters. Errors are
-// swallowed (annotations are auxiliary).
+// PostAnnotation dispatches an event across all emitters. Delivery failures
+// do not fail the run - annotations are auxiliary - but they are logged
+// rather than discarded, per the Warn convention for recoverable adapter
+// failures in internal/log.
 func PostAnnotation(ctx context.Context, emitters []annotations.Emitter, t annotations.EventType, project, stack, env, outcome, message string, pr int, sha string) {
 	if len(emitters) == 0 {
 		return
@@ -41,5 +45,7 @@ func PostAnnotation(ctx context.Context, emitters []annotations.Emitter, t annot
 		PR: pr, CommitSHA: sha,
 		Outcome: outcome, Message: message,
 	}
-	_ = annotations.Dispatch(ctx, emitters, e)
+	for _, err := range annotations.Dispatch(ctx, emitters, e) {
+		slog.Warn("annotation delivery failed", "event", string(t), "error", err)
+	}
 }

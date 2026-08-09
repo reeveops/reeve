@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -277,7 +278,11 @@ func TestAlertTypeFor(t *testing.T) {
 }
 
 func TestBuild(t *testing.T) {
-	if got := Build(nil); got != nil {
+	got, err := Build(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
 		t.Errorf("nil config = %v, want nil", got)
 	}
 
@@ -287,11 +292,13 @@ func TestBuild(t *testing.T) {
 		{Type: "dash0", Endpoint: "https://dash0.example.com/hook", Events: []string{"drift_detected"}},
 		{Type: "dash0", URL: "https://dash0.example.com/url-fallback"},
 		{Type: "webhook", URL: "https://hook.example.com", Headers: map[string]string{"X-K": "v"}},
-		{Type: "unknown-kind"},
 	}}
-	out := Build(cfg)
+	out, err := Build(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(out) != 5 {
-		t.Fatalf("Build returned %d emitters, want 5 (unknown types skipped)", len(out))
+		t.Fatalf("Build returned %d emitters, want 5", len(out))
 	}
 
 	g, ok := out[0].(*Grafana)
@@ -341,4 +348,86 @@ func containsStr(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestBuildRejectsUnknownType pins the loud-fail contract. An unrecognised
+// type used to be skipped in silence, so a typo in observability.yaml
+// produced no annotations and no complaint - the operator only found out by
+// noticing the absence. notify.Build has always rejected unknown channel
+// types; this matches it.
+func TestBuildRejectsUnknownType(t *testing.T) {
+	cfg := &schemas.Observability{Annotations: []schemas.AnnotationConfig{
+		{Type: "grafana", URL: "https://grafana.example.com"},
+		{Type: "graphana", URL: "https://typo.example.com"},
+	}}
+	out, err := Build(cfg)
+	if err == nil {
+		t.Fatalf("unknown annotation type accepted, got %d emitters", len(out))
+	}
+	if !strings.Contains(err.Error(), "graphana") {
+		t.Fatalf("error should name the offending type: %v", err)
+	}
+}
+
+// TestPostDoesNotMutateEmitterClient pins the fix for a data race. The
+// emitters used to lazily assign http.DefaultClient to their own Client
+// field on first Post. Deps.Emitters is a single slice shared by channels
+// that dispatch concurrently, so two goroutines could write that field at
+// once. Resolving the client without storing it removes the write entirely.
+func TestPostDoesNotMutateEmitterClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	emitters := []Emitter{
+		&Grafana{BaseURL: srv.URL, Events: []EventType{EventApplyStarted}},
+		&Datadog{BaseURL: srv.URL, Events: []EventType{EventApplyStarted}},
+		&Webhook{Name_: "hook", Endpoint: srv.URL, Events: []EventType{EventApplyStarted}},
+	}
+	e := Event{Type: EventApplyStarted, When: time.Now(), Project: "api"}
+
+	// Dispatch the same shared emitters from several goroutines at once:
+	// under -race this is what caught the lazy assignment.
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, err := range Dispatch(t.Context(), emitters, e) {
+				t.Errorf("dispatch: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if c := emitters[0].(*Grafana).Client; c != nil {
+		t.Errorf("Grafana.Client was written during Post: %v", c)
+	}
+	if c := emitters[1].(*Datadog).Client; c != nil {
+		t.Errorf("Datadog.Client was written during Post: %v", c)
+	}
+	if c := emitters[2].(*Webhook).Client; c != nil {
+		t.Errorf("Webhook.Client was written during Post: %v", c)
+	}
+}
+
+// TestSharedClientHasTimeout guards the other half: http.DefaultClient has
+// no timeout, so a black-holed collector would stall the run that emitted
+// the annotation.
+func TestSharedClientHasTimeout(t *testing.T) {
+	// Assert on what an emitter with no explicit client actually posts
+	// through, not merely on sharedClient - that is the contract.
+	got := httpClient(nil)
+	if got == http.DefaultClient {
+		t.Fatal("annotations must not post through http.DefaultClient (it has no timeout)")
+	}
+	if got.Timeout <= 0 {
+		t.Fatalf("annotation client must have a timeout, got %v", got.Timeout)
+	}
+	// An explicit client is still honoured.
+	custom := &http.Client{Timeout: time.Second}
+	if httpClient(custom) != custom {
+		t.Fatal("an explicitly configured client must be used as-is")
+	}
 }

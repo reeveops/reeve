@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -82,9 +83,6 @@ type Grafana struct {
 func (g *Grafana) Name() string            { return "grafana" }
 func (g *Grafana) Subscribes() []EventType { return g.Events }
 func (g *Grafana) Post(ctx context.Context, e Event) error {
-	if g.Client == nil {
-		g.Client = http.DefaultClient
-	}
 	body := map[string]any{
 		"time":    e.When.UnixMilli(),
 		"timeEnd": e.When.UnixMilli(),
@@ -92,20 +90,10 @@ func (g *Grafana) Post(ctx context.Context, e Event) error {
 			tagSlice(e.Tags)...),
 		"text": summary(e),
 	}
-	buf, _ := json.Marshal(body)
 	url := strings.TrimRight(envref.Expand(g.BaseURL), "/") + "/api/annotations"
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
-	req.Header.Set("Authorization", "Bearer "+envref.Expand(g.APIKey))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := g.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("grafana %d", resp.StatusCode)
-	}
-	return nil
+	return postJSON(ctx, g.Client, "grafana", url, body, map[string]string{
+		"Authorization": "Bearer " + envref.Expand(g.APIKey),
+	})
 }
 
 // --- Datadog ---
@@ -121,9 +109,6 @@ type Datadog struct {
 func (d *Datadog) Name() string            { return "datadog" }
 func (d *Datadog) Subscribes() []EventType { return d.Events }
 func (d *Datadog) Post(ctx context.Context, e Event) error {
-	if d.Client == nil {
-		d.Client = http.DefaultClient
-	}
 	body := map[string]any{
 		"title":            summary(e),
 		"text":             e.Message,
@@ -132,24 +117,14 @@ func (d *Datadog) Post(ctx context.Context, e Event) error {
 		"tags":             append([]string{"reeve", "type:" + string(e.Type), "project:" + e.Project, "env:" + e.Env}, tagSlice(e.Tags)...),
 		"source_type_name": "reeve",
 	}
-	buf, _ := json.Marshal(body)
 	base := envref.Expand(d.BaseURL)
 	if base == "" {
 		base = "https://api.datadoghq.com"
 	}
 	url := strings.TrimRight(base, "/") + "/api/v1/events"
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
-	req.Header.Set("DD-API-KEY", envref.Expand(d.APIKey))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := d.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("datadog %d", resp.StatusCode)
-	}
-	return nil
+	return postJSON(ctx, d.Client, "datadog", url, body, map[string]string{
+		"DD-API-KEY": envref.Expand(d.APIKey),
+	})
 }
 
 // --- Dash0 / generic webhook ---
@@ -167,22 +142,58 @@ type Webhook struct {
 func (w *Webhook) Name() string            { return w.Name_ }
 func (w *Webhook) Subscribes() []EventType { return w.Events }
 func (w *Webhook) Post(ctx context.Context, e Event) error {
-	if w.Client == nil {
-		w.Client = http.DefaultClient
-	}
-	buf, _ := json.Marshal(e)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, envref.Expand(w.Endpoint), bytes.NewReader(buf))
-	req.Header.Set("Content-Type", "application/json")
+	headers := make(map[string]string, len(w.Headers))
 	for k, v := range w.Headers {
-		req.Header.Set(k, envref.Expand(v))
+		headers[k] = envref.Expand(v)
 	}
-	resp, err := w.Client.Do(req)
+	return postJSON(ctx, w.Client, "webhook", envref.Expand(w.Endpoint), e, headers)
+}
+
+// --- transport ---
+
+// sharedClient bounds every annotation POST. http.DefaultClient has no
+// timeout, so a hung or black-holed collector would stall the run that
+// emitted the event. 20s matches internal/notify's shared client.
+var sharedClient = &http.Client{Timeout: 20 * time.Second}
+
+// httpClient resolves the client for an emitter without writing back to it.
+// The emitters used to assign http.DefaultClient to their own Client field
+// on first use; Deps.Emitters is a single slice shared across channels that
+// dispatch concurrently, so that lazy assignment was a data race.
+func httpClient(c *http.Client) *http.Client {
+	if c == nil {
+		return sharedClient
+	}
+	return c
+}
+
+// postJSON marshals body and POSTs it, classifying the response. label names
+// the backend in status errors. The three emitters differ only in URL, body
+// and headers, so the request plumbing lives here once - previously each
+// carried its own copy, and each copy discarded the marshal and
+// request-construction errors.
+func postJSON(ctx context.Context, c *http.Client, label, url string, body any, headers map[string]string) error {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := httpClient(c).Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	// Drain a bounded amount so the connection can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("webhook %d", resp.StatusCode)
+		return fmt.Errorf("%s %d", label, resp.StatusCode)
 	}
 	return nil
 }
