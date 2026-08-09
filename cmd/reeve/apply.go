@@ -84,6 +84,13 @@ func runApply(cmd *cobra.Command, _ []string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	// Built here, before the store is touched: this validates the
+	// annotation config, and a bad type must not first reap locks and
+	// prune run artifacts and only then fail.
+	annotationEmitters, err := run.BuildAnnotationEmitters(cfg.Observability)
+	if err != nil {
+		return err
+	}
 	store, err := factory.Open(ctx, cfg.Shared.Bucket, root)
 	if err != nil {
 		return err
@@ -156,11 +163,6 @@ func runApply(cmd *cobra.Command, _ []string) error {
 			_ = otelProvider.Shutdown(ctx)
 		}
 	}()
-	annotationEmitters, err := run.BuildAnnotationEmitters(cfg.Observability)
-	if err != nil {
-		return err
-	}
-
 	out, err := run.Apply(ctx, run.ApplyInput{
 		PRNumber:        pr,
 		TriggerSource:   flagStringOrDefault(cmd, "trigger-source", ""),
