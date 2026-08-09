@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/reeveops/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/auth/githuboidc"
 )
 
 // Provider is a single gcp_wif provider instance.
@@ -52,7 +53,7 @@ func (p *Provider) Type() string { return "gcp_wif" }
 // Writes an ambient-credentials file and returns the path in
 // GOOGLE_APPLICATION_CREDENTIALS.
 func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
-	oidcToken, err := fetchGitHubOIDC(ctx, p.audience)
+	oidcToken, err := githuboidc.Fetch(ctx, p.audience, "gcp_wif")
 	if err != nil {
 		return nil, fmt.Errorf("fetch oidc token: %w", err)
 	}
@@ -182,44 +183,6 @@ func writeAmbientCreds(name, accessToken string) (string, string, error) {
 		return "", "", err
 	}
 	return path, dir, nil
-}
-
-func fetchGitHubOIDC(ctx context.Context, audience string) (string, error) {
-	url := os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL")
-	tok := os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-	if url == "" || tok == "" {
-		return "", fmt.Errorf("ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN not set (gcp_wif works only inside GitHub Actions with id-token: write)")
-	}
-	if audience != "" {
-		sep := "?"
-		if strings.Contains(url, "?") {
-			sep = "&"
-		}
-		url = url + sep + "audience=" + audience
-	}
-	// #nosec G704 -- URL is ACTIONS_ID_TOKEN_REQUEST_URL, injected by the Actions runner, not read
-	// from .reeve config or PR content; the call is refused when it or its paired
-	// token is unset
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Accept", "application/json; api-version=2.0")
-	// #nosec G704 -- same runner-provided endpoint as the request above
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("oidc token service %d: %s", resp.StatusCode, string(body))
-	}
-	var out struct {
-		Value string `json:"value"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
-	}
-	return out.Value, nil
 }
 
 // compile-time check
