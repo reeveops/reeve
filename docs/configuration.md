@@ -94,6 +94,12 @@ approvals:
       approvers: ["@org/payments-leads"]
 
 preconditions:
+  # Both of these default to OFF when omitted, so that a first run works
+  # before CI checks and branch protection are wired up. Setting them is
+  # the recommended production posture; `reeve lint` warns while either is
+  # unset. An explicit `false` is treated as an informed choice and is not
+  # warned about. (`require_up_to_date` is intended for the apply-then-merge
+  # flow - leave it off under `trigger: merge`, see below.)
   require_up_to_date: true
   require_checks_passing: true
   preview_freshness: 2h            # preview must be newer than this ("0" disables - see below)
