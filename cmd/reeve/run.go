@@ -3,16 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	authfac "github.com/reeveops/reeve/internal/auth/factory"
-	"github.com/reeveops/reeve/internal/blob/factory"
-	"github.com/reeveops/reeve/internal/config"
-	"github.com/reeveops/reeve/internal/iac"
 	"github.com/reeveops/reeve/internal/run"
 	gh "github.com/reeveops/reeve/internal/vcs/github"
 )
@@ -91,43 +86,15 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	if token == "" {
 		token = os.Getenv("REEVE_GITHUB_TOKEN")
 	}
-	root := flagStringOrDefault(cmd, "root", "")
-	if root == "" {
-		root, _ = os.Getwd()
-	}
-	abs, err := filepath.Abs(root)
+	env, err := loadRunEnv(cmd)
 	if err != nil {
 		return err
 	}
-	root = abs
-
-	cfg, err := config.Load(root)
-	if err != nil {
-		return err
-	}
-	applyLogConfig(cfg.LogSettings())
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-
-	store, err := factory.Open(ctx, cfg.Shared.Bucket, root)
-	if err != nil {
-		return err
-	}
+	cfg, root, store, engine, authReg := env.cfg, env.root, env.store, env.engine, env.authReg
+	engineCfg := env.engineCfg
 
 	// Opportunistic blob retention: prune run artifacts older than max_age.
 	run.PruneRunArtifactsOpportunistic(ctx, store, cfg.Shared)
-
-	engineCfg := cfg.Engines[0]
-	engine, err := iac.New(engineCfg.Engine)
-	if err != nil {
-		return err
-	}
-
-	authReg, err := authfac.Build(ctx, cfg.Auth)
-	if err != nil {
-		return fmt.Errorf("build auth registry: %w", err)
-	}
 
 	// OTEL is NOT built here for preview: run.Preview constructs it after
 	// the pre-approval observability gate (a PR that modifies
