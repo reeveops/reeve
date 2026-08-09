@@ -171,3 +171,53 @@ func TestCASProbeObjectInvisibleToLockWalkers(t *testing.T) {
 		t.Fatalf("leaked probe surfaced as a lock: %+v", got)
 	}
 }
+
+// flakyProbeStore injects transient failures into the probe's conditional
+// creates while otherwise behaving like a compliant backend.
+type flakyProbeStore struct {
+	blob.Store
+	mu       sync.Mutex
+	failures int // remaining blips to inject on probe creates
+}
+
+func (f *flakyProbeStore) PutIfMatch(ctx context.Context, key string, r io.Reader, etag string) (*blob.Metadata, error) {
+	if strings.HasPrefix(key, "locks/.cas-probe/") {
+		f.mu.Lock()
+		inject := f.failures > 0
+		if inject {
+			f.failures--
+		}
+		f.mu.Unlock()
+		if inject {
+			return nil, errors.New("dial tcp 10.0.0.1:443: connection reset by peer")
+		}
+	}
+	return f.Store.PutIfMatch(ctx, key, r, etag)
+}
+
+func TestCASProbeTransientFailureIsNotCached(t *testing.T) {
+	ctx := context.Background()
+	fs, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(&flakyProbeStore{Store: fs, failures: 1})
+	s.Now = func() time.Time { return time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC) }
+
+	// The blip surfaces on the first attempt...
+	_, _, err = s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "r1"}, time.Hour)
+	if err == nil {
+		t.Fatal("expected the injected probe failure to surface")
+	}
+	// ...as a transient error, not a verdict about the backend.
+	if errors.Is(err, ErrConditionalWritesUnsupported) {
+		t.Fatalf("transient blip reported as an unsupported backend: %v", err)
+	}
+
+	// It must not be cached. Before this fix a sync.Once cached the blip, so
+	// every later lock operation in the process failed for the rest of the
+	// run - pointing operators at "unsupported backend" for a network hiccup.
+	if _, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "r1"}, time.Hour); err != nil || !ok {
+		t.Fatalf("re-probe after a transient failure: ok=%v err=%v", ok, err)
+	}
+}

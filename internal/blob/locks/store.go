@@ -29,9 +29,11 @@ type Store struct {
 	// Now is injectable for tests.
 	Now func() time.Time
 
-	// casOnce guards the one-time conditional-write probe (see ensureCAS).
-	casOnce sync.Once
-	casErr  error
+	// casMu guards the conditional-write probe verdict (see ensureCAS).
+	// casProbed reports that casErr holds a *definitive* verdict.
+	casMu     sync.Mutex
+	casProbed bool
+	casErr    error
 }
 
 // New returns a Store. MaxRetries defaults to 5.
@@ -47,44 +49,61 @@ func New(s blob.Store) *Store {
 var ErrConditionalWritesUnsupported = errors.New(
 	"bucket does not enforce conditional writes (If-None-Match/If-Match); locks would be unsafe - use a backend with conditional-write support (real S3, current MinIO/R2, GCS, Azure Blob, or the filesystem store)")
 
-// ensureCAS probes, once per Store, that the backend actually enforces
-// conditional writes: create a probe object with If-None-Match:*, then
-// attempt a second conditional create of the same key, which MUST fail
-// with a precondition error. Some S3-compatibles accept the If-* headers
-// and silently ignore them - both writes succeed and every "lock" this
-// store hands out would be fiction. The probe object is deleted
-// best-effort; the verdict is cached for the life of the process.
+// ensureCAS checks that the backend actually enforces conditional writes,
+// caching the verdict for the life of the process.
+//
+// Only *definitive* verdicts are cached: "enforced" and
+// ErrConditionalWritesUnsupported. A transient failure - a network blip, a
+// cancelled context, a 5xx - leaves the probe re-runnable. It used to be
+// cached too (sync.Once over the whole probe), so one bad moment convinced
+// the process for the rest of the run that the bucket was unsafe, and every
+// later lock operation failed pointing operators at "unsupported backend"
+// when the real cause was a hiccup.
 func (s *Store) ensureCAS(ctx context.Context) error {
-	s.casOnce.Do(func() {
-		var suffix [8]byte
-		if _, err := rand.Read(suffix[:]); err != nil {
-			s.casErr = fmt.Errorf("conditional-write probe: %w", err)
-			return
-		}
-		key := "locks/.cas-probe/" + hex.EncodeToString(suffix[:])
-		defer func() {
-			// Best-effort cleanup; a leaked probe object is harmless (the
-			// random suffix keeps it out of every lock key's way and
-			// parseLockKey ignores non-.json keys).
-			_ = s.store.Delete(ctx, key)
-		}()
-		if _, err := s.store.PutIfMatch(ctx, key, strings.NewReader("probe"), ""); err != nil {
-			s.casErr = fmt.Errorf("conditional-write probe: initial create failed: %w", err)
-			return
-		}
-		_, err := s.store.PutIfMatch(ctx, key, strings.NewReader("probe2"), "")
-		switch {
-		case err == nil:
-			// Second create-if-absent of an existing key succeeded: the
-			// backend is not enforcing conditions. Fail loudly.
-			s.casErr = ErrConditionalWritesUnsupported
-		case errors.Is(err, blob.ErrPreconditionFailed):
-			s.casErr = nil // enforced, as required
-		default:
-			s.casErr = fmt.Errorf("conditional-write probe: %w", err)
-		}
-	})
-	return s.casErr
+	s.casMu.Lock()
+	defer s.casMu.Unlock()
+	if s.casProbed {
+		return s.casErr
+	}
+	err := s.probeCAS(ctx)
+	if err == nil || errors.Is(err, ErrConditionalWritesUnsupported) {
+		s.casProbed = true
+		s.casErr = err
+	}
+	return err
+}
+
+// probeCAS creates a probe object with If-None-Match:*, then attempts a
+// second conditional create of the same key, which MUST fail with a
+// precondition error. Some S3-compatibles accept the If-* headers and
+// silently ignore them - both writes succeed and every "lock" this store
+// hands out would be fiction. The probe object is deleted best-effort.
+func (s *Store) probeCAS(ctx context.Context) error {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Errorf("conditional-write probe: %w", err)
+	}
+	key := "locks/.cas-probe/" + hex.EncodeToString(suffix[:])
+	defer func() {
+		// Best-effort cleanup; a leaked probe object is harmless (the
+		// random suffix keeps it out of every lock key's way and
+		// parseLockKey ignores non-.json keys).
+		_ = s.store.Delete(ctx, key)
+	}()
+	if _, err := s.store.PutIfMatch(ctx, key, strings.NewReader("probe"), ""); err != nil {
+		return fmt.Errorf("conditional-write probe: initial create failed: %w", err)
+	}
+	_, err := s.store.PutIfMatch(ctx, key, strings.NewReader("probe2"), "")
+	switch {
+	case err == nil:
+		// Second create-if-absent of an existing key succeeded: the
+		// backend is not enforcing conditions. Fail loudly.
+		return ErrConditionalWritesUnsupported
+	case errors.Is(err, blob.ErrPreconditionFailed):
+		return nil // enforced, as required
+	default:
+		return fmt.Errorf("conditional-write probe: %w", err)
+	}
 }
 
 func (s *Store) key(project, stack string) string {
