@@ -425,3 +425,31 @@ func TestOldLockBlobWithoutPromotedFieldLoads(t *testing.T) {
 		t.Fatalf("legacy active holder must still refuse a second run: ok=%v err=%v", ok, err)
 	}
 }
+
+// TestUnlockPRDoesNotMutateCallersQueue pins the value semantics this
+// package promises. Lock is passed by value, but its Queue header shares a
+// backing array with the caller's copy, so filtering in place through
+// q[:0] rewrites the caller's queue underneath it. core/approvals hit
+// exactly this bug for real; this is the same shape.
+func TestUnlockPRDoesNotMutateCallersQueue(t *testing.T) {
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	orig := Lock{
+		Project: "api", Stack: "prod",
+		Queue: []QueueItem{{PR: 1, RunID: "r1"}, {PR: 2, RunID: "r2"}, {PR: 3, RunID: "r3"}},
+	}
+	before := append([]QueueItem(nil), orig.Queue...)
+
+	got := UnlockPR(orig, 2, "r2", time.Hour, now)
+
+	if len(got.Queue) != 2 {
+		t.Fatalf("returned queue should have PR 2 removed, got %+v", got.Queue)
+	}
+	if len(orig.Queue) != len(before) {
+		t.Fatalf("caller's queue length changed: %d -> %d", len(before), len(orig.Queue))
+	}
+	for i := range before {
+		if orig.Queue[i] != before[i] {
+			t.Fatalf("caller's queue corrupted at %d: %+v, want %+v", i, orig.Queue[i], before[i])
+		}
+	}
+}

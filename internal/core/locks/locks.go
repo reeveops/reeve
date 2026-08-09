@@ -279,8 +279,21 @@ func expired(h *Holder, now time.Time) bool {
 	return now.After(exp)
 }
 
+// removePR returns q without the given PR's entries.
+//
+// The result is a fresh slice. Filtering in place through q[:0] writes into
+// the caller's backing array, so a Lock value still held by the caller
+// would see its Queue rewritten underneath it - Lock is passed by value,
+// but the Queue header shares storage. It is latent today only because
+// locks are decoded fresh from JSON before each transition. The approvals
+// package hit the same aliasing bug for real (see core/approvals.Evaluate),
+// and this package - whose whole point is pure value-semantics transitions
+// - is the last place that should mutate its input.
 func removePR(q []QueueItem, pr int) []QueueItem {
-	out := q[:0]
+	if len(q) == 0 {
+		return q
+	}
+	out := make([]QueueItem, 0, len(q))
 	for _, item := range q {
 		if item.PR != pr {
 			out = append(out, item)
