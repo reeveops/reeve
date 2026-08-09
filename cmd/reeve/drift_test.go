@@ -275,3 +275,54 @@ func TestBuildPermanentSuppressions(t *testing.T) {
 		t.Fatal("unparseable until must fall back to permanent (zero), not drop the suppression")
 	}
 }
+
+// writeObservabilityConfig writes .reeve/observability.yaml.
+func writeObservabilityConfig(t *testing.T, root, body string) {
+	t.Helper()
+	mustWrite(t, filepath.Join(root, ".reeve", "observability.yaml"), body)
+}
+
+const badAnnotationType = `version: 1
+config_type: observability
+annotations:
+  - type: graphana
+    url: https://typo.example.com
+`
+
+// TestDriftRejectsUnknownAnnotationTypeBeforeRunning pins that an invalid
+// annotation type is caught before the run does anything. The emitters used
+// to be built down in the notification section, so a normal drift run wrote
+// state and artifacts first and only then failed.
+func TestDriftRejectsUnknownAnnotationTypeBeforeRunning(t *testing.T) {
+	root := driftRepo(t)
+	writeObservabilityConfig(t, root, badAnnotationType)
+
+	_, err := runReeve(t, "drift", "run")
+	if err == nil {
+		t.Fatal("drift run accepted an unknown annotation type")
+	}
+	if !strings.Contains(err.Error(), "graphana") {
+		t.Fatalf("error should name the offending type: %v", err)
+	}
+	// Nothing may have been written: the config was invalid before we
+	// started.
+	if _, statErr := os.Stat(filepath.Join(root, ".reeve-state", "drift")); statErr == nil {
+		t.Error("drift wrote state despite an invalid annotation config")
+	}
+}
+
+// TestDriftBootstrapRejectsUnknownAnnotationType covers the path that made
+// this worth fixing: bootstrap returns before the notification section, so
+// it used to accept a config that a normal run rejects.
+func TestDriftBootstrapRejectsUnknownAnnotationType(t *testing.T) {
+	root := driftRepo(t)
+	writeObservabilityConfig(t, root, badAnnotationType)
+
+	_, err := runReeve(t, "drift", "bootstrap")
+	if err == nil {
+		t.Fatal("drift bootstrap accepted an unknown annotation type that a normal run rejects")
+	}
+	if !strings.Contains(err.Error(), "graphana") {
+		t.Fatalf("error should name the offending type: %v", err)
+	}
+}

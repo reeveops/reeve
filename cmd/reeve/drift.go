@@ -92,6 +92,14 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	if err != nil {
 		return err
 	}
+	// Built up front: this validates the annotation config, and it must be
+	// validated before the run writes anything. Bootstrap returns before
+	// the notification section below, so building it there left bootstrap
+	// accepting a config that a normal run rejects.
+	emitters, err := run.BuildAnnotationEmitters(cfg.Observability)
+	if err != nil {
+		return err
+	}
 	store, err := factory.Open(ctx, cfg.Shared.Bucket, root)
 	if err != nil {
 		return err
@@ -272,7 +280,7 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	channels, serr := notify.Build(ctx, channelCfgs, notify.Deps{
 		Blob:       store,
 		Issues:     issues,
-		Emitters:   run.BuildAnnotationEmitters(cfg.Observability),
+		Emitters:   emitters,
 		SlackToken: os.Getenv("SLACK_BOT_TOKEN"),
 		RepoFull:   repoFull,
 	})
