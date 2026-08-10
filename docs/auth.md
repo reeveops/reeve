@@ -161,9 +161,25 @@ The impersonation response is validated before use:
 - The expiry must be in the future.
 - Any of those failing fails the acquire.
 
-Every credential provider applies the same three rules (`internal/auth`
-`ValidateExchange`), and each returns the same sentinel errors:
-`ErrNoToken`, `ErrNoExpiry`, `ErrExpired`.
+Validation happens in two steps, because each provider reports its expiry
+differently:
+
+- The provider parses or converts its own format first. `gcp_wif` parses
+  `expireTime` as RFC3339; `azure_federated` converts a relative
+  `expires_in` via `auth.ExpiresInToTime`, which rejects non-positive
+  values and any value large enough to overflow `time.Duration`;
+  `github_app` decodes a `time.Time` straight from JSON; `aws_oidc`
+  dereferences the SDK's `*time.Time` with `aws.ToTime`, which yields the
+  zero time when the field is absent.
+- The result then goes to `auth.ValidateExchange`, which applies the checks
+  common to every provider: the token is non-empty, the expiry is non-zero,
+  and the expiry is in the future.
+
+`ValidateExchange` takes an already-parsed `time.Time`. It does not parse
+timestamps or convert `expires_in`.
+
+All providers return the same sentinel errors, so callers and tests match
+with `errors.Is`: `ErrNoToken`, `ErrNoExpiry`, `ErrExpired`.
 
 Why the expiry is not optional:
 
@@ -171,9 +187,6 @@ Why the expiry is not optional:
   or malformed timestamp advertises a one-hour token as permanent.
 - An already-expired credential fails opaquely partway through an engine
   run instead of failing here, where the cause is obvious.
-- Providers reporting `expires_in` (seconds) are bounded before conversion:
-  a value large enough to overflow `time.Duration` would otherwise wrap and
-  land the expiry in the past.
 
 ### GCP setup
 
