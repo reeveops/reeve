@@ -369,7 +369,17 @@ func acquireLock(root *os.Root, key string) (*fileLock, error) {
 	if err := root.MkdirAll(osKey(lockNamespace), 0o750); err != nil {
 		return nil, err
 	}
-	f, err := root.OpenFile(osKey(lockKey), os.O_CREATE|os.O_RDWR, 0o600)
+	// Concurrent O_CREATE opens of the same path spuriously return ENOENT
+	// on macOS even with the parent directory in place. Retry: the racing
+	// winner's create makes the next attempt succeed immediately.
+	var f *os.File
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		f, err = root.OpenFile(osKey(lockKey), os.O_CREATE|os.O_RDWR, 0o600)
+		if err == nil || !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
