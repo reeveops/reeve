@@ -3,6 +3,7 @@ package gcpwif
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -287,8 +288,12 @@ func TestAcquireRejectsUnparseableExpiry(t *testing.T) {
 	if err == nil {
 		t.Fatalf("unparseable expireTime accepted; ExpiresAt=%v would read as no-expiry", cred.ExpiresAt)
 	}
-	if !strings.Contains(err.Error(), "expireTime") {
-		t.Fatalf("error should name the field: %v", err)
+	// Assert on the error type, not its text: the repo convention, and it
+	// pins that the parse failure is what surfaced rather than some other
+	// error that happens to mention the field.
+	var perr *time.ParseError
+	if !errors.As(err, &perr) {
+		t.Fatalf("want a *time.ParseError, got %T: %v", err, err)
 	}
 	// The token must not leak while reporting a parse failure.
 	if strings.Contains(err.Error(), "sa-token") {

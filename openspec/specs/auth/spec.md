@@ -47,6 +47,11 @@ Rules:
   AND emits a loud warning every run. Lint flags as ERROR without the field.
 - Fork PRs receive dry-run-only credentials by default. Full creds require
   explicit per-repo opt-in documented in the repo config.
+- A credential exchange **fails** when the provider response omits the token
+  or carries an unparseable expiry. `Credential.ExpiresAt` treats the zero
+  value as "no expiry", so accepting a malformed timestamp would advertise a
+  short-lived token as permanent - the wrong default direction for anything
+  federated.
 
 ## `state.secrets_provider` boundary
 

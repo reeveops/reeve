@@ -154,6 +154,12 @@ providers:
     duration: 1h
 ```
 
+The impersonation response must carry both an `accessToken` and a parseable
+RFC3339 `expireTime`. Either one missing or malformed fails the acquire
+rather than being accepted: a credential with no usable expiry reads as
+"never expires" (`Credential.ExpiresAt` documents the zero value that way),
+which would advertise a one-hour token as permanent.
+
 ### GCP setup
 
 ```bash
