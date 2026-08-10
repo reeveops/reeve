@@ -16,9 +16,18 @@ import (
 // machine-read, so length costs nothing worth having.
 const slugHashLen = 32
 
+// digestSep separates a sanitised name from its disambiguating digest.
+//
+// It is deliberately a rune that a pass-through name can never contain: a
+// name is returned unchanged only when it is drawn from [A-Za-z0-9-], so
+// anything holding "_" took the transforming branch. That disjointness is
+// what makes the mapping injective. Without it, a component literally named
+// "a_b" + digestSep + shortHash("a/b") would be safe, pass through
+// unchanged, and address the same object as "a/b".
+const digestSep = "__"
+
 // SlugComponent makes an arbitrary name safe to use as a single path
-// component in a blob key. fallback is used when the input has no usable
-// characters at all.
+// component in a blob key. fallback is used when the input is empty.
 //
 // Names reaching key builders are not always ours: a Pulumi project name
 // comes from Pulumi.yaml and a stack name from a filename, both of which
@@ -27,43 +36,55 @@ const slugHashLen = 32
 // keys from unsanitised input invites collisions and odd objects for no
 // benefit.
 //
-// Replacement alone is NOT enough: mapping every unsafe rune to "_" makes
-// "a/b" and "a_b" the same component, which would point two distinct stacks
-// at one lock object and let one stack's plan artifact overwrite another's.
-// So whenever a rune is replaced, a short digest of the ORIGINAL input is
-// appended, which keeps distinct inputs distinct.
+// The mapping is INJECTIVE, which is the property that matters: distinct
+// names must never address the same lock object or plan artifact. Merely
+// replacing unsafe runes is not enough - it maps "a/b" and "a_b" together -
+// so a transformed name carries a digest of the original, in a namespace no
+// pass-through name can reach.
 //
-// The transform is idempotent, which lock keys require: parseLockKey feeds
-// its result back into Get, which re-derives the key. Output contains only
-// characters this function preserves, so re-slugging is identity.
+// It is NOT idempotent, and must not be relied on to be: slugging an
+// already-slugged value transforms it again. Derive keys from real names
+// only. The lock store reads a lock's project/stack from the object's own
+// content rather than parsing them back out of its key.
 func SlugComponent(s, fallback string) string {
-	safeFallback, _ := sanitizeComponent(fallback)
-	if strings.Trim(safeFallback, "_") == "" {
-		// A caller passed a fallback that is itself unusable. Refuse to
-		// propagate it into a key rather than inventing a path segment.
-		safeFallback = "key"
-	}
 	if s == "" {
-		return safeFallback
+		return passthroughOrDigest(fallback)
 	}
+	return passthroughOrDigest(s)
+}
 
-	out, replaced := sanitizeComponent(s)
-	if strings.Trim(out, "_") == "" {
-		// Nothing survived (e.g. "///"). Fall back, but still disambiguate:
-		// otherwise every degenerate name collapses onto one key.
-		out = safeFallback
-		replaced = true
+func passthroughOrDigest(s string) string {
+	if s == "" {
+		return "key" // nothing usable was supplied at all
 	}
-	if replaced {
-		out += "-" + shortHash(s)
+	if isPassthrough(s) {
+		return s
 	}
-	return out
+	sanitised, _ := sanitizeComponent(s)
+	if strings.Trim(sanitised, "_") == "" {
+		// Nothing survived (e.g. "///"); the digest alone identifies it.
+		sanitised = "key"
+	}
+	return sanitised + digestSep + shortHash(s)
+}
+
+// isPassthrough reports whether a name is safe to use verbatim. The set
+// deliberately excludes "_" so that the transformed namespace (which always
+// contains digestSep) can never be produced by a pass-through name.
+func isPassthrough(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // sanitizeComponent maps every rune outside the safe set to "_", reporting
-// whether anything was replaced. "_" itself is in the safe set: it is the
-// replacement character, and excluding it would make the transform
-// non-idempotent.
+// whether anything was replaced.
 func sanitizeComponent(s string) (string, bool) {
 	var b strings.Builder
 	b.Grow(len(s))

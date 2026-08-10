@@ -49,7 +49,8 @@ func (s *Store) ensureCAS(ctx context.Context) error {
 // key builds the lock object key. Both components are slugged: project and
 // stack names originate in the repo under review (Pulumi.yaml, stack
 // filenames), and plan artifacts already sanitise for the same reason.
-// SlugComponent is idempotent, so parseLockKey round-trips.
+// The mapping is injective; keys are derived from real names only (see
+// namesFor), never from names parsed back out of a key.
 func (s *Store) key(project, stack string) string {
 	return fmt.Sprintf("locks/%s/%s.json",
 		blob.SlugComponent(project, "project"),
@@ -73,6 +74,41 @@ func (s *Store) Get(ctx context.Context, project, stack string) (corelocks.Lock,
 		return corelocks.Lock{}, "", fmt.Errorf("decode lock: %w", err)
 	}
 	return l, md.ETag, nil
+}
+
+// getByKey reads a lock object at an exact key, without deriving that key
+// from names. The walkers use it so key derivation only ever happens from
+// the real project/stack, never from a key parsed back into components -
+// which is what let the slug stay injective instead of having to be
+// idempotent.
+func (s *Store) getByKey(ctx context.Context, key string) (corelocks.Lock, error) {
+	rc, _, err := s.store.Get(ctx, key)
+	if err != nil {
+		return corelocks.Lock{}, err
+	}
+	defer rc.Close()
+	var l corelocks.Lock
+	if err := json.NewDecoder(rc).Decode(&l); err != nil {
+		return corelocks.Lock{}, fmt.Errorf("decode lock %s: %w", key, err)
+	}
+	return l, nil
+}
+
+// namesFor returns the authoritative project/stack for a stored lock: the
+// object's own content, not its key. A lock whose content does not derive
+// back to the key it was found under is skipped rather than acted on under
+// the wrong identity.
+func (s *Store) namesFor(ctx context.Context, key string) (string, string, bool) {
+	l, err := s.getByKey(ctx, key)
+	if err != nil {
+		slog.Debug("skipping unreadable lock object", "key", key, "err", err)
+		return "", "", false
+	}
+	if l.Project == "" || l.Stack == "" || s.key(l.Project, l.Stack) != key {
+		slog.Debug("skipping lock whose content does not match its key", "key", key)
+		return "", "", false
+	}
+	return l.Project, l.Stack, true
 }
 
 // TryAcquire runs the acquire transition with optimistic concurrency.
@@ -204,7 +240,7 @@ func (s *Store) UnlockPRAll(ctx context.Context, pr int, runID string, ttl time.
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := parseLockKey(k)
+		proj, stack, ok := s.namesFor(ctx, k)
 		if !ok {
 			continue
 		}
@@ -301,7 +337,7 @@ func (s *Store) ReapAll(ctx context.Context, ttl time.Duration) (int, error) {
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := parseLockKey(k)
+		proj, stack, ok := s.namesFor(ctx, k)
 		if !ok {
 			continue
 		}
@@ -327,7 +363,7 @@ func (s *Store) ListAll(ctx context.Context) ([]corelocks.Lock, error) {
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := parseLockKey(k)
+		proj, stack, ok := s.namesFor(ctx, k)
 		if !ok {
 			continue
 		}
@@ -371,15 +407,4 @@ func (s *Store) mutate(
 		// Lost the race - retry.
 	}
 	return corelocks.Lock{}, false, fmt.Errorf("lock %s/%s: exceeded %d retries", project, stack, s.MaxRetries)
-}
-
-// parseLockKey decodes "locks/<project>/<stack>.json".
-func parseLockKey(k string) (string, string, bool) {
-	k = strings.TrimPrefix(k, "locks/")
-	k = strings.TrimSuffix(k, ".json")
-	parts := strings.SplitN(k, "/", 2)
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
 }

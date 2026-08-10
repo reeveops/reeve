@@ -16,9 +16,17 @@ func TestSlugComponent(t *testing.T) {
 		// keeps existing keys stable.
 		{"plain", "api", "api"},
 		{"hyphen kept", "my-project", "my-project"},
-		{"underscore kept", "my_project", "my_project"},
 		{"digits kept", "env2", "env2"},
 		{"empty falls back", "", "project"},
+
+		// Boundary and failure cases. A transformed name is the sanitised
+		// form, digestSep, then the digest of the ORIGINAL.
+		{"slash", "a/b", "a_b" + digestSep + shortHash("a/b")},
+		{"underscore is not pass-through", "a_b", "a_b" + digestSep + shortHash("a_b")},
+		{"traversal", "..", "key" + digestSep + shortHash("..")},
+		{"sanitises to nothing", "///", "key" + digestSep + shortHash("///")},
+		{"space", "my stack", "my_stack" + digestSep + shortHash("my stack")},
+		{"unicode", "st\u00e0ck", "st_ck" + digestSep + shortHash("st\u00e0ck")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,43 +50,33 @@ func TestSlugComponentNeutralisesUnsafeRunes(t *testing.T) {
 	}
 }
 
-// TestSlugComponentDoesNotCollide is the point of the digest suffix.
-// Replacement alone maps "a/b" and "a_b" onto the same component, which
-// would point two distinct stacks at one lock object and let one stack's
-// plan artifact overwrite another's.
-func TestSlugComponentDoesNotCollide(t *testing.T) {
+// TestSlugComponentIsInjective is the property that actually matters:
+// distinct names must never address the same lock object or plan artifact.
+//
+// The transformed namespace always contains digestSep, and a pass-through
+// name can never contain it, so the two classes cannot alias. That
+// disjointness is what closes the case a digest alone leaves open: a
+// component literally named "a_b<digestSep><digest of a/b>" would otherwise
+// be safe, pass through unchanged, and collide with SlugComponent("a/b").
+func TestSlugComponentIsInjective(t *testing.T) {
 	t.Parallel()
-	groups := [][]string{
-		{"a/b", "a_b", "a.b", "a b"},
-		{"///", "...", "   "},       // all degenerate, all distinct
-		{"api/prod", "api_prod"},    // the realistic case
-		{"x/y/z", "x_y_z", "x/y_z"}, //
+	inputs := []string{
+		"api", "my-project", "a/b", "a_b", "a.b", "a b",
+		"///", "...", "   ", "..", "api/prod", "api_prod",
+		"x/y/z", "x_y_z", "x/y_z", "st\u00e0ck",
+		// The adversarial one: a SAFE name shaped exactly like the slug of
+		// "a/b". A PR could add a stack with this name to share another
+		// stack's lock.
+		"a_b" + digestSep + shortHash("a/b"),
+		"key" + digestSep + shortHash("///"),
 	}
-	for _, group := range groups {
-		seen := map[string]string{}
-		for _, in := range group {
-			got := SlugComponent(in, "stack")
-			if prev, dup := seen[got]; dup {
-				t.Errorf("%q and %q both slug to %q", prev, in, got)
-			}
-			seen[got] = in
+	seen := map[string]string{}
+	for _, in := range inputs {
+		got := SlugComponent(in, "stack")
+		if prev, dup := seen[got]; dup {
+			t.Errorf("%q and %q both slug to %q", prev, in, got)
 		}
-	}
-}
-
-// TestSlugComponentIsIdempotent is load-bearing: lock keys are parsed back
-// into components and re-derived, so slug(slug(x)) must equal slug(x).
-func TestSlugComponentIsIdempotent(t *testing.T) {
-	t.Parallel()
-	for _, in := range []string{
-		"api", "my-project", "my_project", "", "a/b", "../../etc/passwd",
-		"///", "my stack", "stàck", "..",
-	} {
-		once := SlugComponent(in, "project")
-		twice := SlugComponent(once, "project")
-		if once != twice {
-			t.Errorf("SlugComponent(%q) = %q, but re-slugging gives %q", in, once, twice)
-		}
+		seen[got] = in
 	}
 }
 

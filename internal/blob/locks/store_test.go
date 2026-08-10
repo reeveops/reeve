@@ -324,17 +324,46 @@ func TestLockKeysAreSlugged(t *testing.T) {
 	if !strings.HasPrefix(got, "locks/") || !strings.HasSuffix(got, ".json") {
 		t.Fatalf("key shape = %q", got)
 	}
-	// parseLockKey feeds its result straight back into Get, which
-	// re-derives the key - so slugging must round-trip.
-	proj, stack, ok := parseLockKey(got)
-	if !ok {
-		t.Fatalf("parseLockKey failed on %q", got)
-	}
-	if again := s.key(proj, stack); again != got {
-		t.Fatalf("key not stable across parse/derive: %q -> %q", got, again)
-	}
 	// Names that differ only in a replaced rune must not share a lock.
 	if s.key("api", "a/b") == s.key("api", "a_b") {
 		t.Fatal("distinct stacks collapsed onto one lock object")
+	}
+	// Ordinary names stay readable.
+	if s.key("api", "prod") != "locks/api/prod.json" {
+		t.Fatalf("safe names should pass through: %q", s.key("api", "prod"))
+	}
+}
+
+// TestWalkersUseLockContentNotTheKey pins why the slug no longer has to be
+// idempotent: ListAll reads each lock's project/stack from the object's own
+// content, so a key is only ever derived from real names. Parsing names
+// back out of a key would re-slug them and address a different object.
+func TestWalkersUseLockContentNotTheKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fs, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := New(fs)
+	st.Now = func() time.Time { return time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC) }
+
+	// A stack whose name needs transforming, so its key differs from its
+	// name in a way that a key-parsing walker would get wrong.
+	const project, stack = "api", "feature/x"
+	if _, ok, err := st.TryAcquire(ctx, project, stack, corelocks.Holder{PR: 1, RunID: "r1"}, time.Hour); err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+
+	all, err := st.ListAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("ListAll returned %d locks, want 1", len(all))
+	}
+	if all[0].Project != project || all[0].Stack != stack {
+		t.Fatalf("walker reported %q/%q, want the real names %q/%q",
+			all[0].Project, all[0].Stack, project, stack)
 	}
 }
