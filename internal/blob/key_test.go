@@ -17,14 +17,14 @@ func TestSlugComponent(t *testing.T) {
 		{"plain", "api", "api"},
 		{"hyphen kept", "my-project", "my-project"},
 		{"digits kept", "env2", "env2"},
-		{"empty falls back", "", "project"},
+		{"empty is transformed, not passed through", "", "project" + digestSep + shortHash("")},
 
 		// Boundary and failure cases. A transformed name is the sanitised
 		// form, digestSep, then the digest of the ORIGINAL.
 		{"slash", "a/b", "a_b" + digestSep + shortHash("a/b")},
 		{"underscore is not pass-through", "a_b", "a_b" + digestSep + shortHash("a_b")},
-		{"traversal", "..", "key" + digestSep + shortHash("..")},
-		{"sanitises to nothing", "///", "key" + digestSep + shortHash("///")},
+		{"traversal", "..", "project" + digestSep + shortHash("..")},
+		{"sanitises to nothing", "///", "project" + digestSep + shortHash("///")},
 		{"space", "my stack", "my_stack" + digestSep + shortHash("my stack")},
 		{"unicode", "st\u00e0ck", "st_ck" + digestSep + shortHash("st\u00e0ck")},
 	}
@@ -50,33 +50,73 @@ func TestSlugComponentNeutralisesUnsafeRunes(t *testing.T) {
 	}
 }
 
-// TestSlugComponentIsInjective is the property that actually matters:
-// distinct names must never address the same lock object or plan artifact.
+// TestSlugComponentIsInjective proves the property by brute force over a
+// wide input space rather than asserting it, because reasoning about it has
+// been wrong twice: first a digest-only scheme let "a/b" and "a_b" alias,
+// then a safe name shaped like a transformed one aliased it, then the empty
+// string aliased whatever the fallback was named.
 //
-// The transformed namespace always contains digestSep, and a pass-through
-// name can never contain it, so the two classes cannot alias. That
-// disjointness is what closes the case a digest alone leaves open: a
-// component literally named "a_b<digestSep><digest of a/b>" would otherwise
-// be safe, pass through unchanged, and collide with SlugComponent("a/b").
+// Distinct names must never address the same lock object or plan artifact.
 func TestSlugComponentIsInjective(t *testing.T) {
 	t.Parallel()
-	inputs := []string{
-		"api", "my-project", "a/b", "a_b", "a.b", "a b",
-		"///", "...", "   ", "..", "api/prod", "api_prod",
-		"x/y/z", "x_y_z", "x/y_z", "st\u00e0ck",
-		// The adversarial one: a SAFE name shaped exactly like the slug of
-		// "a/b". A PR could add a stack with this name to share another
-		// stack's lock.
-		"a_b" + digestSep + shortHash("a/b"),
-		"key" + digestSep + shortHash("///"),
+
+	var inputs []string
+	// Structured, path-like, degenerate and unicode names.
+	inputs = append(inputs,
+		"", "api", "prod", "stack", "project", "key", "my-project",
+		"a/b", "a_b", "a.b", "a b", "a\\b", "a:b",
+		"..", "../..", "///", "...", "   ", "_", "__", "___",
+		"api/prod", "api_prod", "x/y/z", "x_y_z", "x/y_z",
+		"st\u00e0ck", "\u00e9", "\u4f60\u597d",
+	)
+	// Names shaped exactly like this function's own output, which is how a
+	// safe name can impersonate a transformed one.
+	for _, seed := range []string{"a/b", "///", "", "api/prod", ".."} {
+		base, _ := sanitizeComponent(seed)
+		if strings.Trim(base, "_") == "" {
+			base = "stack"
+		}
+		inputs = append(inputs, base+digestSep+shortHash(seed))
 	}
-	seen := map[string]string{}
+	// Systematic single- and double-rune names over the boundary alphabet.
+	alphabet := []string{"a", "Z", "0", "-", "_", "/", ".", " "}
+	for _, x := range alphabet {
+		inputs = append(inputs, x)
+		for _, y := range alphabet {
+			inputs = append(inputs, x+y, "p"+x+"q"+y)
+		}
+	}
+
+	seen := make(map[string]string, len(inputs))
 	for _, in := range inputs {
 		got := SlugComponent(in, "stack")
-		if prev, dup := seen[got]; dup {
-			t.Errorf("%q and %q both slug to %q", prev, in, got)
+		if got == "" {
+			t.Errorf("SlugComponent(%q) produced an empty component", in)
+		}
+		if strings.ContainsAny(got, "/. ") {
+			t.Errorf("SlugComponent(%q) = %q contains an unsafe rune", in, got)
+		}
+		if prev, dup := seen[got]; dup && prev != in {
+			t.Errorf("COLLISION: %q and %q both slug to %q", prev, in, got)
 		}
 		seen[got] = in
+	}
+}
+
+// TestSlugComponentEmptyDoesNotAliasFallback is the case reasoning missed:
+// returning the fallback verbatim put it in the pass-through namespace, so
+// an empty name and a stack literally named "stack" shared a lock object.
+func TestSlugComponentEmptyDoesNotAliasFallback(t *testing.T) {
+	t.Parallel()
+	for _, fb := range []string{"stack", "project", "key"} {
+		empty := SlugComponent("", fb)
+		named := SlugComponent(fb, fb)
+		if empty == named {
+			t.Errorf("empty name and a component named %q both map to %q", fb, empty)
+		}
+		if !strings.Contains(empty, digestSep) {
+			t.Errorf("empty input escaped the transformed namespace: %q", empty)
+		}
 	}
 }
 
