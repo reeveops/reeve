@@ -6,10 +6,15 @@ import (
 	"strings"
 )
 
-// slugHashLen is how much of the disambiguating digest is kept. 8 hex chars
-// is 32 bits: ample for distinguishing the stack names in one repo, and
-// short enough to keep keys readable.
-const slugHashLen = 8
+// slugHashLen is how much of the disambiguating digest is kept: 32 hex
+// chars, i.e. the full 128 bits.
+//
+// Shorter is tempting for readability, but these names come from the repo
+// under review. At 32 bits an author needs only ~65k unsafe names sharing
+// one sanitised form to have a material birthday-collision chance, and a
+// collision points two distinct stacks at one lock object. Keys here are
+// machine-read, so length costs nothing worth having.
+const slugHashLen = 32
 
 // SlugComponent makes an arbitrary name safe to use as a single path
 // component in a blob key. fallback is used when the input has no usable

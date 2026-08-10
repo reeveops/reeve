@@ -58,6 +58,7 @@ func TestPlanArtifactKeyCannotEscapeTheRunPrefix(t *testing.T) {
 
 // A local run (PR 0) keys under runs/local/, matching where its manifest goes.
 func TestPlanArtifactKeyForLocalRuns(t *testing.T) {
+	t.Parallel()
 	got := PlanArtifactKey(0, "run-1-abc", "api/prod")
 	const prefix = "runs/local/run-1-abc/plans/"
 	if !strings.HasPrefix(got, prefix) || !strings.HasSuffix(got, ".plan") {
