@@ -156,6 +156,7 @@ func (s *nonEnforcingStore) List(_ context.Context, _ string) ([]string, error) 
 // checked here - so on a non-enforcing bucket the entries would have been
 // silently overwritable while still appearing protected.
 func TestWriteRefusesBackendWithoutConditionalWrites(t *testing.T) {
+	t.Parallel()
 	w := NewWriter(&nonEnforcingStore{})
 	err := w.Write(context.Background(), Entry{
 		RunID:     "apply-1-abc1234",

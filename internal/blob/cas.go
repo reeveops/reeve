@@ -54,11 +54,19 @@ func (p *CASProbe) Ensure(ctx context.Context, s Store) error {
 	return err
 }
 
-// probeConditionalWrites creates a probe object with If-None-Match:*, then
-// attempts a second conditional create of the same key, which MUST fail
-// with a precondition error. Some S3-compatibles accept the If-* headers
-// and silently ignore them - both writes succeed, and every guarantee built
-// on top would be imaginary.
+// probeConditionalWrites verifies BOTH halves of the compare-and-swap
+// contract, because lock correctness needs both:
+//
+//  1. If-None-Match:* - a second create of an existing key must fail. This
+//     is what makes "acquire an unheld lock" exclusive.
+//  2. If-Match:<etag> - a write carrying a stale ETag must fail. This is
+//     what makes the mutate loop's read-modify-write safe; a backend can
+//     honour create-if-absent and still ignore ETags on update, in which
+//     case two runs would happily overwrite each other's lock state.
+//
+// Some S3-compatibles accept the If-* headers and silently ignore them, so
+// the probe asserts the failures rather than trusting the headers were
+// understood. The probe object is deleted best-effort.
 func probeConditionalWrites(ctx context.Context, s Store) error {
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
@@ -68,18 +76,63 @@ func probeConditionalWrites(ctx context.Context, s Store) error {
 	defer func() {
 		_ = s.Delete(ctx, key)
 	}()
-	if _, err := s.PutIfMatch(ctx, key, strings.NewReader("probe"), ""); err != nil {
+
+	// 1. Create-if-absent must succeed, then must fail on the second try.
+	first, err := s.PutIfMatch(ctx, key, strings.NewReader("probe"), "")
+	if err != nil {
 		return fmt.Errorf("conditional-write probe: initial create failed: %w", err)
 	}
-	_, err := s.PutIfMatch(ctx, key, strings.NewReader("probe2"), "")
-	switch {
+	switch _, err := s.PutIfMatch(ctx, key, strings.NewReader("probe2"), ""); {
 	case err == nil:
-		// A second create-if-absent of an existing key succeeded: the
-		// backend is not enforcing conditions. Fail loudly.
 		return ErrConditionalWritesUnsupported
-	case errors.Is(err, ErrPreconditionFailed):
-		return nil // enforced, as required
-	default:
+	case !errors.Is(err, ErrPreconditionFailed):
 		return fmt.Errorf("conditional-write probe: %w", err)
 	}
+
+	// 2. If-Match. The ETag comes from the create when the backend returns
+	// one, otherwise from a read - Store implementations are not required
+	// to populate metadata on write.
+	etag := ""
+	if first != nil {
+		etag = first.ETag
+	}
+	if etag == "" {
+		rc, md, err := s.Get(ctx, key)
+		if err != nil {
+			return fmt.Errorf("conditional-write probe: read back failed: %w", err)
+		}
+		_ = rc.Close()
+		if md != nil {
+			etag = md.ETag
+		}
+	}
+	if etag == "" {
+		// Without an ETag the caller's mutate loop has nothing to compare,
+		// so the guarantee cannot hold whatever the backend does with the
+		// header.
+		return fmt.Errorf("%w: backend returns no ETag to compare against", ErrConditionalWritesUnsupported)
+	}
+
+	// A write carrying the current ETag must succeed...
+	updated, err := s.PutIfMatch(ctx, key, strings.NewReader("probe3"), etag)
+	if err != nil {
+		return fmt.Errorf("conditional-write probe: matched update failed: %w", err)
+	}
+	// ...and that same ETag, now stale, must be refused.
+	newETag := ""
+	if updated != nil {
+		newETag = updated.ETag
+	}
+	if newETag == etag {
+		// The object changed but the ETag did not, so If-Match can never
+		// detect a lost update.
+		return fmt.Errorf("%w: ETag did not change after a write", ErrConditionalWritesUnsupported)
+	}
+	switch _, err := s.PutIfMatch(ctx, key, strings.NewReader("probe4"), etag); {
+	case err == nil:
+		return ErrConditionalWritesUnsupported
+	case !errors.Is(err, ErrPreconditionFailed):
+		return fmt.Errorf("conditional-write probe: %w", err)
+	}
+	return nil
 }

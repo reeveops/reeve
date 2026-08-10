@@ -313,21 +313,28 @@ func TestPromotedDeadReservationAdoptedByNextSamePRRun(t *testing.T) {
 // review (Pulumi.yaml, stack filenames); plan artifacts already slug for
 // the same reason, and lock keys did not.
 func TestLockKeysAreSlugged(t *testing.T) {
+	t.Parallel()
 	s := New(nil)
 	got := s.key("../../etc", "a/b")
+	// Exactly two separators: locks/<project>/<stack>.json. Nothing from
+	// the hostile names may add depth or escape.
 	if strings.Contains(got, "..") || strings.Count(got, "/") != 2 {
 		t.Fatalf("hostile names produced key %q", got)
 	}
-	if got != "locks/______etc/a_b.json" {
-		t.Fatalf("key = %q", got)
+	if !strings.HasPrefix(got, "locks/") || !strings.HasSuffix(got, ".json") {
+		t.Fatalf("key shape = %q", got)
 	}
-	// parseLockKey feeds its result straight back into Get, which re-derives
-	// the key - so slugging must round-trip.
+	// parseLockKey feeds its result straight back into Get, which
+	// re-derives the key - so slugging must round-trip.
 	proj, stack, ok := parseLockKey(got)
 	if !ok {
 		t.Fatalf("parseLockKey failed on %q", got)
 	}
 	if again := s.key(proj, stack); again != got {
 		t.Fatalf("key not stable across parse/derive: %q -> %q", got, again)
+	}
+	// Names that differ only in a replaced rune must not share a lock.
+	if s.key("api", "a/b") == s.key("api", "a_b") {
+		t.Fatal("distinct stacks collapsed onto one lock object")
 	}
 }
