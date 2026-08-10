@@ -61,27 +61,37 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-            exit 0
+            TAG="$GITHUB_REF_NAME"
+          else
+            # Latest stable tag. The glob alone also matches prereleases
+            # (v1.0.0-rc1) and malformed tags (v9junk.0.0), so keep only exact
+            # canonical vMAJOR.MINOR.PATCH.
+            LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+            LATEST="${LATEST:-v0.0.0}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
+            case "$BUMP" in
+              major) TAG="v$((MAJOR + 1)).0.0" ;;
+              minor) TAG="v${MAJOR}.$((MINOR + 1)).0" ;;
+              patch) TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+              *) echo "::error::invalid bump '$BUMP'"; exit 1 ;;
+            esac
+            echo "Releasing $TAG (bump: $BUMP from $LATEST)"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG"
+            git push origin "$TAG"
           fi
-          # Latest stable tag. The glob alone also matches prereleases
-          # (v1.0.0-rc1) and malformed tags (v9junk.0.0), so keep only exact
-          # canonical vMAJOR.MINOR.PATCH.
-          LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
-          LATEST="${LATEST:-v0.0.0}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
-          case "$BUMP" in
-            major) TAG="v$((MAJOR + 1)).0.0" ;;
-            minor) TAG="v${MAJOR}.$((MINOR + 1)).0" ;;
-            patch) TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
-            *) echo "::error::invalid bump '$BUMP'"; exit 1 ;;
-          esac
-          echo "Releasing $TAG (bump: $BUMP from $LATEST)"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG"
-          git push origin "$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # Release notes baseline: greatest stable tag strictly below TAG.
+          # Left to its own detection GoReleaser grabs the nearest tag behind
+          # HEAD, which is one of edge-build's per-commit master-<sha>
+          # prerelease tags - the notes then cover a single commit.
+          PREV=$(git tag --list 'v[0-9]*' --sort=version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | awk -v t="$TAG" '$0 == t {exit} {p = $0} END {print p}')
+          echo "Notes range: ${PREV:-<repo start>} -> $TAG"
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -114,6 +124,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAP_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token }}
+          # Pin both ends of the changelog range so edge-build's master-<sha>
+          # tags can never be picked as current or previous.
+          GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.tag }}
+          GORELEASER_PREVIOUS_TAG: ${{ steps.tag.outputs.prev }}
 
       # Point the floating major tag (v0, v1, ...) at this release so consumers
       # who pin @master always get the latest v0.x. Skipped for prerelease tags
