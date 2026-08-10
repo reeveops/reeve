@@ -20,6 +20,12 @@ permissions:
   packages: write
   id-token: write # sigstore keyless
 
+# One release at a time. Concurrent dispatches would compute the same next
+# tag; never cancel a release mid-publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -35,6 +41,9 @@ jobs:
           private-key: ${{ secrets.HOMEBREW_TAP_KEY }}
           owner: reeveops
           repositories: homebrew-tap
+          # Scope the minted token to the one permission the cask commit
+          # needs, instead of inheriting every app permission.
+          permission-contents: write
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
