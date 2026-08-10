@@ -3,6 +3,7 @@ package gcpwif
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/reeveops/reeve/internal/auth"
 )
 
 // Secret-shaped fixtures so redaction assertions catch leaks into error
@@ -260,5 +263,85 @@ func TestWriteAmbientCreds(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("credentials file mode = %o, want 0600", perm)
+	}
+}
+
+// TestAcquireRejectsUnparseableExpiry pins that a bad expireTime fails
+// rather than being swallowed. Credential.ExpiresAt documents the zero
+// value as "no expiry", so silently defaulting to it advertised a 1-hour
+// impersonation token as one that never expires - and anything downstream
+// deciding whether to refresh would have believed it.
+func TestAcquireRejectsUnparseableExpiry(t *testing.T) {
+	oidc, _ := oidcServer(t)
+	setOIDCEnv(t, oidc.URL)
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"` + fakeSTSToken + `"}`))
+	}))
+	defer sts.Close()
+	setSTSEndpoint(t, sts.URL)
+	iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"accessToken":"sa-token","expireTime":"not-a-timestamp"}`))
+	}))
+	defer iam.Close()
+	setIAMBase(t, iam.URL)
+
+	p := New("gcp", testWIP, testSA, "", 0)
+	cred, err := p.Acquire(context.Background())
+	if err == nil {
+		t.Fatalf("unparseable expireTime accepted; ExpiresAt=%v would read as no-expiry", cred.ExpiresAt)
+	}
+	// Assert on the error type, not its text: the repo convention, and it
+	// pins that the parse failure is what surfaced rather than some other
+	// error that happens to mention the field.
+	var perr *time.ParseError
+	if !errors.As(err, &perr) {
+		t.Fatalf("want a *time.ParseError, got %T: %v", err, err)
+	}
+	// The token must not leak while reporting a parse failure.
+	if strings.Contains(err.Error(), "sa-token") {
+		t.Errorf("error leaks the access token: %v", err)
+	}
+}
+
+// TestAcquireRejectsMissingAccessToken guards the sibling cases: a 200
+// with no token, or one whose expiry has already passed, must not be handed
+// on as a credential.
+func TestAcquireRejectsMissingAccessToken(t *testing.T) {
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	cases := []struct {
+		name string
+		body string
+		want error
+	}{
+		{"no token", `{"expireTime":"` + future + `"}`, auth.ErrNoToken},
+		{"empty token", `{"accessToken":"","expireTime":"` + future + `"}`, auth.ErrNoToken},
+		{"no expiry", `{"accessToken":"sa-token"}`, auth.ErrNoExpiry},
+		{"already expired", `{"accessToken":"sa-token","expireTime":"` + past + `"}`, auth.ErrExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			oidc, _ := oidcServer(t)
+			setOIDCEnv(t, oidc.URL)
+			sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"access_token":"` + fakeSTSToken + `"}`))
+			}))
+			defer sts.Close()
+			setSTSEndpoint(t, sts.URL)
+			iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer iam.Close()
+			setIAMBase(t, iam.URL)
+
+			p := New("gcp", testWIP, testSA, "", 0)
+			cred, err := p.Acquire(context.Background())
+			if err == nil {
+				t.Fatalf("accepted an incomplete response: %+v", cred)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want errors.Is(%v)", err, tc.want)
+			}
+		})
 	}
 }

@@ -6,11 +6,14 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/reeveops/reeve/internal/auth"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -199,5 +202,47 @@ func TestAcquireBadKeyFailsBeforeNetwork(t *testing.T) {
 	_, err := p.Acquire(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "sign jwt") {
 		t.Fatalf("error = %v, want sign jwt failure", err)
+	}
+}
+
+// TestAcquireRejectsIncompleteToken pins the exchange contract shared by
+// every credential provider: a 201 that omits the token, or its expiry, or
+// carries an expiry already in the past, must fail rather than yield a
+// credential. A missing expires_at decodes to the zero time, which
+// Credential.ExpiresAt documents as "never expires" - an installation token
+// lasts an hour.
+func TestAcquireRejectsIncompleteToken(t *testing.T) {
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	cases := []struct {
+		name string
+		body string
+		want error
+	}{
+		{"no token", `{"expires_at":"` + future + `"}`, auth.ErrNoToken},
+		{"empty token", `{"token":"","expires_at":"` + future + `"}`, auth.ErrNoToken},
+		{"no expiry", `{"token":"ghs_abc"}`, auth.ErrNoExpiry},
+		{"explicit zero expiry", `{"token":"ghs_abc","expires_at":"0001-01-01T00:00:00Z"}`, auth.ErrNoExpiry},
+		{"already expired", `{"token":"ghs_abc","expires_at":"` + past + `"}`, auth.ErrExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, pemBytes := genKey(t, "pkcs8")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(201)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			setAPIBase(t, srv.URL)
+
+			p := New("gh", 1, 2, pemBytes)
+			cred, err := p.Acquire(context.Background())
+			if err == nil {
+				t.Fatalf("accepted an incomplete response: %+v", cred)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want errors.Is(%v)", err, tc.want)
+			}
+		})
 	}
 }

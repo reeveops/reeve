@@ -102,7 +102,18 @@ func tokenExchange(ctx context.Context, tenant, clientID, assertion string) (str
 	if err := json.Unmarshal(body, &out); err != nil {
 		return "", time.Time{}, err
 	}
-	return out.AccessToken, time.Now().Add(time.Duration(out.ExpiresIn) * time.Second), nil
+	now := time.Now()
+	// expires_in is seconds-from-now, so it needs bounding before it is
+	// multiplied: anything above MaxExpiresInSeconds overflows
+	// time.Duration and lands the expiry in the past.
+	exp, err := auth.ExpiresInToTime(int64(out.ExpiresIn), now)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if err := auth.ValidateExchange(out.AccessToken, exp, now); err != nil {
+		return "", time.Time{}, err
+	}
+	return out.AccessToken, exp, nil
 }
 
 var _ auth.Provider = (*Provider)(nil)

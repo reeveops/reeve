@@ -2,11 +2,14 @@ package azurefed
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/reeveops/reeve/internal/auth"
 )
 
 // Secret-shaped fixtures so redaction assertions catch leaks into error
@@ -150,10 +153,23 @@ func TestAcquireExchangeFailure(t *testing.T) {
 		name    string
 		status  int
 		body    string
-		wantSub string
+		wantSub string // for non-sentinel failures
+		wantErr error  // sentinel, matched with errors.Is
 	}{
-		{"non-2xx", 401, `{"error":"invalid_client"}`, "azure token exchange 401"},
-		{"malformed json", 200, `{"access_token":`, "unexpected end"},
+		{name: "non-2xx", status: 401, body: `{"error":"invalid_client"}`, wantSub: "azure token exchange 401"},
+		{name: "malformed json", status: 200, body: `{"access_token":`, wantSub: "unexpected end"},
+		// The exchange contract: a 200 must still carry a usable token and
+		// a usable, future expiry.
+		{name: "no access token", status: 200, body: `{"expires_in":3600}`, wantErr: auth.ErrNoToken},
+		{name: "empty access token", status: 200, body: `{"access_token":"","expires_in":3600}`, wantErr: auth.ErrNoToken},
+		{name: "no expiry", status: 200, body: `{"access_token":"tok"}`, wantErr: auth.ErrNoExpiry},
+		{name: "zero expiry", status: 200, body: `{"access_token":"tok","expires_in":0}`, wantErr: auth.ErrNoExpiry},
+		{name: "negative expiry", status: 200, body: `{"access_token":"tok","expires_in":-5}`, wantErr: auth.ErrNoExpiry},
+		// expires_in is multiplied by time.Second, so an oversized value
+		// overflows time.Duration and lands the expiry in the past.
+		{name: "overflowing expiry", status: 200,
+			body:    `{"access_token":"tok","expires_in":9223372037}`,
+			wantErr: auth.ErrNoExpiry},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,13 +184,19 @@ func TestAcquireExchangeFailure(t *testing.T) {
 
 			p := New("az", testTenant, testClient, testSub, "", 0)
 			_, err := p.Acquire(context.Background())
-			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want errors.Is(%v)", err, tc.wantErr)
+			}
+			if tc.wantSub != "" && !strings.Contains(err.Error(), tc.wantSub) {
 				t.Fatalf("error = %v, want substring %q", err, tc.wantSub)
 			}
 			// Redaction contract: the OIDC assertion never appears in
 			// error strings.
 			if strings.Contains(err.Error(), fakeOIDCToken) {
-				t.Errorf("error leaks the assertion: %v", err)
+				t.Errorf("error leaks the OIDC assertion: %v", err)
 			}
 		})
 	}
