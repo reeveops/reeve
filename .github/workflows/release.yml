@@ -65,8 +65,9 @@ jobs:
           else
             # Latest stable tag. The glob alone also matches prereleases
             # (v1.0.0-rc1) and malformed tags (v9junk.0.0), so keep only exact
-            # canonical vMAJOR.MINOR.PATCH.
-            LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+            # canonical vMAJOR.MINOR.PATCH. Leading-zero components (v08.0.0)
+            # are rejected too: bash arithmetic reads them as octal and errors.
+            LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | head -1 || true)
             LATEST="${LATEST:-v0.0.0}"
             IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
             case "$BUMP" in
@@ -87,9 +88,17 @@ jobs:
           # Left to its own detection GoReleaser grabs the nearest tag behind
           # HEAD, which is one of edge-build's per-commit master-<sha>
           # prerelease tags - the notes then cover a single commit.
-          PREV=$(git tag --list 'v[0-9]*' --sort=version:refname \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-            | awk -v t="$TAG" '$0 == t {exit} {p = $0} END {print p}')
+          #
+          # BASE strips any prerelease suffix (v1.0.0-rc1 -> v1.0.0) so an rc
+          # baselines against the stable line, not the newest stable overall.
+          # BASE is dropped from the candidates and re-inserted, so the entry
+          # sorted just before it is the greatest strictly-lower stable tag.
+          BASE="${TAG%%-*}"
+          PREV=$(git tag --list 'v[0-9]*' \
+            | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+            | grep -vFx "$BASE" \
+            | { cat; echo "$BASE"; } | sort -V \
+            | awk -v t="$BASE" '$0 == t {exit} {p = $0} END {print p}' || true)
           echo "Notes range: ${PREV:-<repo start>} -> $TAG"
           echo "prev=$PREV" >> "$GITHUB_OUTPUT"
 
