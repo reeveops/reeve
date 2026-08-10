@@ -3,6 +3,17 @@ name: release
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: false
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
@@ -28,6 +39,39 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      # Tag-push releases use the pushed tag as-is. Dispatch releases compute
+      # the next version from the latest stable tag and push the new tag with
+      # GITHUB_TOKEN, which never re-triggers this workflow (same-token
+      # recursion protection), so the release continues in this same run with
+      # HEAD already at the tagged commit - exactly what GoReleaser needs.
+      - name: Resolve release tag
+        id: tag
+        env:
+          BUMP: ${{ github.event.inputs.bump || 'patch' }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Latest stable tag: the glob alone also matches prereleases like
+          # v1.0.0-rc1 (the * spans "-rc1"), so filter hyphenated tags out.
+          LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -vF -- '-' | head -1 || true)
+          LATEST="${LATEST:-v0.0.0}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
+          case "$BUMP" in
+            major) TAG="v$((MAJOR + 1)).0.0" ;;
+            minor) TAG="v${MAJOR}.$((MINOR + 1)).0" ;;
+            patch) TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+            *) echo "::error::invalid bump '$BUMP'"; exit 1 ;;
+          esac
+          echo "Releasing $TAG (bump: $BUMP from $LATEST)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -66,10 +110,12 @@ jobs:
       # (anything with a hyphen, e.g. v1.0.0-rc1). The v0 tag does not match the
       # v*.*.* trigger above, so this force-push does not re-trigger the workflow.
       - name: Move major version tag
-        if: ${{ !contains(github.ref_name, '-') }}
+        if: ${{ !contains(steps.tag.outputs.tag, '-') }}
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          MAJOR="${GITHUB_REF_NAME%%.*}"        # v0.1.0 -> v0
-          echo "Pointing $MAJOR at $GITHUB_REF_NAME"
-          git tag -f "$MAJOR" "$GITHUB_REF_NAME"
+          MAJOR="${TAG%%.*}"        # v0.1.0 -> v0
+          echo "Pointing $MAJOR at $TAG"
+          git tag -f "$MAJOR" "$TAG"
           git push origin "refs/tags/$MAJOR" --force

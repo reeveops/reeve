@@ -87,3 +87,31 @@ git push --no-verify                  # bypass hk for the initial push
 git remote set-head origin --auto     # seed origin/HEAD
 git push                              # subsequent pushes run hooks cleanly
 ```
+
+## Releasing
+
+Two ways to cut a release. Both end in the same GoReleaser pipeline
+(`.github/workflows/release.yml`).
+
+- **Dispatch (preferred):** run the `release` workflow from the Actions tab
+  and pick a bump (`patch`, `minor`, `major`). The workflow computes the next
+  version from the latest stable tag, pushes the tag, and releases in the
+  same run.
+- **Tag push:** `git tag vX.Y.Z && git push origin vX.Y.Z`. Use this for
+  prereleases (`v1.0.0-rc1`) or an exact version.
+
+The pipeline builds binaries, signs checksums with cosign, publishes the
+GitHub Release, pushes the Docker image, updates the Homebrew cask, and
+moves the floating major tag (`v0`, `v1`). Prerelease tags skip the cask
+and the major tag.
+
+### GitHub Actions Marketplace
+
+- One-time setup: accept the GitHub Marketplace Developer Agreement, then
+  publish one release from the GitHub UI with the "Publish this Action to
+  the GitHub Marketplace" checkbox ticked.
+- After that, every release the pipeline creates via the API publishes to
+  the Marketplace automatically. Draft releases do not publish, which is
+  why `.goreleaser.yaml` sets `draft: false`.
+- Marketplace requirements: `action.yml` at the repo root with unique
+  `name` and `branding`, a README, and a public repo.
