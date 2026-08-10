@@ -110,8 +110,10 @@ and the major tag.
 - One-time setup: accept the GitHub Marketplace Developer Agreement, then
   publish one release from the GitHub UI with the "Publish this Action to
   the GitHub Marketplace" checkbox ticked.
-- After that, every release the pipeline creates via the API publishes to
-  the Marketplace automatically. Draft releases do not publish, which is
-  why `.goreleaser.yaml` sets `draft: false`.
+- Marketplace publication is a manual UI step per release: edit the
+  pipeline-created release and tick the Marketplace checkbox. GitHub has no
+  supported API for this step.
+- Draft releases cannot be published to the Marketplace, which is why
+  `.goreleaser.yaml` sets `draft: false`.
 - Marketplace requirements: `action.yml` at the repo root with unique
   `name` and `branding`, a README, and a public repo.
