@@ -65,6 +65,15 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, err
 	}
+	if out.Token == "" {
+		return nil, fmt.Errorf("github app returned no installation token")
+	}
+	// A missing expires_at decodes to the zero time, which
+	// Credential.ExpiresAt documents as "never expires" - an installation
+	// token lasts an hour.
+	if out.ExpiresAt.IsZero() {
+		return nil, fmt.Errorf("github app returned no token expiry")
+	}
 	return &auth.Credential{
 		Env: map[string]string{
 			"GITHUB_TOKEN": out.Token,

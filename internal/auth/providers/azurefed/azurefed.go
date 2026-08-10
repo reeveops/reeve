@@ -102,6 +102,15 @@ func tokenExchange(ctx context.Context, tenant, clientID, assertion string) (str
 	if err := json.Unmarshal(body, &out); err != nil {
 		return "", time.Time{}, err
 	}
+	if out.AccessToken == "" {
+		return "", time.Time{}, fmt.Errorf("azure token exchange returned no access token")
+	}
+	// expires_in of 0 would place the expiry at "now", which reads as an
+	// already-dead credential; absent expiry data is an error, not a
+	// default.
+	if out.ExpiresIn <= 0 {
+		return "", time.Time{}, fmt.Errorf("azure token exchange returned no expiry (expires_in=%d)", out.ExpiresIn)
+	}
 	return out.AccessToken, time.Now().Add(time.Duration(out.ExpiresIn) * time.Second), nil
 }
 

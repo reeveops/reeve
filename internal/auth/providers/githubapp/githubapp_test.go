@@ -201,3 +201,40 @@ func TestAcquireBadKeyFailsBeforeNetwork(t *testing.T) {
 		t.Fatalf("error = %v, want sign jwt failure", err)
 	}
 }
+
+// TestAcquireRejectsIncompleteToken pins the exchange contract shared by
+// every credential provider: a 201 that omits the token, or its expiry,
+// must fail rather than yield a credential. A missing expires_at decodes to
+// the zero time, which Credential.ExpiresAt documents as "never expires" -
+// an installation token lasts an hour.
+func TestAcquireRejectsIncompleteToken(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"no token", `{"expires_at":"2026-01-01T00:00:00Z"}`, "no installation token"},
+		{"empty token", `{"token":"","expires_at":"2026-01-01T00:00:00Z"}`, "no installation token"},
+		{"no expiry", `{"token":"ghs_abc"}`, "no token expiry"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, pemBytes := genKey(t, "pkcs8")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(201)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			setAPIBase(t, srv.URL)
+
+			p := New("gh", 1, 2, pemBytes)
+			cred, err := p.Acquire(context.Background())
+			if err == nil {
+				t.Fatalf("accepted an incomplete response: %+v", cred)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}

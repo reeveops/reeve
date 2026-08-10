@@ -48,10 +48,12 @@ Rules:
 - Fork PRs receive dry-run-only credentials by default. Full creds require
   explicit per-repo opt-in documented in the repo config.
 - A credential exchange **fails** when the provider response omits the token
-  or carries an unparseable expiry. `Credential.ExpiresAt` treats the zero
-  value as "no expiry", so accepting a malformed timestamp would advertise a
-  short-lived token as permanent - the wrong default direction for anything
-  federated.
+  or carries a missing/unparseable expiry. Applies to every provider that
+  performs an exchange: `aws_oidc`, `gcp_wif`, `azure_federated`,
+  `github_app`.
+- `Credential.ExpiresAt` treats the zero value as "no expiry", so accepting
+  a malformed or absent timestamp would advertise a short-lived token as
+  permanent - the wrong default direction for anything federated.
 
 ## `state.secrets_provider` boundary
 

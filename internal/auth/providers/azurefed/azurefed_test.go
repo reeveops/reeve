@@ -154,6 +154,12 @@ func TestAcquireExchangeFailure(t *testing.T) {
 	}{
 		{"non-2xx", 401, `{"error":"invalid_client"}`, "azure token exchange 401"},
 		{"malformed json", 200, `{"access_token":`, "unexpected end"},
+		// The exchange contract: a 200 must still carry a usable token and
+		// a usable expiry, or the credential is a fiction.
+		{"no access token", 200, `{"expires_in":3600}`, "no access token"},
+		{"empty access token", 200, `{"access_token":"","expires_in":3600}`, "no access token"},
+		{"no expiry", 200, `{"access_token":"tok"}`, "no expiry"},
+		{"zero expiry", 200, `{"access_token":"tok","expires_in":0}`, "no expiry"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
