@@ -17,7 +17,6 @@ import (
 	"github.com/reeveops/reeve/internal/core/preconditions"
 	"github.com/reeveops/reeve/internal/core/render"
 	"github.com/reeveops/reeve/internal/vcs"
-	"github.com/reeveops/reeve/internal/vcs/codeowners"
 )
 
 // explainVCS is the read-only VCS surface explain needs: PR facts,
@@ -135,56 +134,31 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	// a failed read of a gate input degrades that gate to "could not be
 	// evaluated" instead of killing the whole report - the commenter asking
 	// "why?" still gets an answer for everything that could be read.
-	checksGreen, _, cerr := in.VCS.ChecksGreen(ctx, commitSHA, vcs.ChecksGreenOpts{
-		IgnoreRunID: in.CIRunID, IgnoreNames: in.SelfCheckNames,
-	})
-	checksReason := ""
-	if cerr != nil {
-		slog.Warn("explain: checks_green unavailable", "err", cerr)
-		checksGreen = false
-		checksReason = "could not be evaluated: " + cerr.Error()
-	}
-	behind, berr := in.VCS.CompareBranches(ctx, pr.BaseRef, commitSHA)
-	upToDateReason := ""
-	if berr != nil {
-		slog.Warn("explain: branch comparison unavailable", "base", pr.BaseRef, "err", berr)
-		behind = -1 // fail the gate closed; the reason override below says why
-		upToDateReason = "could not be evaluated: " + berr.Error()
-	}
-
-	appCfg := toApprovalsConfig(in.Shared)
-	approvalHeadSHA := pr.HeadSHA
-	if approvalHeadSHA == "" {
-		approvalHeadSHA = commitSHA
-	}
-	approvalPR := approvals.PR{
-		Number: in.PRNumber, HeadSHA: approvalHeadSHA, Author: pr.Author, Changed: changed,
-	}
-	var reviewApprovals, commentApprovals []approvals.Approval
-	if appCfg.PRReviewEnabled() {
-		if reviewApprovals, err = in.VCS.ListApprovals(ctx, approvalPR); err != nil {
-			return nil, fmt.Errorf("list approvals: %w", err)
-		}
-	}
-	if appCfg.PRCommentEnabled() {
-		commentCfg := in.CommentApproval
-		if commentCfg.Command == "" {
-			commentCfg.Command = appCfg.CommentCommand()
-		}
-		if commentApprovals, err = in.VCS.ListCommentApprovals(ctx, approvalPR, commentCfg); err != nil {
-			return nil, fmt.Errorf("list comment approvals: %w", err)
-		}
-	}
-	rawApprovals := approvals.MergeApprovals(reviewApprovals, commentApprovals)
-
-	coContent, err := in.VCS.FetchCodeowners(ctx)
+	gi, err := gatherGateInputs(ctx, in.VCS, in.Shared, in.CommentApproval,
+		in.PRNumber, pr, commitSHA, changed,
+		vcs.ChecksGreenOpts{IgnoreRunID: in.CIRunID, IgnoreNames: in.SelfCheckNames})
 	if err != nil {
-		return nil, fmt.Errorf("fetch codeowners: %w", err)
+		return nil, err
 	}
-	var coResolved map[string][]string
-	if coContent != "" {
-		coResolved = codeowners.Resolve(codeowners.Parse(strings.NewReader(coContent)), changed)
+	// Explain is a diagnostic, so an input it could not read degrades that
+	// one gate to "could not be evaluated" rather than killing the report -
+	// the commenter asking "why?" still gets an answer for the rest. The
+	// values are already fail-closed, so the gates themselves stay honest.
+	checksGreen := gi.ChecksGreen
+	checksReason := ""
+	if gi.ChecksErr != nil {
+		slog.Warn("explain: checks_green unavailable", "err", gi.ChecksErr)
+		checksReason = "could not be evaluated: " + gi.ChecksErr.Error()
 	}
+	behind := gi.Behind
+	upToDateReason := ""
+	if gi.CompareErr != nil {
+		slog.Warn("explain: branch comparison unavailable", "base", pr.BaseRef, "err", gi.CompareErr)
+		upToDateReason = "could not be evaluated: " + gi.CompareErr.Error()
+	}
+	appCfg := gi.ApprovalsCfg
+	rawApprovals := gi.RawApprovals
+	coResolved := gi.Codeowners
 
 	stackRules := make([]approvals.Rules, 0, len(target))
 	for _, s := range target {
@@ -207,7 +181,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 		rules := approvals.Resolve(appCfg, s.Ref())
 		rules.TeamMembers = teamMembers
 		approvalsRes := approvals.Evaluate(rules, rawApprovals, approvals.PR{
-			Number: in.PRNumber, HeadSHA: approvalHeadSHA, Author: pr.Author,
+			Number: in.PRNumber, HeadSHA: gi.ApprovalPR.HeadSHA, Author: pr.Author,
 			RepoPrivate: pr.RepoPrivate,
 		}, coResolved, pr.Author, now)
 
