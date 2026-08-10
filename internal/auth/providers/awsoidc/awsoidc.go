@@ -73,18 +73,21 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A federated exchange must yield a usable token AND a usable expiry.
-	// aws.ToTime turns a nil Expiration into the zero time, which
-	// Credential.ExpiresAt documents as "never expires" - the wrong default
-	// for a short-lived STS credential.
+	// A federated exchange must yield a usable token AND an expiry that is
+	// present and still in the future. aws.ToTime turns a nil Expiration
+	// into the zero time, which Credential.ExpiresAt documents as "never
+	// expires" - the wrong default for a short-lived STS credential.
 	if out.Credentials == nil ||
 		aws.ToString(out.Credentials.AccessKeyId) == "" ||
-		aws.ToString(out.Credentials.SecretAccessKey) == "" ||
-		aws.ToString(out.Credentials.SessionToken) == "" {
-		return nil, fmt.Errorf("sts returned incomplete credentials")
+		aws.ToString(out.Credentials.SecretAccessKey) == "" {
+		return nil, fmt.Errorf("sts returned incomplete credentials: %w", auth.ErrNoToken)
 	}
-	if aws.ToTime(out.Credentials.Expiration).IsZero() {
-		return nil, fmt.Errorf("sts returned no credential expiry")
+	if err := auth.ValidateExchange(
+		aws.ToString(out.Credentials.SessionToken),
+		aws.ToTime(out.Credentials.Expiration),
+		time.Now(),
+	); err != nil {
+		return nil, err
 	}
 	env := map[string]string{
 		"AWS_ACCESS_KEY_ID":     aws.ToString(out.Credentials.AccessKeyId),

@@ -158,11 +158,22 @@ The impersonation response is validated before use:
 
 - `accessToken` must be present and non-empty.
 - `expireTime` must be a parseable RFC3339 timestamp.
-- Either one missing or malformed fails the acquire.
+- The expiry must be in the future.
+- Any of those failing fails the acquire.
 
-A credential with no usable expiry reads as "never expires" - the zero value
-of `Credential.ExpiresAt` - which would advertise a one-hour token as
-permanent. Every credential provider applies the same rule.
+Every credential provider applies the same three rules (`internal/auth`
+`ValidateExchange`), and each returns the same sentinel errors:
+`ErrNoToken`, `ErrNoExpiry`, `ErrExpired`.
+
+Why the expiry is not optional:
+
+- `Credential.ExpiresAt` treats the zero value as "no expiry", so an absent
+  or malformed timestamp advertises a one-hour token as permanent.
+- An already-expired credential fails opaquely partway through an engine
+  run instead of failing here, where the cause is obvious.
+- Providers reporting `expires_in` (seconds) are bounded before conversion:
+  a value large enough to overflow `time.Duration` would otherwise wrap and
+  land the expiry in the past.
 
 ### GCP setup
 

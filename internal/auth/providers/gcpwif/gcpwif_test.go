@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/reeveops/reeve/internal/auth"
 )
 
 // Secret-shaped fixtures so redaction assertions catch leaks into error
@@ -301,24 +303,45 @@ func TestAcquireRejectsUnparseableExpiry(t *testing.T) {
 	}
 }
 
-// TestAcquireRejectsMissingAccessToken guards the sibling case: a 200 with
-// no token must not be handed on as an empty credential.
+// TestAcquireRejectsMissingAccessToken guards the sibling cases: a 200
+// with no token, or one whose expiry has already passed, must not be handed
+// on as a credential.
 func TestAcquireRejectsMissingAccessToken(t *testing.T) {
-	oidc, _ := oidcServer(t)
-	setOIDCEnv(t, oidc.URL)
-	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"access_token":"` + fakeSTSToken + `"}`))
-	}))
-	defer sts.Close()
-	setSTSEndpoint(t, sts.URL)
-	iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"expireTime":"2026-01-01T00:00:00Z"}`))
-	}))
-	defer iam.Close()
-	setIAMBase(t, iam.URL)
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	cases := []struct {
+		name string
+		body string
+		want error
+	}{
+		{"no token", `{"expireTime":"` + future + `"}`, auth.ErrNoToken},
+		{"empty token", `{"accessToken":"","expireTime":"` + future + `"}`, auth.ErrNoToken},
+		{"no expiry", `{"accessToken":"sa-token"}`, auth.ErrNoExpiry},
+		{"already expired", `{"accessToken":"sa-token","expireTime":"` + past + `"}`, auth.ErrExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			oidc, _ := oidcServer(t)
+			setOIDCEnv(t, oidc.URL)
+			sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"access_token":"` + fakeSTSToken + `"}`))
+			}))
+			defer sts.Close()
+			setSTSEndpoint(t, sts.URL)
+			iam := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer iam.Close()
+			setIAMBase(t, iam.URL)
 
-	p := New("gcp", testWIP, testSA, "", 0)
-	if _, err := p.Acquire(context.Background()); err == nil {
-		t.Fatal("a response with no access token was accepted")
+			p := New("gcp", testWIP, testSA, "", 0)
+			cred, err := p.Acquire(context.Background())
+			if err == nil {
+				t.Fatalf("accepted an incomplete response: %+v", cred)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want errors.Is(%v)", err, tc.want)
+			}
+		})
 	}
 }

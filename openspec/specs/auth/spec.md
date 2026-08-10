@@ -47,13 +47,16 @@ Rules:
   AND emits a loud warning every run. Lint flags as ERROR without the field.
 - Fork PRs receive dry-run-only credentials by default. Full creds require
   explicit per-repo opt-in documented in the repo config.
-- A credential exchange **fails** when the provider response omits the token
-  or carries a missing/unparseable expiry. Applies to every provider that
-  performs an exchange: `aws_oidc`, `gcp_wif`, `azure_federated`,
-  `github_app`.
+- A credential exchange **fails** when the provider response omits the
+  token, omits or malforms the expiry, or reports an expiry that is not in
+  the future. Applies to every provider that performs an exchange:
+  `aws_oidc`, `gcp_wif`, `azure_federated`, `github_app`.
 - `Credential.ExpiresAt` treats the zero value as "no expiry", so accepting
   a malformed or absent timestamp would advertise a short-lived token as
   permanent - the wrong default direction for anything federated.
+- An expiry expressed as a relative `expires_in` MUST be bounded before
+  conversion: a value large enough to overflow the duration type wraps and
+  yields an expiry in the past.
 
 ## `state.secrets_provider` boundary
 
