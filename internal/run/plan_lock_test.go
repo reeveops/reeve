@@ -58,8 +58,24 @@ func TestPlanArtifactKeyCannotEscapeTheRunPrefix(t *testing.T) {
 
 // A local run (PR 0) keys under runs/local/, matching where its manifest goes.
 func TestPlanArtifactKeyForLocalRuns(t *testing.T) {
-	if got := PlanArtifactKey(0, "run-1-abc", "api/prod"); got != "runs/local/run-1-abc/plans/api_prod.plan" {
+	t.Parallel()
+	got := PlanArtifactKey(0, "run-1-abc", "api/prod")
+	const prefix = "runs/local/run-1-abc/plans/"
+	if !strings.HasPrefix(got, prefix) || !strings.HasSuffix(got, ".plan") {
 		t.Errorf("PlanArtifactKey(local) = %q", got)
+	}
+	// The slug carries a digest when it replaces a rune (a stack ref always
+	// contains "/"), so assert the shape rather than a literal: fixed depth,
+	// and stable across calls.
+	if strings.Contains(strings.TrimPrefix(got, prefix), "/") {
+		t.Errorf("local plan key added depth: %q", got)
+	}
+	if again := PlanArtifactKey(0, "run-1-abc", "api/prod"); again != got {
+		t.Errorf("key not deterministic: %q vs %q", got, again)
+	}
+	// Distinct refs must not share an artifact.
+	if PlanArtifactKey(0, "run-1-abc", "a/b") == PlanArtifactKey(0, "run-1-abc", "a_b") {
+		t.Error("distinct stack refs collapsed onto one plan artifact")
 	}
 }
 

@@ -3,6 +3,7 @@ package locks
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -304,5 +305,65 @@ func TestPromotedDeadReservationAdoptedByNextSamePRRun(t *testing.T) {
 	// An actively acquired same-PR holder is still the double-apply guard.
 	if _, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "concurrent"}, time.Hour); ok || !errors.Is(err, corelocks.ErrHeldBySamePR) {
 		t.Fatalf("active same-PR holder must refuse: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestLockKeysAreSlugged pins that lock object keys are built from
+// sanitised components. Project and stack names originate in the repo under
+// review (Pulumi.yaml, stack filenames); plan artifacts already slug for
+// the same reason, and lock keys did not.
+func TestLockKeysAreSlugged(t *testing.T) {
+	t.Parallel()
+	s := New(nil)
+	got := s.key("../../etc", "a/b")
+	// Exactly two separators: locks/<project>/<stack>.json. Nothing from
+	// the hostile names may add depth or escape.
+	if strings.Contains(got, "..") || strings.Count(got, "/") != 2 {
+		t.Fatalf("hostile names produced key %q", got)
+	}
+	if !strings.HasPrefix(got, "locks/") || !strings.HasSuffix(got, ".json") {
+		t.Fatalf("key shape = %q", got)
+	}
+	// Names that differ only in a replaced rune must not share a lock.
+	if s.key("api", "a/b") == s.key("api", "a_b") {
+		t.Fatal("distinct stacks collapsed onto one lock object")
+	}
+	// Ordinary names stay readable.
+	if s.key("api", "prod") != "locks/api/prod.json" {
+		t.Fatalf("safe names should pass through: %q", s.key("api", "prod"))
+	}
+}
+
+// TestWalkersUseLockContentNotTheKey pins why the slug no longer has to be
+// idempotent: ListAll reads each lock's project/stack from the object's own
+// content, so a key is only ever derived from real names. Parsing names
+// back out of a key would re-slug them and address a different object.
+func TestWalkersUseLockContentNotTheKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fs, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := New(fs)
+	st.Now = func() time.Time { return time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC) }
+
+	// A stack whose name needs transforming, so its key differs from its
+	// name in a way that a key-parsing walker would get wrong.
+	const project, stack = "api", "feature/x"
+	if _, ok, err := st.TryAcquire(ctx, project, stack, corelocks.Holder{PR: 1, RunID: "r1"}, time.Hour); err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+
+	all, err := st.ListAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("ListAll returned %d locks, want 1", len(all))
+	}
+	if all[0].Project != project || all[0].Stack != stack {
+		t.Fatalf("walker reported %q/%q, want the real names %q/%q",
+			all[0].Project, all[0].Stack, project, stack)
 	}
 }

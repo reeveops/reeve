@@ -1,10 +1,14 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
@@ -100,5 +104,69 @@ func TestBreakGlassEntryRoundTrip(t *testing.T) {
 	}
 	if got.RunURL != "https://ci.example/run/9" {
 		t.Fatalf("run_url missing: %+v", got)
+	}
+}
+
+// nonEnforcingStore accepts conditional writes without honouring them - the
+// backend class the probe exists to reject.
+type nonEnforcingStore struct {
+	mu sync.Mutex
+	m  map[string][]byte
+}
+
+func (s *nonEnforcingStore) Get(_ context.Context, key string) (io.ReadCloser, *blob.Metadata, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.m[key]
+	if !ok {
+		return nil, nil, blob.ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(b)), &blob.Metadata{ETag: "e"}, nil
+}
+
+func (s *nonEnforcingStore) Put(_ context.Context, key string, r io.Reader) (*blob.Metadata, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = map[string][]byte{}
+	}
+	s.m[key] = b
+	return &blob.Metadata{ETag: "e"}, nil
+}
+
+func (s *nonEnforcingStore) PutIfMatch(ctx context.Context, key string, r io.Reader, _ string) (*blob.Metadata, error) {
+	return s.Put(ctx, key, r) // ignores the condition: the bug under test
+}
+func (s *nonEnforcingStore) Delete(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.m, key)
+	return nil
+}
+func (s *nonEnforcingStore) List(_ context.Context, _ string) ([]string, error) { return nil, nil }
+
+// TestWriteRefusesBackendWithoutConditionalWrites pins the write-once claim.
+// SECURITY.md advertises audit entries as write-once, but that rests
+// entirely on the backend honouring If-None-Match. The guarantee used to be
+// inherited from whatever probed first (in practice the lock store), never
+// checked here - so on a non-enforcing bucket the entries would have been
+// silently overwritable while still appearing protected.
+func TestWriteRefusesBackendWithoutConditionalWrites(t *testing.T) {
+	t.Parallel()
+	w := NewWriter(&nonEnforcingStore{})
+	err := w.Write(context.Background(), Entry{
+		RunID:     "apply-1-abc1234",
+		Op:        "apply",
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	if err == nil {
+		t.Fatal("audit accepted a backend that does not enforce conditional writes")
+	}
+	if !errors.Is(err, blob.ErrConditionalWritesUnsupported) {
+		t.Fatalf("want ErrConditionalWritesUnsupported, got %v", err)
 	}
 }

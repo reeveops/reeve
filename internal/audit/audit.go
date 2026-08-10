@@ -1,7 +1,9 @@
 // Package audit writes append-only audit log entries. One JSON file per
 // run at audit/{year}/{month}/{day}/{run-id}.json. Write-once: entries
 // are created with If-None-Match so the same run-id can never overwrite.
-// Retention is configured in shared.yaml (default 7y).
+// Retention is NOT configured in reeve: shared.yaml's retention.max_age
+// prunes run artifacts only. Audit retention is a bucket lifecycle policy -
+// see docs/self-hosting.md.
 package audit
 
 import (
@@ -76,6 +78,12 @@ type Stack struct {
 type Writer struct {
 	store blob.Store
 	Now   func() time.Time
+
+	// cas verifies that the backend really enforces If-None-Match. The
+	// write-once guarantee this package advertises is exactly that
+	// precondition; without the probe it was inherited from whatever else
+	// happened to run first (in practice the lock store), not checked.
+	cas blob.CASProbe
 }
 
 // NewWriter returns a Writer.
@@ -87,6 +95,10 @@ func NewWriter(s blob.Store) *Writer {
 // key. If the key already exists (another writer beat us), returns
 // blob.ErrPreconditionFailed.
 func (w *Writer) Write(ctx context.Context, e Entry) error {
+	// Refuse to claim write-once on a backend that does not enforce it.
+	if err := w.cas.Ensure(ctx, w.store); err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
 	if e.SchemaVersion == 0 {
 		e.SchemaVersion = SchemaVersion
 	}

@@ -7,8 +7,6 @@ package locks
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,11 +27,8 @@ type Store struct {
 	// Now is injectable for tests.
 	Now func() time.Time
 
-	// casMu guards the conditional-write probe verdict (see ensureCAS).
-	// casProbed reports that casErr holds a *definitive* verdict.
-	casMu     sync.Mutex
-	casProbed bool
-	casErr    error
+	// cas verifies once that the backend enforces conditional writes.
+	cas blob.CASProbe
 }
 
 // New returns a Store. MaxRetries defaults to 5.
@@ -41,73 +36,25 @@ func New(s blob.Store) *Store {
 	return &Store{store: s, MaxRetries: 5, Now: time.Now}
 }
 
-// ErrConditionalWritesUnsupported means the backing bucket accepted a
-// conditional create for a key that already existed. Every lock guarantee
-// rests on the backend enforcing If-Match / If-None-Match; a backend that
-// ignores them (older MinIO, historical R2) turns locks into silent
-// no-ops, so we refuse to operate rather than pretend to lock.
-var ErrConditionalWritesUnsupported = errors.New(
-	"bucket does not enforce conditional writes (If-None-Match/If-Match); locks would be unsafe - use a backend with conditional-write support (real S3, current MinIO/R2, GCS, Azure Blob, or the filesystem store)")
+// ErrConditionalWritesUnsupported is re-exported from internal/blob, where
+// the probe now lives so the audit writer can share it.
+var ErrConditionalWritesUnsupported = blob.ErrConditionalWritesUnsupported
 
-// ensureCAS checks that the backend actually enforces conditional writes,
-// caching the verdict for the life of the process.
-//
-// Only *definitive* verdicts are cached: "enforced" and
-// ErrConditionalWritesUnsupported. A transient failure - a network blip, a
-// cancelled context, a 5xx - leaves the probe re-runnable. It used to be
-// cached too (sync.Once over the whole probe), so one bad moment convinced
-// the process for the rest of the run that the bucket was unsafe, and every
-// later lock operation failed pointing operators at "unsupported backend"
-// when the real cause was a hiccup.
+// ensureCAS refuses to operate on a backend that does not enforce
+// conditional writes: every lock guarantee rests on them.
 func (s *Store) ensureCAS(ctx context.Context) error {
-	s.casMu.Lock()
-	defer s.casMu.Unlock()
-	if s.casProbed {
-		return s.casErr
-	}
-	err := s.probeCAS(ctx)
-	if err == nil || errors.Is(err, ErrConditionalWritesUnsupported) {
-		s.casProbed = true
-		s.casErr = err
-	}
-	return err
+	return s.cas.Ensure(ctx, s.store)
 }
 
-// probeCAS creates a probe object with If-None-Match:*, then attempts a
-// second conditional create of the same key, which MUST fail with a
-// precondition error. Some S3-compatibles accept the If-* headers and
-// silently ignore them - both writes succeed and every "lock" this store
-// hands out would be fiction. The probe object is deleted best-effort.
-func (s *Store) probeCAS(ctx context.Context) error {
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		return fmt.Errorf("conditional-write probe: %w", err)
-	}
-	key := "locks/.cas-probe/" + hex.EncodeToString(suffix[:])
-	defer func() {
-		// Best-effort cleanup; a leaked probe object is harmless (the
-		// random suffix keeps it out of every lock key's way and
-		// parseLockKey ignores non-.json keys).
-		_ = s.store.Delete(ctx, key)
-	}()
-	if _, err := s.store.PutIfMatch(ctx, key, strings.NewReader("probe"), ""); err != nil {
-		return fmt.Errorf("conditional-write probe: initial create failed: %w", err)
-	}
-	_, err := s.store.PutIfMatch(ctx, key, strings.NewReader("probe2"), "")
-	switch {
-	case err == nil:
-		// Second create-if-absent of an existing key succeeded: the
-		// backend is not enforcing conditions. Fail loudly.
-		return ErrConditionalWritesUnsupported
-	case errors.Is(err, blob.ErrPreconditionFailed):
-		return nil // enforced, as required
-	default:
-		return fmt.Errorf("conditional-write probe: %w", err)
-	}
-}
-
+// key builds the lock object key. Both components are slugged: project and
+// stack names originate in the repo under review (Pulumi.yaml, stack
+// filenames), and plan artifacts already sanitise for the same reason.
+// The mapping is injective; keys are derived from real names only (see
+// namesFor), never from names parsed back out of a key.
 func (s *Store) key(project, stack string) string {
-	return fmt.Sprintf("locks/%s/%s.json", project, stack)
+	return fmt.Sprintf("locks/%s/%s.json",
+		blob.SlugComponent(project, "project"),
+		blob.SlugComponent(stack, "stack"))
 }
 
 // Get reads the current lock state for a stack. Returns a fresh free lock
@@ -127,6 +74,41 @@ func (s *Store) Get(ctx context.Context, project, stack string) (corelocks.Lock,
 		return corelocks.Lock{}, "", fmt.Errorf("decode lock: %w", err)
 	}
 	return l, md.ETag, nil
+}
+
+// getByKey reads a lock object at an exact key, without deriving that key
+// from names. The walkers use it so key derivation only ever happens from
+// the real project/stack, never from a key parsed back into components -
+// which is what let the slug stay injective instead of having to be
+// idempotent.
+func (s *Store) getByKey(ctx context.Context, key string) (corelocks.Lock, error) {
+	rc, _, err := s.store.Get(ctx, key)
+	if err != nil {
+		return corelocks.Lock{}, err
+	}
+	defer rc.Close()
+	var l corelocks.Lock
+	if err := json.NewDecoder(rc).Decode(&l); err != nil {
+		return corelocks.Lock{}, fmt.Errorf("decode lock %s: %w", key, err)
+	}
+	return l, nil
+}
+
+// namesFor returns the authoritative project/stack for a stored lock: the
+// object's own content, not its key. A lock whose content does not derive
+// back to the key it was found under is skipped rather than acted on under
+// the wrong identity.
+func (s *Store) namesFor(ctx context.Context, key string) (string, string, bool) {
+	l, err := s.getByKey(ctx, key)
+	if err != nil {
+		slog.Debug("skipping unreadable lock object", "key", key, "err", err)
+		return "", "", false
+	}
+	if l.Project == "" || l.Stack == "" || s.key(l.Project, l.Stack) != key {
+		slog.Debug("skipping lock whose content does not match its key", "key", key)
+		return "", "", false
+	}
+	return l.Project, l.Stack, true
 }
 
 // TryAcquire runs the acquire transition with optimistic concurrency.
@@ -258,7 +240,7 @@ func (s *Store) UnlockPRAll(ctx context.Context, pr int, runID string, ttl time.
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := parseLockKey(k)
+		proj, stack, ok := s.namesFor(ctx, k)
 		if !ok {
 			continue
 		}
@@ -355,7 +337,7 @@ func (s *Store) ReapAll(ctx context.Context, ttl time.Duration) (int, error) {
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := parseLockKey(k)
+		proj, stack, ok := s.namesFor(ctx, k)
 		if !ok {
 			continue
 		}
@@ -381,7 +363,7 @@ func (s *Store) ListAll(ctx context.Context) ([]corelocks.Lock, error) {
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := parseLockKey(k)
+		proj, stack, ok := s.namesFor(ctx, k)
 		if !ok {
 			continue
 		}
@@ -425,15 +407,4 @@ func (s *Store) mutate(
 		// Lost the race - retry.
 	}
 	return corelocks.Lock{}, false, fmt.Errorf("lock %s/%s: exceeded %d retries", project, stack, s.MaxRetries)
-}
-
-// parseLockKey decodes "locks/<project>/<stack>.json".
-func parseLockKey(k string) (string, string, bool) {
-	k = strings.TrimPrefix(k, "locks/")
-	k = strings.TrimSuffix(k, ".json")
-	parts := strings.SplitN(k, "/", 2)
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
 }
