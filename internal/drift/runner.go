@@ -26,8 +26,8 @@ type Engine interface {
 	DriftCheck(ctx context.Context, stack discovery.Stack, opts iac.PreviewOpts, refreshFirst bool) (iac.PreviewResult, error)
 }
 
-// AuthResolver returns env vars for a stack (usually via run.ResolveAuthEnv).
-type AuthResolver func(ctx context.Context, stackRef string) (map[string]string, error)
+// AuthResolver returns stack env vars and their ownership cleanup.
+type AuthResolver func(ctx context.Context, stackRef string) (map[string]string, func(), error)
 
 // Options configures a drift run.
 type Options struct {
@@ -370,22 +370,33 @@ func runOne(ctx context.Context, opts Options, s discovery.Stack, now time.Time)
 	// non-transient failures are never retried. Context cancellation between
 	// retries stops the loop.
 	var (
-		env      map[string]string
-		res      iac.PreviewResult
-		checkErr error
-		haveAuth bool
-		timedOut bool
+		env         map[string]string
+		authCleanup func()
+		res         iac.PreviewResult
+		checkErr    error
+		haveAuth    bool
+		timedOut    bool
 	)
+	cleanupAuth := func() {
+		if authCleanup == nil {
+			return
+		}
+		authCleanup()
+		authCleanup = nil
+	}
+	defer cleanupAuth()
 	retriesUsed, rebindUsed := 0, false
 	start := time.Now()
 	for {
 		timedOut = false
 		if opts.AuthResolver != nil && !haveAuth {
-			e, err := opts.AuthResolver(ctx, ref)
+			e, cleanup, err := opts.AuthResolver(ctx, ref)
 			if err != nil {
+				authCleanup = cleanup
+				cleanupAuth()
 				res, checkErr = iac.PreviewResult{}, err
 			} else {
-				env, haveAuth = e, true
+				env, authCleanup, haveAuth = e, cleanup, true
 				for _, v := range env {
 					opts.Redactor.AddSecret(v)
 				}
@@ -449,6 +460,7 @@ func runOne(ctx context.Context, opts Options, s discovery.Stack, now time.Time)
 			if rebindUsed {
 				break // already rebound once; expiry persists
 			}
+			cleanupAuth()
 			rebindUsed, haveAuth = true, false
 			retriesUsed++
 			slog.Warn("drift: rebinding and retrying after expired credentials",
