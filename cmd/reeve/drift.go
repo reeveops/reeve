@@ -18,6 +18,7 @@ import (
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/drift"
+	"github.com/reeveops/reeve/internal/iac"
 	"github.com/reeveops/reeve/internal/notify"
 	"github.com/reeveops/reeve/internal/run"
 	gh "github.com/reeveops/reeve/internal/vcs/github"
@@ -97,6 +98,24 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 
 	// Build the auth resolver on top of the auth registry.
 	authReg := env.authReg
+	executionEnv, executionCleanup, err := iac.ExecutionEnv()
+	if err != nil {
+		return fmt.Errorf("prepare engine execution environment: %w", err)
+	}
+	defer executionCleanup()
+	stateEnv, stateCleanup, err := run.ResolveStateAuthEnv(ctx, engineCfg, authReg)
+	if err != nil {
+		return err
+	}
+	defer stateCleanup()
+	mergedStateEnv := make(map[string]string, len(executionEnv)+len(stateEnv))
+	for key, value := range executionEnv {
+		mergedStateEnv[key] = value
+	}
+	for key, value := range stateEnv {
+		mergedStateEnv[key] = value
+	}
+	stateEnv = mergedStateEnv
 	resolver := func(ctx context.Context, ref string) (map[string]string, error) {
 		// Drift currently doesn't expose a per-call cleanup hook; once the
 		// drift runner gains stack-scoped lifecycles we should plumb the
@@ -104,7 +123,17 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 		// temp file until the process exits, which is bounded by the run's
 		// duration on GitHub Actions.
 		env, _, err := run.ResolveAuthEnv(ctx, cfg.Auth, authReg, ref, auth.ModeDrift, run.LocalAuth{})
-		return env, err
+		if err != nil {
+			return nil, err
+		}
+		merged := make(map[string]string, len(stateEnv)+len(env))
+		for key, value := range stateEnv {
+			merged[key] = value
+		}
+		for key, value := range env {
+			merged[key] = value
+		}
+		return merged, nil
 	}
 
 	decls := make([]discovery.Declaration, 0, len(engineCfg.Engine.Stacks))

@@ -8,12 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/reeveops/reeve/internal/core/redact"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // Hook is one configured policy hook.
@@ -75,15 +75,18 @@ func Run(ctx context.Context, h Hook, tc Context, r *redact.Redactor) Result {
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	// #nosec G204 -- DELIBERATE: a policy hook IS an operator-supplied command from engine config.
-	// It is argv-form (no shell) and reached only from run.Apply, AFTER every
-	// approval gate - never on the preview path, so an unapproved PR cannot reach
-	// it. Note cmd.Env below inherits the full credential environment: a hook is
-	// trusted code
+	// It is argv-form with no shell and reached only after independent apply
+	// gates pass. Its environment excludes controller and apply credentials.
 	cmd := exec.CommandContext(runCtx, args[0], args[1:]...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.Env = os.Environ()
+	childEnv, cleanup, envErr := iac.CommandEnv(nil, nil)
+	if envErr != nil {
+		return failedResult(h, fmt.Errorf("prepare child environment: %w", envErr))
+	}
+	defer cleanup()
+	cmd.Env = childEnv
 	runErr := cmd.Run()
 
 	out := r.Redact(stdout.String())
@@ -118,6 +121,14 @@ func Run(ctx context.Context, h Hook, tc Context, r *redact.Redactor) Result {
 		res.Error = firstLine(runErr.Error())
 	}
 	return res
+}
+
+func failedResult(h Hook, err error) Result {
+	outcome := "fail"
+	if h.OnFail == FailWarn {
+		outcome = "warn"
+	}
+	return Result{Name: h.Name, Outcome: outcome, ExitCode: -1, Error: firstLine(err.Error())}
 }
 
 // Aggregate tells preconditions whether any blocking hooks failed.

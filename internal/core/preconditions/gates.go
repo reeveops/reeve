@@ -42,10 +42,10 @@ var GateOrder = []GateID{
 	GateChecksGreen,
 	GatePreviewOK,
 	GatePreviewFresh,
-	GatePolicy,
 	GateApprovals,
 	GateLock,
 	GateFreeze,
+	GatePolicy, // repository-controlled hooks run after independent gates
 }
 
 // GateResult captures one gate's evaluation for one stack.

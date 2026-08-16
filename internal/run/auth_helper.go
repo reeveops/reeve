@@ -25,7 +25,7 @@ type LocalAuth struct {
 
 // ResolveAuthEnv returns the merged env var map for a single stack + mode
 // plus a cleanup func the caller defers. If cfg is nil or has no bindings,
-// returns empty env (the engine relies on ambient creds / $GITHUB_TOKEN).
+// it returns an empty map and the engine receives no workload credentials.
 //
 // The cleanup func runs every Credential.Cleanup the providers attached
 // (e.g. removing the GCP WIF on-disk credential file). Cleanup errors are
@@ -64,7 +64,25 @@ func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Regis
 		}
 		return nil, noop, fmt.Errorf("acquire creds for %s (%s): %w", stackRef, mode, err)
 	}
-	cleanup := func() {
+	return env, credentialCleanup(creds), nil
+}
+
+// ResolveStateAuthEnv acquires the provider selected by engine.state.
+func ResolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, registry *auth.Registry) (map[string]string, CleanupFunc, error) {
+	noop := func() {}
+	if engine == nil || registry == nil || engine.Engine.State.AuthProvider == "" {
+		return nil, noop, nil
+	}
+	name := engine.Engine.State.AuthProvider
+	env, creds, err := registry.AcquireAll(ctx, []string{name})
+	if err != nil {
+		return nil, noop, fmt.Errorf("acquire state auth provider %q: %w", name, err)
+	}
+	return env, credentialCleanup(creds), nil
+}
+
+func credentialCleanup(creds []*auth.Credential) CleanupFunc {
+	return func() {
 		for _, c := range creds {
 			if c == nil || c.Cleanup == nil {
 				continue
@@ -75,5 +93,18 @@ func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Regis
 			}
 		}
 	}
-	return env, cleanup, nil
+}
+
+func mergeEnv(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(override))
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range override {
+		out[key] = value
+	}
+	return out
 }
