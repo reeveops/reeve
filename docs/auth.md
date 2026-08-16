@@ -78,6 +78,30 @@ Used to detect conflicts:
 - `github-identity` - `github_app`
 - Secret managers and Vault do not conflict (multiple allowed).
 
+## Child process credential boundary
+
+Reeve constructs the environment for every Pulumi, Terraform, OpenTofu, and policy subprocess.
+It does not copy the controller process environment into those commands.
+
+The constructed environment contains:
+
+- A small runtime allowlist such as `PATH`, locale, temporary-directory, timezone, and TLS certificate settings.
+- Credentials selected by auth bindings for the current stack and mode.
+- Credentials selected by `engine.state.auth_provider` for backend access.
+- Adapter-owned settings such as `TF_IN_AUTOMATION`.
+
+CI engine processes receive a private temporary `HOME` and XDG directories that are deleted when the run ends.
+Local runs retain the operator's home paths so local CLI profiles continue to work.
+
+Preview, refresh, and drift resolve state authentication before invoking an engine.
+Apply waits until approvals, checks, preview, lock, freeze, fork, draft, and policy gates pass before resolving state credentials or running Pulumi login.
+
+Stack credentials override state credentials when both explicitly provide the same environment key.
+Credential cleanup runs when the stack or operation finishes.
+
+This boundary prevents accidental ambient inheritance but is not an operating-system sandbox.
+Run approved untrusted code under a separate user, container, VM, or job boundary.
+
 ---
 
 ## AWS OIDC (`aws_oidc`)

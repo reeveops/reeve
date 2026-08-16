@@ -8,4 +8,5 @@
 - [x] Add an apply regression test proving blocked stacks do not run hooks.
 - [x] Add a repository guard against new `os.Environ()` subprocess sites.
 - [x] Update the IaC and policy-hook specifications.
-- [ ] Run focused tests and `mise run check`.
+- [x] Run focused tests and `mise run check`.
+- [x] Run `openspec validate child-env-isolation --strict` separately.
