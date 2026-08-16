@@ -23,6 +23,8 @@ func (p lifecycleProvider) Acquire(context.Context) (*Credential, error) {
 }
 
 func TestAcquireAllUnwindsPartialAcquisition(t *testing.T) {
+	t.Parallel()
+
 	var cleaned []string
 	registry := NewRegistry()
 	for _, provider := range []lifecycleProvider{
@@ -48,6 +50,8 @@ func TestAcquireAllUnwindsPartialAcquisition(t *testing.T) {
 }
 
 func TestAcquireAllReportsCleanupFailure(t *testing.T) {
+	t.Parallel()
+
 	cleanupErr := errors.New("cleanup failed")
 	registry := NewRegistry()
 	if err := registry.Register(lifecycleProvider{name: "first", cleanup: func() error { return cleanupErr }}); err != nil {

@@ -121,6 +121,8 @@ func TestRetryExhaustedIsError(t *testing.T) {
 }
 
 func TestRetryAuthExpiredRebindsOnce(t *testing.T) {
+	t.Parallel()
+
 	authCalls := 0
 	var lifecycle []string
 	resolver := func(context.Context, string) (map[string]string, func(), error) {
@@ -152,6 +154,8 @@ func TestRetryAuthExpiredRebindsOnce(t *testing.T) {
 }
 
 func TestRetryCleansCredentialAfterSuccessfulCheck(t *testing.T) {
+	t.Parallel()
+
 	cleaned := 0
 	resolver := func(context.Context, string) (map[string]string, func(), error) {
 		return map[string]string{"TOKEN": "value"}, func() { cleaned++ }, nil
@@ -160,6 +164,26 @@ func TestRetryCleansCredentialAfterSuccessfulCheck(t *testing.T) {
 	item, _ := runRetry(context.Background(), eng, 0, resolver)
 	if item.Outcome != OutcomeNoDrift {
 		t.Fatalf("unexpected outcome: %s", item.Outcome)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", cleaned)
+	}
+}
+
+func TestRetryCleansCredentialWhenResolverFails(t *testing.T) {
+	t.Parallel()
+
+	cleaned := 0
+	resolver := func(context.Context, string) (map[string]string, func(), error) {
+		return nil, func() { cleaned++ }, errors.New("credential acquisition failed")
+	}
+	eng := &scriptEngine{results: []scriptResult{{res: iac.PreviewResult{}}}}
+	item, _ := runRetry(context.Background(), eng, 0, resolver)
+	if item.Outcome != OutcomeError {
+		t.Fatalf("unexpected outcome: %s", item.Outcome)
+	}
+	if eng.calls != 0 {
+		t.Fatalf("engine calls = %d, want 0", eng.calls)
 	}
 	if cleaned != 1 {
 		t.Fatalf("cleanup calls = %d, want 1", cleaned)

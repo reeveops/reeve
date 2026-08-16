@@ -392,6 +392,8 @@ func runOne(ctx context.Context, opts Options, s discovery.Stack, now time.Time)
 		if opts.AuthResolver != nil && !haveAuth {
 			e, cleanup, err := opts.AuthResolver(ctx, ref)
 			if err != nil {
+				authCleanup = cleanup
+				cleanupAuth()
 				res, checkErr = iac.PreviewResult{}, err
 			} else {
 				env, authCleanup, haveAuth = e, cleanup, true
