@@ -3,6 +3,8 @@ package drift
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -120,9 +122,14 @@ func TestRetryExhaustedIsError(t *testing.T) {
 
 func TestRetryAuthExpiredRebindsOnce(t *testing.T) {
 	authCalls := 0
-	resolver := func(context.Context, string) (map[string]string, error) {
+	var lifecycle []string
+	resolver := func(context.Context, string) (map[string]string, func(), error) {
 		authCalls++
-		return map[string]string{"AWS_SESSION_TOKEN": "tok"}, nil
+		generation := authCalls
+		lifecycle = append(lifecycle, fmt.Sprintf("acquire-%d", generation))
+		return map[string]string{"AWS_SESSION_TOKEN": "tok"}, func() {
+			lifecycle = append(lifecycle, fmt.Sprintf("cleanup-%d", generation))
+		}, nil
 	}
 	eng := &scriptEngine{results: []scriptResult{
 		{res: iac.PreviewResult{Error: "ExpiredToken: the security token included in the request is expired"}},
@@ -135,8 +142,27 @@ func TestRetryAuthExpiredRebindsOnce(t *testing.T) {
 	if authCalls != 2 {
 		t.Fatalf("auth-expiry must rebind (re-resolve auth): want 2 resolves, got %d", authCalls)
 	}
+	wantLifecycle := []string{"acquire-1", "cleanup-1", "acquire-2", "cleanup-2"}
+	if !reflect.DeepEqual(lifecycle, wantLifecycle) {
+		t.Fatalf("credential lifecycle = %v, want %v", lifecycle, wantLifecycle)
+	}
 	if item.Outcome != OutcomeDriftDetected || ev != EventDriftDetected {
 		t.Fatalf("rebind-then-drift must detect drift, got outcome=%s ev=%s", item.Outcome, ev)
+	}
+}
+
+func TestRetryCleansCredentialAfterSuccessfulCheck(t *testing.T) {
+	cleaned := 0
+	resolver := func(context.Context, string) (map[string]string, func(), error) {
+		return map[string]string{"TOKEN": "value"}, func() { cleaned++ }, nil
+	}
+	eng := &scriptEngine{results: []scriptResult{{res: iac.PreviewResult{}}}}
+	item, _ := runRetry(context.Background(), eng, 0, resolver)
+	if item.Outcome != OutcomeNoDrift {
+		t.Fatalf("unexpected outcome: %s", item.Outcome)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", cleaned)
 	}
 }
 

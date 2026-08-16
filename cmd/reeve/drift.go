@@ -116,15 +116,10 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 		mergedStateEnv[key] = value
 	}
 	stateEnv = mergedStateEnv
-	resolver := func(ctx context.Context, ref string) (map[string]string, error) {
-		// Drift currently doesn't expose a per-call cleanup hook; once the
-		// drift runner gains stack-scoped lifecycles we should plumb the
-		// cleanup func through. For now an unrun cleanup leaks the GCP WIF
-		// temp file until the process exits, which is bounded by the run's
-		// duration on GitHub Actions.
-		env, _, err := run.ResolveAuthEnv(ctx, cfg.Auth, authReg, ref, auth.ModeDrift, run.LocalAuth{})
+	resolver := func(ctx context.Context, ref string) (map[string]string, func(), error) {
+		env, cleanup, err := run.ResolveAuthEnv(ctx, cfg.Auth, authReg, ref, auth.ModeDrift, run.LocalAuth{})
 		if err != nil {
-			return nil, err
+			return nil, cleanup, err
 		}
 		merged := make(map[string]string, len(stateEnv)+len(env))
 		for key, value := range stateEnv {
@@ -133,7 +128,7 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 		for key, value := range env {
 			merged[key] = value
 		}
-		return merged, nil
+		return merged, cleanup, nil
 	}
 
 	decls := make([]discovery.Declaration, 0, len(engineCfg.Engine.Stacks))
