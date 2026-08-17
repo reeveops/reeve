@@ -9,13 +9,16 @@
 
 ## Implementation
 
-- [ ] Add base SHA and exact-revision file reads to the VCS interface.
+- [ ] Add repository identities, head and base SHAs, and exact-revision file reads to the VCS interface.
 - [ ] Add strict in-memory config loading for trusted bytes.
 - [ ] Implement the immutable two-source merge.
 - [ ] Route every PR command through the effective configuration.
-- [ ] Record trusted SHA and config provenance in manifests and audit entries.
-- [ ] Invalidate previews when the trusted policy SHA changes.
+- [ ] Record `trusted_config_revision` and ownership-group provenance in manifests and audit entries.
+- [ ] Invalidate previews when BaseSHA differs from `trusted_config_revision`.
 - [ ] Render ignored control-setting changes without values.
-- [ ] Add API failure, symlink, missing file, race, and self-modification tests.
+- [ ] Add target-repository routing and checkout-HeadSHA mismatch tests.
+- [ ] Add API failure, missing-file, symlink, and submodule tests.
+- [ ] Add directory, oversized-response, and revision-mismatch tests.
+- [ ] Add duplicate identity, deletion, null, empty-value, race, and self-modification tests.
 - [ ] Add documentation for control changes and repository bootstrap.
 - [ ] Run `mise run check` and strict OpenSpec validation.

@@ -2,13 +2,16 @@
 
 ## ADDED Requirements
 
-### Requirement: Preview and apply bind to the same trusted policy
+### Requirement: Preview and apply bind to the same trusted configuration
 
-Preview artifacts MUST record the trusted base SHA used to evaluate the PR.
-Apply MUST reject a preview whose trusted policy SHA differs from the current trusted base SHA.
+`trusted_config_revision` MUST equal the immutable target-repository base commit SHA used to load trusted configuration.
+Preview artifacts MUST record this identifier.
+
+Apply MUST snapshot PR metadata again and compare its BaseSHA with the recorded `trusted_config_revision`.
+A mismatch MUST fail the preview consistency gate.
 
 #### Scenario: Policy changes after preview
 
-- **WHEN** the base policy SHA changes after a successful preview
+- **WHEN** BaseSHA differs from the preview's `trusted_config_revision`
 - **THEN** apply fails the preview consistency gate
-- **AND** a new preview under the current trusted policy is required
+- **AND** a new preview under the current trusted configuration is required

@@ -14,36 +14,89 @@ The existing strict decoder parses trusted bytes and checked-out HEAD bytes inde
 Unknown keys, invalid versions, missing required trusted files, or API failures stop the operation before credentials or configurable subprocesses.
 
 Environment references in trusted configuration expand from the controller environment only after source ownership is established.
-Environment references in head-owned workload fields remain prohibited unless a specific field is added to the ownership table.
+Source-aware validation rejects any environment reference introduced by HEAD at any path.
+
+An environment reference is introduced when the HEAD raw scalar contains `${env:...}` and the base lacks a byte-identical scalar at the same path.
+The generic validation error omits the variable name and does not inspect whether the variable exists.
+
+An unchanged HEAD scalar is never expanded or copied into the effective configuration.
+Only the trusted scalar at that path is eligible for expansion.
 
 ## Field ownership
 
-Trusted fields come only from the immutable base SHA:
+Ownership paths are qualified by config type and use YAML field names, `[]` for list entries, and `*` for every descendant.
+The implementation encodes this table as data and tests every workload-owned pattern.
 
-- Bucket, lock, retention, and audit-store settings.
-- Approval, precondition, freeze, apply-trigger, fork, and break-glass policy.
-- Auth providers, bindings, state-auth providers, and credential durations.
-- Notification channels, webhook destinations, OTEL exporters, and secret references.
-- Engine binary overrides, policy-hook commands, and plugin or registry configuration.
-- Redaction configuration and any future execution-policy settings.
+| Path | Owner | Additional validation |
+| --- | --- | --- |
+| `version`, `config_type` | trusted | HEAD parses independently with a supported version and the same config type. |
+| `shared.*` | trusted | HEAD values never affect the effective configuration. |
+| `auth.*` | trusted | HEAD cannot select providers, bindings, credentials, or durations. |
+| `notifications.*` | trusted | HEAD cannot select channels, destinations, headers, or secrets. |
+| `observability.*` | trusted | HEAD cannot select exporters, annotations, destinations, or secrets. |
+| `drift.*` | trusted | Scheduled runs continue to use their checked-out trusted revision. |
+| `engine.type` | trusted | HEAD must name the same engine type. |
+| `engine.binary.*` | trusted | HEAD cannot select an executable or version. |
+| `engine.state.*` | trusted | HEAD cannot select a backend, auth provider, or secrets provider. |
+| `engine.execution.*` | trusted | HEAD cannot select timeouts or parallelism. |
+| `engine.policy_hooks[]` | trusted | HEAD cannot select commands or failure behavior. |
+| `engine.plan_locking` | trusted | HEAD cannot weaken plan locking. |
+| `engine.stacks[].project` | workload | The enclosing entry has a unique stack identity. |
+| `engine.stacks[].path` | workload | The path remains inside the checkout after normalization. |
+| `engine.stacks[].pattern` | workload | The pattern passes existing stack-declaration validation. |
+| `engine.stacks[].stacks[]` | workload | Values are unique within the enclosing entry. |
+| `engine.filters.exclude[]` | workload | Entries pass existing filter validation and are unique after normalization. |
+| `engine.change_mapping.ignore_changes[]` | workload | Patterns are unique after normalization. |
+| `engine.change_mapping.extra_triggers[].project` | workload | The project is the keyed entry identity. |
+| `engine.change_mapping.extra_triggers[].paths[]` | workload | Paths are unique within the enclosing entry. |
+| `engine.change_mapping.scope` | workload | The value passes existing scope validation. |
 
-Head-owned fields describe the workload being evaluated:
+Unknown keys fail strict decoding before ownership is evaluated.
+Known fields without a workload-owned table match are trusted-owned.
 
-- Engine type when it matches the trusted engine type.
-- Stack declarations, stack paths, environments, and project names.
-- Change-mapping include, exclude, and dependency declarations.
-- Engine project metadata that cannot select an executable or credential.
+A trusted-owned field absent from the base uses only its schema default or absence value.
+It never falls back to the HEAD value.
 
-Fields not listed are trusted by default.
-Adding a head-owned field requires a spec delta and a security test.
+Adding or widening a workload-owned path requires a spec delta and a security test.
+Semantic validation must prove that the path cannot select an executable, credential, policy, or outbound sink.
 
 ## Merge behavior
 
-The merge produces a new effective configuration and never mutates either parsed input.
-It records source metadata for each config type and the trusted base SHA in the run manifest and audit entry.
+The merge copies the validated trusted configuration and replaces only workload-owned paths from the validated HEAD configuration.
+It operates on typed configuration values and never performs a generic YAML map overlay.
+
+Explicit YAML null is rejected in both sources.
+Empty scalars and collections are accepted only when the existing schema accepts them and never trigger fallback.
+
+| Collection | Identity | Merge and deletion rule |
+| --- | --- | --- |
+| `engine.stacks[]` | normalized `(project, path, pattern)` tuple | HEAD replaces the trusted list; omission deletes a workload entry. Duplicate identities fail. |
+| `engine.stacks[].stacks[]` | stack name | HEAD replaces the nested set; duplicate names fail. |
+| `engine.filters.exclude[]` | normalized scalar pattern or `stack` value | HEAD replaces the list; duplicate identities fail. |
+| `engine.change_mapping.ignore_changes[]` | normalized pattern | HEAD replaces the list; duplicate patterns fail. |
+| `engine.change_mapping.extra_triggers[]` | `project` | HEAD replaces the list; duplicate projects fail. |
+| `engine.change_mapping.extra_triggers[].paths[]` | normalized path | HEAD replaces the nested set; duplicate paths fail. |
+
+Trusted-owned maps and lists always come from the base without entry-level merging.
+Any future workload-owned map or list requires an identity and deletion rule in the ownership table.
+
+Ambiguous, duplicate, or invalid identities fail before credentials, network sinks, policy hooks, or engine execution.
+Merging workload declarations cannot replace trusted auth, state, binary, execution, or policy-hook fields.
+
+The run manifest and audit entry record provenance by ownership group instead of only by config type.
+Each record includes the path pattern, keyed entry identity when applicable, source repository, and source commit without configuration values.
+
+Trusted groups record the target repository and `trusted_config_revision`.
+Workload groups record the head repository and immutable head SHA.
 
 A missing trusted config type does not fall back to the PR version.
 Repository bootstrap requires the configuration to land on the base branch before PR automation can use it.
+
+The trusted engine config and its `engine` container must exist on the base revision.
+HEAD may add a keyed stack entry only through the workload-owned paths in the table.
+
+A stack entry containing auth, binary, state, execution, or policy fields fails strict decoding.
+HEAD cannot bootstrap a trusted policy container.
 
 ## Visibility
 
@@ -55,8 +108,11 @@ All messages pass through the existing redactor.
 
 ## Apply consistency
 
-Preview manifests record both head SHA and trusted base SHA.
-Apply requires the current trusted policy SHA to match the preview manifest or requires a new preview.
+`trusted_config_revision` is the canonical identifier for trusted configuration and equals the immutable target-repository base commit SHA.
+Preview manifests record both head SHA and `trusted_config_revision`.
+
+Apply snapshots PR metadata again and compares its BaseSHA with the manifest `trusted_config_revision`.
+Any mismatch fails the preview consistency gate and requires a new preview.
 
 This prevents an approval under one base policy from being applied after that policy changes.
 The normal up-to-date gate remains independent.

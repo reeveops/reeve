@@ -4,19 +4,25 @@
 
 ### Requirement: PR configuration has explicit source ownership
 
-PR operations MUST build effective configuration from an immutable trusted base SHA and the checked-out PR HEAD.
+PR operations MUST build effective configuration from `trusted_config_revision` and the checked-out PR HEAD.
 Every field MUST be trusted-owned unless the specification explicitly marks it workload-owned.
 
 #### Scenario: A PR modifies approval policy
 
 - **WHEN** a PR changes approvals or preconditions in `.reeve/shared.yaml`
-- **THEN** the current run uses the value from the trusted base SHA
+- **THEN** the current run uses the value from `trusted_config_revision`
 - **AND** the preview reports that the proposed control change is not active
 
 #### Scenario: A PR adds a stack
 
-- **WHEN** a PR adds a valid stack declaration without changing engine identity
-- **THEN** preview uses the head-owned declaration with trusted auth and execution policy
+- **WHEN** the base revision contains a valid engine policy container
+- **AND** a PR adds a uniquely keyed stack declaration using only workload-owned fields
+- **THEN** preview uses the head-owned declaration with trusted auth, state, binary, execution, and policy-hook settings
+
+#### Scenario: A PR adds a stack with trusted controls
+
+- **WHEN** a PR-added stack object contains authentication, state, binary, execution, or policy-hook fields
+- **THEN** strict validation rejects the HEAD configuration before merge or side effects
 
 #### Scenario: Trusted configuration is unavailable
 
@@ -30,11 +36,17 @@ Every field MUST be trusted-owned unless the specification explicitly marks it w
 
 ### Requirement: Trusted environment expansion occurs after ownership
 
-Controller environment references MUST expand only in trusted-owned fields loaded from the base SHA.
-Untrusted values MUST NOT select an environment name or receive the expanded value through diagnostics.
+Controller environment references MUST expand only in trusted-owned fields loaded from `trusted_config_revision`.
+HEAD values MUST NOT introduce an environment reference at any path.
 
 #### Scenario: A PR adds an environment reference
 
 - **WHEN** the PR HEAD adds `${env:CONTROLLER_SECRET}` to any config field
-- **THEN** the reference is not expanded for the current PR operation
-- **AND** no diagnostic reveals whether the variable exists
+- **THEN** validation fails before merge, credential handling, network access, or execution
+- **AND** the error does not include the variable name or reveal whether it exists
+
+#### Scenario: Trusted configuration already contains an environment reference
+
+- **WHEN** HEAD preserves the identical raw scalar at the same path as the base revision
+- **THEN** only the trusted base scalar is eligible for expansion
+- **AND** no component interprets the scalar read from HEAD
