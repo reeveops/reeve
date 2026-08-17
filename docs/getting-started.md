@@ -237,9 +237,8 @@ cache hit nothing is downloaded or built:
   against the release's `checksums.txt`.
 - **`@master` / `@next`** - downloads the newest per-push `<branch>-<sha>`
   prerelease (one is published per commit to that branch). The action verifies
-  the binary against the prerelease's `checksums.txt` and, when `cosign` is
-  available, its keyless signature (`checksums.txt.bundle`); set
-  `REEVE_REQUIRE_SIGNATURE=1` to make signature verification mandatory. Because
+  the binary against the prerelease's `checksums.txt` and requires its keyless
+  signature (`checksums.txt.bundle`). Because
   it resolves the *newest* prerelease, the binary may be built from a slightly
   newer commit than the action source you pinned - the `vX.Y.Z` releases are
   the reproducible, version-pinned distribution.
