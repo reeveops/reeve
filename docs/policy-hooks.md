@@ -24,6 +24,17 @@ The same hooks fire for every stack independently. Hook output passes
 through the central redaction pipeline before landing anywhere
 user-visible.
 
+## Apply ordering and credentials
+
+- Apply evaluates fork, draft, branch, checks, preview, approval, lock, and freeze gates before starting a policy hook.
+- A stack blocked by any independent gate never launches repository-controlled policy code.
+- Hooks receive the plan file and a constructed non-credential environment.
+- CI hooks receive command-scoped temporary `HOME` and XDG paths.
+- Local hooks preserve the operator's existing `HOME` and XDG paths and do not provide a filesystem isolation boundary.
+- Reeve resolves state credentials, performs Pulumi login, and acquires apply credentials only after policy passes.
+- Break-glass does not change this ordering or grant controller credentials to hooks.
+- The policy result remains the final fail-closed apply gate.
+
 ## Config
 
 Hooks live in the engine config (e.g. `.reeve/pulumi.yaml`), not a

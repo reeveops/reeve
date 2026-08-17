@@ -197,10 +197,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	PostAnnotation(ctx, in.Annotations, annotations.EventApplyStarted,
 		"", "", "", "", "", in.PRNumber, in.CommitSHA)
 
-	if err := PulumiLogin(ctx, in.Config); err != nil {
-		return nil, err
-	}
-
 	timeline := newApplyTimeline(in.VCS, in.Blob, in.PRNumber, runID, in.RunNumber, in.CommitSHA, in.CIRunURL)
 	timeline.add(ctx, "🚀", "apply starting", "")
 
@@ -461,6 +457,13 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 	}
 
+	executionEnv, executionCleanup, err := iac.ExecutionEnv()
+	if err != nil {
+		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
+	}
+	defer executionCleanup()
+	stateEnv := executionEnv
+
 	// Plan locking is on when config asks for it AND the engine can execute
 	// a saved plan AND there is a bucket to have stored one in. Resolved
 	// once: a per-stack answer would let one stack apply a locked plan while
@@ -480,6 +483,8 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	anyBlocked := false
 	overriddenSeen := map[preconditions.GateID]bool{}
 	var overriddenGates []string
+	pulumiLoginDone := false
+	stateAuthAcquired := false
 	for _, s := range target {
 		ss := summary.StackSummary{
 			Project: s.Project, Stack: s.Name, Env: s.Env,
@@ -574,38 +579,8 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 		slog.Debug("preview status", "stack", s.Ref(), "found", prev.Found, "succeeded", prev.Succeeded, "age", prev.Age)
 
-		// Run policy hooks against the PREVIEW plan - the plan that will be
-		// applied - not the still-empty pre-apply summary (which has no
-		// counts or plan body yet, so any plan-content rule always passed).
-		redactor := BuildRedactor(in.Shared)
-		hooks := HooksFromEngine(in.Config)
-		var policyPtr *bool
-		if len(hooks) > 0 {
-			policyTarget := ss
-			if prev.Plan != nil {
-				policyTarget = *prev.Plan
-			}
-			policyPassed, policyResults, policyErr := RunPolicyForStack(ctx, hooks, s, policyTarget, redactor)
-			// Fail closed: if hooks are configured but there is no preview
-			// plan to evaluate, or a hook failed to execute, the gate must
-			// not pass. Applying with policy unevaluated defeats the gate.
-			if prev.Plan == nil || policyErr != nil {
-				if policyErr != nil {
-					slog.Warn("policy execution failed", "stack", s.Ref(), "err", policyErr)
-				} else {
-					slog.Warn("policy skipped: no preview plan to evaluate", "stack", s.Ref())
-				}
-				policyPassed = false
-			}
-			policyPtr = &policyPassed
-			if len(policyResults) > 0 {
-				// Attach policy rendering into the PR comment via FullPlan
-				// suffix - renderer will collapse it with other output.
-				ss.FullPlan = ss.FullPlan + policyRender(policyResults)
-			}
-		}
-
-		// Evaluate preconditions.
+		// Evaluate every independent gate before repository-controlled policy
+		// code. A nil policy result makes that gate skip on this first pass.
 		pcInputs := preconditions.Inputs{
 			StackRef:           s.Ref(),
 			PRIsFork:           pr.IsFork,
@@ -617,7 +592,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			HasFreshPreview:    prev.Found,
 			PreviewAge:         prev.Age,
 			PreviewSucceeded:   prev.Succeeded,
-			PolicyPassed:       policyPtr,
 			ApprovalsSatisfied: approvalsRes.Satisfied,
 			LockAcquirable:     acquired,
 			LockBlockedByPR:    lockBlockedBy,
@@ -628,6 +602,31 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			BreakGlassOverrideFreeze: bgCfg.OverrideFreeze,
 		}
 		pcResult := preconditions.Evaluate(preCfg, pcInputs)
+
+		// Run hooks only after the independent gates pass, then evaluate the
+		// policy result as the final gate decision for this stack.
+		redactor := BuildRedactor(in.Shared)
+		hooks := HooksFromEngine(in.Config)
+		if !pcResult.Blocked && len(hooks) > 0 {
+			policyTarget := ss
+			if prev.Plan != nil {
+				policyTarget = *prev.Plan
+			}
+			policyPassed, policyResults, policyErr := RunPolicyForStack(ctx, hooks, s, policyTarget, redactor)
+			if prev.Plan == nil || policyErr != nil {
+				if policyErr != nil {
+					slog.Warn("policy execution failed", "stack", s.Ref(), "err", policyErr)
+				} else {
+					slog.Warn("policy skipped: no preview plan to evaluate", "stack", s.Ref())
+				}
+				policyPassed = false
+			}
+			pcInputs.PolicyPassed = &policyPassed
+			pcResult = preconditions.Evaluate(preCfg, pcInputs)
+			if len(policyResults) > 0 {
+				ss.FullPlan += policyRender(policyResults)
+			}
+		}
 		for _, g := range pcResult.Overridden {
 			if !overriddenSeen[g] {
 				overriddenSeen[g] = true
@@ -650,6 +649,30 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			continue
 		}
 
+		if !stateAuthAcquired {
+			resolvedStateEnv, stateCleanup, stateErr := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+			if stateErr != nil {
+				ss.Status = summary.StatusError
+				ss.Error = redactor.Redact(stateErr.Error())
+				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state auth failed")
+				summaries = append(summaries, ss)
+				continue
+			}
+			defer stateCleanup()
+			stateEnv = mergeEnv(executionEnv, resolvedStateEnv)
+			stateAuthAcquired = true
+		}
+		if !pulumiLoginDone {
+			if loginErr := PulumiLogin(ctx, in.Config, stateEnv); loginErr != nil {
+				ss.Status = summary.StatusError
+				ss.Error = redactor.Redact(loginErr.Error())
+				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state login failed")
+				summaries = append(summaries, ss)
+				continue
+			}
+			pulumiLoginDone = true
+		}
+
 		// Gates green - acquire auth creds and run apply. authCleanup must
 		// run before the loop iteration ends so on-disk credential
 		// artefacts (e.g. GCP WIF token files) do not outlive their use.
@@ -661,6 +684,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			summaries = append(summaries, ss)
 			continue
 		}
+		authEnv = mergeEnv(stateEnv, authEnv)
 		for _, v := range authEnv {
 			redactor.AddSecret(v)
 		}

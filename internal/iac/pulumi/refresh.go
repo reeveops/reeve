@@ -50,7 +50,12 @@ func (e *Engine) Refresh(ctx context.Context, stack discovery.Stack, opts iac.Re
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
-	cmd.Env = commandEnv(opts.Env, false)
+	childEnv, cleanup, envErr := commandEnv(opts.Env, false)
+	if envErr != nil {
+		return iac.RefreshResult{}, envErr
+	}
+	defer cleanup()
+	cmd.Env = childEnv
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

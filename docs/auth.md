@@ -78,6 +78,35 @@ Used to detect conflicts:
 - `github-identity` - `github_app`
 - Secret managers and Vault do not conflict (multiple allowed).
 
+## Child process credential boundary
+
+Reeve constructs the environment for every Pulumi, Terraform, OpenTofu, and policy subprocess.
+It does not copy the controller process environment into those commands.
+
+The constructed environment contains:
+
+- Ambient values for `COLORTERM`, `FORCE_COLOR`, `LANG`, `LANGUAGE`, `NO_COLOR`, `PATH`, `SSL_CERT_DIR`, `SSL_CERT_FILE`, `TEMP`, `TERM`, `TMP`, `TMPDIR`, `TZ`, and every `LC_*` key.
+- `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` from an isolated CI home or the existing local environment.
+- Credentials selected by auth bindings for the current stack and mode.
+- Credentials selected by `engine.state.auth_provider` for backend access.
+- `TF_IN_AUTOMATION=1` for Terraform and OpenTofu commands.
+- `PULUMI_EXPERIMENTAL=true` for Pulumi saved-plan commands.
+
+CI engine processes receive a private temporary `HOME` and XDG directories that are deleted when the run ends.
+Local runs retain the operator's home paths so local CLI profiles continue to work.
+
+Preview, refresh, and drift resolve state authentication before invoking an engine.
+Apply waits until approvals, checks, preview, lock, freeze, fork, draft, and policy gates pass before resolving state credentials or running Pulumi login.
+
+Stack credentials override state credentials when both explicitly provide the same environment key.
+
+- Each acquired credential set is cleaned after use.
+- Drift cleans an expired credential set before acquiring its replacement.
+- Drift cleans the replacement credential set after the final attempt.
+
+This boundary prevents accidental ambient inheritance but is not an operating-system sandbox.
+Run approved untrusted code under a separate user, container, VM, or job boundary.
+
 ---
 
 ## AWS OIDC (`aws_oidc`)

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -35,9 +34,12 @@ func (e *Engine) DriftCheck(ctx context.Context, stack discovery.Stack, opts iac
 		refresh := exec.CommandContext(refCtx, e.Binary, "refresh", "--stack", stack.Name, "--yes", "--non-interactive")
 		iac.SetupGracefulStop(refresh, 0)
 		refresh.Dir = cwd
-		if len(opts.Env) > 0 {
-			refresh.Env = append(os.Environ(), flattenEnv(opts.Env)...)
+		childEnv, cleanup, envErr := commandEnv(opts.Env, false)
+		if envErr != nil {
+			return iac.PreviewResult{}, envErr
 		}
+		defer cleanup()
+		refresh.Env = childEnv
 		var rstderr bytes.Buffer
 		refresh.Stderr = &rstderr
 		// A refresh failure is a check failure, not "no drift". Return a
@@ -70,9 +72,12 @@ func (e *Engine) DriftCheck(ctx context.Context, stack discovery.Stack, opts iac
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
-	if len(opts.Env) > 0 {
-		cmd.Env = append(os.Environ(), flattenEnv(opts.Env)...)
+	childEnv, cleanup, envErr := commandEnv(opts.Env, false)
+	if envErr != nil {
+		return iac.PreviewResult{}, envErr
 	}
+	defer cleanup()
+	cmd.Env = childEnv
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

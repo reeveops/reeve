@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/reeveops/reeve/internal/core/redact"
@@ -59,6 +60,24 @@ func TestTemplateExpansion(t *testing.T) {
 	res := Run(context.Background(), h, tc, redact.New())
 	if !contains(res.Stdout, "stack=prod project=api") {
 		t.Fatalf("expansion failed: %q", res.Stdout)
+	}
+}
+
+func TestRunDoesNotInheritControllerEnvironment(t *testing.T) {
+	t.Setenv("REEVE_SENTINEL_SECRET", "controller-only")
+	h := Hook{
+		Name: "environment", Command: []string{"sh", "-c", "printf %s \"${REEVE_SENTINEL_SECRET-unset}\""},
+		OnFail: FailBlock, Required: true,
+	}
+	res := Run(context.Background(), h, Context{}, redact.New())
+	if res.Outcome != "pass" {
+		t.Fatalf("hook failed: %+v", res)
+	}
+	if res.Stdout != "unset" {
+		t.Fatalf("controller environment leaked to hook: %q", res.Stdout)
+	}
+	if os.Getenv("REEVE_SENTINEL_SECRET") != "controller-only" {
+		t.Fatal("test unexpectedly changed the controller environment")
 	}
 }
 

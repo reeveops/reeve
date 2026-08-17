@@ -227,7 +227,12 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
-	cmd.Env = commandEnv(opts.Env, opts.SavePlanPath != "")
+	childEnv, cleanup, envErr := commandEnv(opts.Env, opts.SavePlanPath != "")
+	if envErr != nil {
+		return iac.PreviewResult{}, fmt.Errorf("prepare pulumi environment: %w", envErr)
+	}
+	defer cleanup()
+	cmd.Env = childEnv
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -310,9 +315,12 @@ func (e *Engine) previewDiff(ctx context.Context, stack discovery.Stack, opts ia
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
-	if len(opts.Env) > 0 {
-		cmd.Env = append(os.Environ(), flattenEnv(opts.Env)...)
+	childEnv, cleanup, envErr := commandEnv(opts.Env, false)
+	if envErr != nil {
+		return ""
 	}
+	defer cleanup()
+	cmd.Env = childEnv
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -343,29 +351,18 @@ func formatDiff(text string) string {
 	return strings.Join(lines, "\n")
 }
 
-func flattenEnv(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k, v := range m {
-		out = append(out, fmt.Sprintf("%s=%s", k, v))
-	}
-	return out
-}
-
 // commandEnv builds the child environment. experimental is set only for the
 // invocations that pass an update-plan flag: Pulumi keeps `--save-plan` and
 // `--plan` behind PULUMI_EXPERIMENTAL, and turning that on globally would
 // also unhide unrelated experimental behavior for every other command reeve
 // runs. Scoping it to the two calls that need it keeps the blast radius to
 // the feature the operator opted into.
-func commandEnv(env map[string]string, experimental bool) []string {
-	if len(env) == 0 && !experimental {
-		return nil // inherit the parent environment unchanged
-	}
-	out := append(os.Environ(), flattenEnv(env)...)
+func commandEnv(env map[string]string, experimental bool) ([]string, func(), error) {
+	defaults := map[string]string{}
 	if experimental {
-		out = append(out, "PULUMI_EXPERIMENTAL=true")
+		defaults["PULUMI_EXPERIMENTAL"] = "true"
 	}
-	return out
+	return iac.CommandEnv(env, defaults)
 }
 
 // compile-time check: pulumi satisfies the full engine contract.

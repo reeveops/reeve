@@ -2,7 +2,7 @@
 experimental = true
 
 [tools]
-go = "latest"
+go = "1.26.6"
 goreleaser = "latest"
 # Pinned >= 2.12: older binaries (e.g. a runner-preinstalled 2.5.0) fail to
 # load .golangci.yml against this repo's `go 1.26.5` directive.

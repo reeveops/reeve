@@ -1,6 +1,7 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,15 +9,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/redact"
 	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/iac"
 	"github.com/reeveops/reeve/internal/notify"
 )
 
 // PulumiLogin runs `pulumi login <backendURL>` if a backend URL is configured.
-func PulumiLogin(ctx context.Context, cfg *schemas.Engine) error {
+func PulumiLogin(ctx context.Context, cfg *schemas.Engine, env map[string]string) error {
 	if cfg == nil || cfg.Engine.State.URL == "" {
 		return nil
 	}
@@ -27,9 +31,24 @@ func PulumiLogin(ctx context.Context, cfg *schemas.Engine) error {
 	// #nosec G204 -- binary is engine.binary.path from operator config; `login` and the backend
 	// URL are separate argv elements, never a shell string
 	cmd := exec.CommandContext(ctx, binary, "login", cfg.Engine.State.URL)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	childEnv, cleanup, err := iac.CommandEnv(env, nil)
+	if err != nil {
+		return fmt.Errorf("prepare pulumi login environment: %w", err)
+	}
+	defer cleanup()
+	cmd.Env = childEnv
+	if err = cmd.Run(); err != nil {
+		r := redact.New()
+		for _, value := range env {
+			r.AddSecret(value)
+		}
+		message := strings.TrimSpace(r.Redact(output.String()))
+		if message != "" {
+			return fmt.Errorf("pulumi login %s: %w: %s", cfg.Engine.State.URL, err, message)
+		}
 		return fmt.Errorf("pulumi login %s: %w", cfg.Engine.State.URL, err)
 	}
 	return nil

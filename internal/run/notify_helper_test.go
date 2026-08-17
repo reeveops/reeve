@@ -2,11 +2,40 @@ package run
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/summary"
 	"github.com/reeveops/reeve/internal/notify"
 )
+
+func TestPulumiLoginUsesExplicitEnvAndRedactsFailure(t *testing.T) {
+	home := t.TempDir()
+	binary := filepath.Join(t.TempDir(), "pulumi")
+	script := "#!/bin/sh\nprintf yes > \"$HOME/login-ran\"\nprintf %s \"$PULUMI_ACCESS_TOKEN\" >&2\nexit 1\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &schemas.Engine{Engine: schemas.EngineBody{
+		Binary: schemas.EngineBinary{Path: binary},
+		State:  schemas.EngineState{URL: "test-backend"},
+	}}
+	err := PulumiLogin(context.Background(), cfg, map[string]string{
+		"HOME": home, "PULUMI_ACCESS_TOKEN": "state-secret-token",
+	})
+	if err == nil {
+		t.Fatal("expected fake login failure")
+	}
+	if strings.Contains(err.Error(), "state-secret-token") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("login error was not redacted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "login-ran")); err != nil {
+		t.Fatalf("login did not receive explicit HOME: %v", err)
+	}
+}
 
 type captureChannel struct {
 	events   []notify.Event

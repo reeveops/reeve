@@ -2,10 +2,13 @@ package run
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/reeveops/reeve/internal/audit"
+	"github.com/reeveops/reeve/internal/auth"
 	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
@@ -174,6 +177,49 @@ func TestApplyTriggerMergeStillEnforcesApprovals(t *testing.T) {
 	}
 	if len(engine.applied) != 0 {
 		t.Fatalf("nothing may apply without approval on merge: %v", engine.applied)
+	}
+}
+
+func TestApplyBlockedGateDoesNotRunPolicyHook(t *testing.T) {
+	engine, fv := trigFixture()
+	fv.approvalsList = nil
+	store, _ := filesystem.New(t.TempDir())
+	in := trigApplyInput(t, engine, fv, "comment", "comment", store)
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	in.Config.Engine.PolicyHooks = []schemas.PolicyHookYAML{{
+		Name: "marker", Command: []string{"touch", marker},
+	}}
+	loginMarker := filepath.Join(t.TempDir(), "login-ran")
+	loginBinary := filepath.Join(t.TempDir(), "fake-pulumi")
+	if err := os.WriteFile(loginBinary, []byte("#!/bin/sh\ntouch \""+loginMarker+"\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	in.Config.Engine.Binary.Path = loginBinary
+	in.Config.Engine.State.URL = "test-backend"
+	stateAcquired := false
+	in.Config.Engine.State.AuthProvider = "state"
+	in.AuthRegistry = auth.NewRegistry()
+	if err := in.AuthRegistry.Register(&fakeProvider{
+		name: "state", typ: "test", acquired: &stateAcquired,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := Apply(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !out.Blocked {
+		t.Fatal("unapproved stack must be blocked")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("policy hook ran before independent gates passed: %v", err)
+	}
+	if _, err := os.Stat(loginMarker); !os.IsNotExist(err) {
+		t.Fatalf("backend login ran before independent gates passed: %v", err)
+	}
+	if stateAcquired {
+		t.Fatal("state credentials were acquired before independent gates passed")
 	}
 }
 
