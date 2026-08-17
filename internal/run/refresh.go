@@ -98,10 +98,6 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	if !in.Engine.Capabilities().SupportsRefresh {
 		return nil, fmt.Errorf("engine %s does not support refresh", in.Engine.Name())
 	}
-	if err := PulumiLogin(ctx, in.Config); err != nil {
-		return nil, err
-	}
-
 	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate stacks: %w", err)
@@ -141,6 +137,17 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	if len(target) == 0 {
 		return &RefreshOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
 	}
+	executionEnv, executionCleanup, err := iac.ExecutionEnv()
+	if err != nil {
+		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
+	}
+	defer executionCleanup()
+	stateEnv, stateCleanup, err := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+	if err != nil {
+		return nil, err
+	}
+	defer stateCleanup()
+	stateEnv = mergeEnv(executionEnv, stateEnv)
 
 	freezeCfg := toFreezeConfig(in.Shared)
 	ttl := LockTTL(in.Shared)
@@ -148,6 +155,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 
 	summaries := make([]summary.StackSummary, 0, len(target))
 	anyBlocked, anyFailed := false, false
+	pulumiLoginDone := false
 	for _, s := range target {
 		ss := summary.StackSummary{Project: s.Project, Stack: s.Name, Env: s.Env}
 		if ctx.Err() != nil {
@@ -211,6 +219,19 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		}
 
 		redactor := BuildRedactor(in.Shared)
+		if !pulumiLoginDone {
+			if loginErr := PulumiLogin(ctx, in.Config, stateEnv); loginErr != nil {
+				ss.Status = summary.StatusError
+				ss.Error = redactor.Redact(loginErr.Error())
+				anyFailed = true
+				if acquired && !in.DryRun {
+					releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state login failed")
+				}
+				summaries = append(summaries, ss)
+				continue
+			}
+			pulumiLoginDone = true
+		}
 		// ModeApply: a refresh writes state, so it needs write credentials,
 		// not the read-only preview role.
 		authEnv, authCleanup, aerr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModeApply, LocalAuth{})
@@ -224,6 +245,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			summaries = append(summaries, ss)
 			continue
 		}
+		authEnv = mergeEnv(stateEnv, authEnv)
 		for _, v := range authEnv {
 			redactor.AddSecret(v)
 		}

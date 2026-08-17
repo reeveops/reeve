@@ -202,7 +202,20 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 	}
 
-	if err := PulumiLogin(ctx, in.Config); err != nil {
+	executionEnv, executionCleanup, err := iac.ExecutionEnv()
+	if err != nil {
+		outcome = "failed"
+		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
+	}
+	defer executionCleanup()
+	stateEnv, stateCleanup, err := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+	if err != nil {
+		outcome = "failed"
+		return nil, err
+	}
+	defer stateCleanup()
+	stateEnv = mergeEnv(executionEnv, stateEnv)
+	if err := PulumiLogin(ctx, in.Config, stateEnv); err != nil {
 		outcome = "failed"
 		return nil, err
 	}
@@ -240,7 +253,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	appCfg := toApprovalsConfig(in.Shared)
 	summaries := make([]summary.StackSummary, 0, len(target))
 	for _, s := range target {
-		ss := runPreviewOne(ctx, in, otelProvider, s, runID)
+		ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv)
 		rules := approvals.Resolve(appCfg, s.Ref())
 		ss.RequiredApprovers = rules.Approvers
 		summaries = append(summaries, ss)
@@ -335,7 +348,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}, nil
 }
 
-func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string) summary.StackSummary {
+func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string) summary.StackSummary {
 	redactor := BuildRedactor(in.Shared)
 
 	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview,
@@ -347,6 +360,7 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 		}
 	}
 	defer authCleanup()
+	authEnv = mergeEnv(stateEnv, authEnv)
 	// Register every credential literal with the redactor - if any leaks
 	// into stdout, it gets scrubbed.
 	for _, v := range authEnv {

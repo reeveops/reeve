@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -67,11 +68,14 @@ func (r *Registry) AcquireAll(ctx context.Context, names []string) (map[string]s
 	for _, n := range names {
 		p, ok := r.Get(n)
 		if !ok {
-			return nil, nil, fmt.Errorf("provider %q not registered", n)
+			return acquireFailure(creds, fmt.Errorf("provider %q not registered", n))
 		}
 		c, err := p.Acquire(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("acquire %s (%s): %w", n, p.Type(), err)
+			return acquireFailure(creds, fmt.Errorf("acquire %s (%s): %w", n, p.Type(), err))
+		}
+		if c == nil {
+			return acquireFailure(creds, fmt.Errorf("acquire %s (%s): provider returned nil credential", n, p.Type()))
 		}
 		for k, v := range c.Env {
 			merged[k] = v
@@ -79,6 +83,26 @@ func (r *Registry) AcquireAll(ctx context.Context, names []string) (map[string]s
 		creds = append(creds, c)
 	}
 	return merged, creds, nil
+}
+
+func acquireFailure(creds []*Credential, primary error) (map[string]string, []*Credential, error) {
+	if cleanupErr := cleanupCredentials(creds); cleanupErr != nil {
+		primary = errors.Join(primary, fmt.Errorf("unwind acquired credentials: %w", cleanupErr))
+	}
+	return nil, nil, primary
+}
+
+func cleanupCredentials(creds []*Credential) error {
+	var errs []error
+	for i := len(creds) - 1; i >= 0; i-- {
+		if creds[i] == nil || creds[i].Cleanup == nil {
+			continue
+		}
+		if err := creds[i].Cleanup(); err != nil {
+			errs = append(errs, fmt.Errorf("cleanup %s: %w", creds[i].Source, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // RefuseLocalInCI returns an error if the given provider type is a

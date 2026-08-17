@@ -59,7 +59,12 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 	cmd := exec.CommandContext(runCtx, e.Binary, args...)
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = cwd
-	cmd.Env = commandEnv(opts.Env, opts.PlanPath != "")
+	childEnv, cleanup, envErr := commandEnv(opts.Env, opts.PlanPath != "")
+	if envErr != nil {
+		return iac.ApplyResult{}, envErr
+	}
+	defer cleanup()
+	cmd.Env = childEnv
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

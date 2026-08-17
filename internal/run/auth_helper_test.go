@@ -13,15 +13,46 @@ type fakeProvider struct {
 	name, typ string
 	env       map[string]string
 	err       error
+	cleanup   func() error
+	acquired  *bool
 }
 
 func (p *fakeProvider) Name() string { return p.name }
 func (p *fakeProvider) Type() string { return p.typ }
 func (p *fakeProvider) Acquire(context.Context) (*auth.Credential, error) {
+	if p.acquired != nil {
+		*p.acquired = true
+	}
 	if p.err != nil {
 		return nil, p.err
 	}
-	return &auth.Credential{Env: p.env, Kind: p.typ, Source: p.name}, nil
+	return &auth.Credential{Env: p.env, Kind: p.typ, Source: p.name, Cleanup: p.cleanup}, nil
+}
+
+func TestResolveStateAuthEnv(t *testing.T) {
+	cleaned := false
+	reg := auth.NewRegistry()
+	if err := reg.Register(&fakeProvider{
+		name: "pulumi-state", typ: "gcp_secret_manager",
+		env:     map[string]string{"PULUMI_ACCESS_TOKEN": "short-lived"},
+		cleanup: func() error { cleaned = true; return nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &schemas.Engine{Engine: schemas.EngineBody{
+		State: schemas.EngineState{AuthProvider: "pulumi-state"},
+	}}
+	env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["PULUMI_ACCESS_TOKEN"] != "short-lived" {
+		t.Fatalf("state credential missing: %#v", env)
+	}
+	cleanup()
+	if !cleaned {
+		t.Fatal("state credential cleanup did not run")
+	}
 }
 
 func localAuthCfg() *schemas.Auth {

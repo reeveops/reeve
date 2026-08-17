@@ -119,15 +119,17 @@ func realRun(ctx context.Context, dir string, env map[string]string, bin string,
 	iac.SetupGracefulStop(cmd, 0)
 	cmd.Dir = dir
 	// TF_IN_AUTOMATION suppresses interactive-use hints in CLI output.
-	cmd.Env = append(os.Environ(), "TF_IN_AUTOMATION=1")
-	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
+	childEnv, cleanup, err := iac.CommandEnv(env, map[string]string{"TF_IN_AUTOMATION": "1"})
+	if err != nil {
+		return execResult{ExitCode: -1}, fmt.Errorf("prepare child environment: %w", err)
 	}
+	defer cleanup()
+	cmd.Env = childEnv
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	res := execResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
