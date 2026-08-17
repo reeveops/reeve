@@ -66,28 +66,17 @@ verify_sha256() {
 # verify_signature <checksums-file> <bundle-file>
 # Verifies the cosign keyless bundle over the checksums file. The checksum
 # already chains every artifact to this file, so signing it signs the set.
-# Default is best-effort: without cosign or a published bundle we proceed on
-# the checksum alone (so existing consumers are unaffected), but a bundle
-# that is PRESENT and fails to verify is always rejected. Set
-# REEVE_REQUIRE_SIGNATURE=1 to make a valid signature mandatory.
+# A valid bundle and cosign are mandatory. Any failure falls back to a source
+# build, so an unverified binary never reaches the action cache.
 verify_signature() {
   local sums="$1" bundle="$2"
-  local require="${REEVE_REQUIRE_SIGNATURE:-}"
   if ! command -v cosign > /dev/null 2>&1; then
-    if [[ "$require" == "1" ]]; then
-      echo "REEVE_REQUIRE_SIGNATURE=1 but cosign is not installed; cannot verify signature" >&2
-      return 1
-    fi
-    echo "cosign not installed; skipping signature check (checksum still enforced)" >&2
-    return 0
+    echo "cosign is not installed; cannot verify release signature" >&2
+    return 1
   fi
   if [[ ! -f "$bundle" ]]; then
-    if [[ "$require" == "1" ]]; then
-      echo "REEVE_REQUIRE_SIGNATURE=1 but this release published no signature bundle" >&2
-      return 1
-    fi
-    echo "no signature bundle for this release; skipping signature check" >&2
-    return 0
+    echo "release published no signature bundle" >&2
+    return 1
   fi
   # Keyless identity: any workflow in the source repo, GitHub's OIDC issuer.
   local repo="${REEVE_REPO:-}" id_re

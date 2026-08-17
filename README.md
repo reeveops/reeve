@@ -133,7 +133,7 @@ all of this only matters on a cache miss:
 | Pin                | Binary source                                                                                           |
 | ------------------ | ------------------------------------------------------------------------------------------------------- |
 | `@vX.Y.Z`          | Release tarball from that release, verified against its cosign-signed `checksums.txt`                   |
-| `@master` / `@next`| Newest per-push `<branch>-<sha>` prerelease binary, verified against its checksum and cosign signature (best-effort; set `REEVE_REQUIRE_SIGNATURE=1` to require it) |
+| `@master` / `@next`| Newest per-push `<branch>-<sha>` prerelease binary, requiring a valid checksum and cosign signature |
 | anything else      | Built from source on the runner (SHA pins, feature branches, forks)                                     |
 
 Prebuilt paths save the ~30s+ Go toolchain setup + build on first runs. Any

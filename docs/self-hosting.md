@@ -329,15 +329,13 @@ three paths; only a cache miss triggers a download or build. The edge
 assets are published by `.github/workflows/edge-build.yml` on every push
 to `master`/`next` as a per-commit prerelease tagged `<branch>-<sha>`
 (the newest ten are kept). The action resolves the newest such prerelease,
-verifies its `checksums.txt` and — when `cosign` is present — the keyless
-`checksums.txt.bundle`, then installs the binary; any failure silently
+verifies its `checksums.txt` and keyless `checksums.txt.bundle`, then installs
+the binary; any failure silently
 falls back to a source build. Because it takes the *newest* prerelease, an
 edge binary can come from a slightly newer commit than the pinned action
 source. Prebuilt binaries save the ~30s+ Go toolchain + build cost on cache
 misses. For reproducible, version-pinned, always-signed distribution pin
-`@vX.Y.Z` (or a commit SHA, which always builds from the pinned source); set
-`REEVE_REQUIRE_SIGNATURE=1` to make the fast-path refuse an unsigned edge
-binary.
+`@vX.Y.Z` (or a commit SHA, which always builds from the pinned source).
 
 ---
 

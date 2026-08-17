@@ -11,8 +11,8 @@ branding:
 #        @vX.Y.Z       -> that release's tarball, verified against the
 #                         release's checksums.txt (signed release pipeline).
 #        @master/@next -> the newest <branch>-<sha> per-push prerelease
-#                         (unsigned; one release per commit, published by
-#                         edge-build.yml).
+#                         (cosign-signed; one release per commit, published
+#                         by edge-build.yml).
 #   3. Any other ref (SHA pins, branches, forks), or any download/verify
 #      failure -> build from source (~30s on the first miss), as before.
 
@@ -48,7 +48,9 @@ inputs:
     required: false
     default: ""
   extra-args:
-    description: Additional args passed verbatim to the reeve subcommand.
+    description: >-
+      Additional whitespace-delimited args passed to the reeve subcommand.
+      Shell quoting and metacharacters are not evaluated.
     required: false
     default: ""
   allowed-associations:
@@ -109,7 +111,7 @@ runs:
 
     - name: Restore reeve binary cache
       id: reeve-cache
-      uses: actions/cache@v6
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/reeve-bin/reeve
         key: reeve-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
@@ -120,6 +122,11 @@ runs:
     # network, unsupported arch) logs why and reports fetched=false, which
     # re-enables the source-build steps below. actions/cache's post step
     # saves whatever ends up at the cached path, downloaded or built alike.
+    - name: Install cosign for binary verification
+      if: steps.reeve-cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
     - name: Fetch prebuilt binary
       id: reeve-fetch
       if: steps.reeve-cache.outputs.cache-hit != 'true'
@@ -138,7 +145,7 @@ runs:
 
     - name: Set up Go (from reeve's go.mod)
       if: steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
-      uses: actions/setup-go@v7
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
       with:
         go-version-file: ${{ github.action_path }}/go.mod
         cache-dependency-path: ${{ github.action_path }}/go.sum
@@ -165,21 +172,21 @@ runs:
       # refs/pull/<n>/head, so keying on issue.number made the job fail red.
       # issue.pull_request is present only when the issue is a PR.
       if: ${{ github.event.pull_request.number || github.event.issue.pull_request }}
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
         fetch-depth: 1
 
     - name: Authenticate to GCP
       if: ${{ inputs.gcp-workload-identity-provider != '' }}
-      uses: google-github-actions/auth@v3
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
       with:
         workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
         service_account: ${{ inputs.gcp-service-account }}
 
     - name: Install Pulumi CLI
       if: ${{ inputs.pulumi-version != '' }}
-      uses: pulumi/actions@v7
+      uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7
       with:
         pulumi-version: ${{ inputs.pulumi-version }}
 
@@ -190,6 +197,10 @@ runs:
         SLACK_BOT_TOKEN: ${{ inputs.slack-token }}
         REEVE_BIN: ${{ runner.temp }}/reeve-bin/reeve
         REEVE_LOG_LEVEL: ${{ inputs.log-level }}
+        REEVE_INPUT_ROOT: ${{ inputs.root }}
+        REEVE_INPUT_COMMAND: ${{ inputs.command }}
+        REEVE_INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
+        REEVE_RUN_ON_APPROVAL: ${{ inputs.run-on-approval }}
         # Threaded to the reeve binary so the opt-in pr_comment approval source
         # can re-enforce the SAME authorization gate this step applies to
         # command dispatch when it reads historical `/reeve approve` comments.
@@ -197,12 +208,15 @@ runs:
         REEVE_COMMAND_PREFIXES: ${{ inputs.command-prefix }}
       run: |
         set -euo pipefail
-        ROOT="${{ inputs.root }}"
+        ROOT="$REEVE_INPUT_ROOT"
         if [ -z "$ROOT" ]; then ROOT="$GITHUB_WORKSPACE"; fi
         cd "$ROOT"
 
-        CMD="${{ inputs.command }}"
-        EXTRA="${{ inputs.extra-args }}"
+        CMD="$REEVE_INPUT_COMMAND"
+        EXTRA_ARGS=()
+        if [[ -n "$REEVE_INPUT_EXTRA_ARGS" ]]; then
+          read -r -a EXTRA_ARGS <<< "$REEVE_INPUT_EXTRA_ARGS"
+        fi
 
         # Auto-detect command from event context when not explicitly set
         if [[ -z "$CMD" ]]; then
@@ -211,7 +225,7 @@ runs:
             # and the apply gate re-checks approvals at apply time, so a run
             # here is pure CI cost - its only effect is the approved-state
             # notification (Slack "ready to apply" update).
-            if [[ "${{ inputs.run-on-approval }}" != "true" ]]; then
+            if [[ "$REEVE_RUN_ON_APPROVAL" != "true" ]]; then
               echo "pull_request_review dispatch is opt-in (run-on-approval is not 'true') - skipping."
               exit 0
             fi
@@ -228,7 +242,7 @@ runs:
             # start a run.
             ASSOC=$(jq -r '.review.author_association // "NONE"' < "$GITHUB_EVENT_PATH")
             AUTHORIZED=false
-            IFS=',' read -ra ALLOWED <<< "${{ inputs.allowed-associations }}"
+            IFS=',' read -ra ALLOWED <<< "$REEVE_ALLOWED_ASSOCIATIONS"
             for A in "${ALLOWED[@]}"; do
               A=$(printf '%s' "$A" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
               if [[ -n "$A" && "$A" == "$ASSOC" ]]; then
@@ -264,7 +278,7 @@ runs:
                 MERGED=$(jq -r '.pull_request.merged // false' < "$GITHUB_EVENT_PATH")
                 if [[ "$MERGED" == "true" ]]; then
                   CMD="apply"
-                  EXTRA="$EXTRA --trigger-source merge"
+                  EXTRA_ARGS+=(--trigger-source merge)
                 else
                   echo "pull_request closed without merge - skipping."
                   exit 0
@@ -294,7 +308,7 @@ runs:
             # The first word must exactly match one of the configured
             # command prefixes (default: "/reeve").
             PREFIX_OK=false
-            IFS=',' read -ra PREFIXES <<< "${{ inputs.command-prefix }}"
+            IFS=',' read -ra PREFIXES <<< "$REEVE_COMMAND_PREFIXES"
             for P in "${PREFIXES[@]}"; do
               P=$(printf '%s' "$P" | tr -d '[:space:]')
               if [[ -n "$P" && "$P" == "$PREFIX" ]]; then
@@ -312,7 +326,7 @@ runs:
             # author_association to be in the allowlist before ANY verb.
             ASSOC=$(jq -r '.comment.author_association // "NONE"' < "$GITHUB_EVENT_PATH")
             AUTHORIZED=false
-            IFS=',' read -ra ALLOWED <<< "${{ inputs.allowed-associations }}"
+            IFS=',' read -ra ALLOWED <<< "$REEVE_ALLOWED_ASSOCIATIONS"
             for A in "${ALLOWED[@]}"; do
               A=$(printf '%s' "$A" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
               if [[ -n "$A" && "$A" == "$ASSOC" ]]; then
@@ -330,16 +344,16 @@ runs:
                 # Comment-initiated apply. The binary rejects this (no-op) when
                 # apply.trigger is "merge", so exactly one initiation path
                 # applies per repo.
-                EXTRA="$EXTRA --trigger-source comment"
+                EXTRA_ARGS+=(--trigger-source comment)
                 # Re-apply an already-applied commit: "--force" or "force" as a token.
                 if [[ " $REST " == *" --force "* || " $REST " == *" force "* ]]; then
-                  EXTRA="$EXTRA --force"
+                  EXTRA_ARGS+=(--force)
                 fi
                 # Reconcile state with live infrastructure before applying.
                 # Only the explicit flag form: "refresh" as a bare word is
                 # ambiguous next to the /reeve refresh command.
                 if [[ " $REST " == *" --refresh "* ]]; then
-                  EXTRA="$EXTRA --refresh"
+                  EXTRA_ARGS+=(--refresh)
                 fi
                 ;;
               refresh)
@@ -347,10 +361,10 @@ runs:
                 # believes exists. Scoped to the PR's stacks unless --all.
                 CMD="refresh"
                 if [[ " $REST " == *" --dry-run "* || " $REST " == *" dry-run "* ]]; then
-                  EXTRA="$EXTRA --dry-run"
+                  EXTRA_ARGS+=(--dry-run)
                 fi
                 if [[ " $REST " == *" --all "* || " $REST " == *" all "* ]]; then
-                  EXTRA="$EXTRA --all"
+                  EXTRA_ARGS+=(--all)
                 fi
                 ;;
               ready)         CMD="ready" ;;
@@ -369,7 +383,7 @@ runs:
                 # strict parse (and posts a helpful comment when malformed);
                 # the raw comment body travels via env, never shell-expanded.
                 CMD="apply"
-                EXTRA="$EXTRA --break-glass"
+                EXTRA_ARGS+=(--break-glass)
                 REEVE_BREAK_GLASS_COMMENT="$COMMENT_BODY"
                 export REEVE_BREAK_GLASS_COMMENT
                 ;;
@@ -386,7 +400,7 @@ runs:
                   UNLOCK_REF="$FIRST"
                 fi
                 if [[ " $REST " == *" --force "* || " $REST " == *" force "* ]]; then
-                  EXTRA="$EXTRA --force"
+                  EXTRA_ARGS+=(--force)
                 fi
                 ;;
               explain)
@@ -403,7 +417,7 @@ runs:
                   exit 0
                 fi
                 if [[ -n "$FIRST" && "$FIRST" != -* ]]; then
-                  EXTRA="$EXTRA --stack $FIRST"
+                  EXTRA_ARGS+=(--stack "$FIRST")
                 fi
                 ;;
               help)          CMD="pr-help" ;;
@@ -422,31 +436,31 @@ runs:
           preview|"run preview")
             if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
               PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
-              "$REEVE_BIN" run preview --pr "$PR_NUMBER" $EXTRA
+              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
             elif [[ "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
               PR_NUMBER=$(jq -r '.issue.number' < "$GITHUB_EVENT_PATH")
-              "$REEVE_BIN" run preview --pr "$PR_NUMBER" $EXTRA
+              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
             else
-              "$REEVE_BIN" run preview --local $EXTRA
+              "$REEVE_BIN" run preview --local "${EXTRA_ARGS[@]}"
             fi
             ;;
           approved|"run approved")
             # .pull_request.number on the review path; .issue.number on the
             # issue_comment path (/reeve approve).
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run approved --pr "$PR_NUMBER" $EXTRA
+            "$REEVE_BIN" run approved --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
             ;;
           ready|"run ready")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run ready --pr "$PR_NUMBER" $EXTRA
+            "$REEVE_BIN" run ready --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
             ;;
           apply|"run apply")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run apply --pr "$PR_NUMBER" $EXTRA
+            "$REEVE_BIN" run apply --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
             ;;
           refresh|"run refresh")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" $EXTRA
+            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
             ;;
           unlock)
             # PR-scoped lock cleanup: removes this PR from lock holders and
@@ -456,7 +470,9 @@ runs:
             # PR as a comment (the commenter isn't watching the run log).
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
             set +e
-            UNLOCK_OUT=$("$REEVE_BIN" locks unlock ${UNLOCK_REF:+"$UNLOCK_REF"} --pr "$PR_NUMBER" $EXTRA 2>&1)
+            UNLOCK_ARGS=()
+            if [[ -n "$UNLOCK_REF" ]]; then UNLOCK_ARGS+=("$UNLOCK_REF"); fi
+            UNLOCK_OUT=$("$REEVE_BIN" locks unlock "${UNLOCK_ARGS[@]}" --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}" 2>&1)
             UNLOCK_STATUS=$?
             set -e
             printf '%s\n' "$UNLOCK_OUT"
@@ -475,15 +491,17 @@ runs:
             ;;
           pr-help|"run pr-help")
             PR_NUMBER=$(jq -r '.issue.number // 0' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run pr-help --pr "$PR_NUMBER" $EXTRA
+            "$REEVE_BIN" run pr-help --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
             ;;
           "run explain")
             # .issue.number on the issue_comment path; .pull_request.number
             # when a workflow passes command "run explain" on a PR event.
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number // 0' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run explain --pr "$PR_NUMBER" $EXTRA
+            "$REEVE_BIN" run explain --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
             ;;
           *)
-            "$REEVE_BIN" $CMD $EXTRA
+            CMD_ARGS=()
+            read -r -a CMD_ARGS <<< "$CMD"
+            "$REEVE_BIN" "${CMD_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
         esac
