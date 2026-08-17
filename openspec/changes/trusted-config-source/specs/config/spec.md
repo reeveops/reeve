@@ -17,7 +17,19 @@ Every field MUST be trusted-owned unless the specification explicitly marks it w
 
 - **WHEN** the base revision contains a valid engine policy container
 - **AND** a PR adds a uniquely keyed stack declaration using only workload-owned fields
+- **AND** every trusted-owned stack descendant has a base-resolved template
 - **THEN** preview uses the head-owned declaration with trusted auth, state, binary, execution, and policy-hook settings
+
+#### Scenario: A PR changes an existing stack
+
+- **WHEN** HEAD contains the same normalized stack identity as the base
+- **THEN** merge copies only workload-owned descendants from HEAD
+- **AND** every trusted-owned descendant remains sourced from the matching base entry
+
+#### Scenario: A new stack lacks a trusted template
+
+- **WHEN** HEAD adds a stack identity with a trusted-owned descendant that has no base-resolved template
+- **THEN** validation rejects the HEAD configuration before merge or side effects
 
 #### Scenario: A PR adds a stack with trusted controls
 

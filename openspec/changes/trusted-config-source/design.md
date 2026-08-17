@@ -19,8 +19,8 @@ Source-aware validation rejects any environment reference introduced by HEAD at 
 An environment reference is introduced when the HEAD raw scalar contains `${env:...}` and the base lacks a byte-identical scalar at the same path.
 The generic validation error omits the variable name and does not inspect whether the variable exists.
 
-An unchanged HEAD scalar is never expanded or copied into the effective configuration.
-Only the trusted scalar at that path is eligible for expansion.
+For trusted-owned paths, an unchanged HEAD scalar is ignored and only the trusted scalar is eligible for expansion.
+Workload-owned paths are copied from validated HEAD without trusted environment expansion.
 
 ## Field ownership
 
@@ -70,7 +70,7 @@ Empty scalars and collections are accepted only when the existing schema accepts
 
 | Collection | Identity | Merge and deletion rule |
 | --- | --- | --- |
-| `engine.stacks[]` | normalized `(project, path, pattern)` tuple | HEAD replaces the trusted list; omission deletes a workload entry. Duplicate identities fail. |
+| `engine.stacks[]` | normalized `(project, path, pattern)` tuple | HEAD selects identities and order. Matching entries preserve the base object and replace only workload-owned descendants. New entries use the base-resolved trusted template. Missing templates and duplicate identities fail. Omission deletes a workload entry. |
 | `engine.stacks[].stacks[]` | stack name | HEAD replaces the nested set; duplicate names fail. |
 | `engine.filters.exclude[]` | normalized scalar pattern or `stack` value | HEAD replaces the list; duplicate identities fail. |
 | `engine.change_mapping.ignore_changes[]` | normalized pattern | HEAD replaces the list; duplicate patterns fail. |
@@ -82,6 +82,12 @@ Any future workload-owned map or list requires an identity and deletion rule in 
 
 Ambiguous, duplicate, or invalid identities fail before credentials, network sinks, policy hooks, or engine execution.
 Merging workload declarations cannot replace trusted auth, state, binary, execution, or policy-hook fields.
+
+The trusted stack template contains the base-resolved values for every trusted-owned `engine.stacks[]` descendant.
+The current schema has no trusted-owned stack descendants, so its template is empty.
+
+Adding a trusted-owned stack descendant requires a base-owned template source and merge rule in the same spec delta.
+Until that source exists, a new HEAD stack identity fails before side effects.
 
 The run manifest and audit entry record provenance by ownership group instead of only by config type.
 Each record includes the path pattern, keyed entry identity when applicable, source repository, and source commit without configuration values.
@@ -95,7 +101,9 @@ Repository bootstrap requires the configuration to land on the base branch befor
 The trusted engine config and its `engine` container must exist on the base revision.
 HEAD may add a keyed stack entry only through the workload-owned paths in the table.
 
-A stack entry containing auth, binary, state, execution, or policy fields fails strict decoding.
+A PR-added or modified auth, binary, state, execution, or policy field inside a stack entry fails strict decoding under the current schema.
+An unchanged trusted-owned descendant added by a future schema is ignored in HEAD and sourced from the matching base entry or trusted template.
+
 HEAD cannot bootstrap a trusted policy container.
 
 ## Visibility

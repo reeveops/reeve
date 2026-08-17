@@ -19,6 +19,7 @@
 - [ ] Add target-repository routing and checkout-HeadSHA mismatch tests.
 - [ ] Add API failure, missing-file, symlink, and submodule tests.
 - [ ] Add directory, oversized-response, and revision-mismatch tests.
+- [ ] Add matched-stack preservation and missing-template tests.
 - [ ] Add duplicate identity, deletion, null, empty-value, race, and self-modification tests.
 - [ ] Add documentation for control changes and repository bootstrap.
 - [ ] Run `mise run check` and strict OpenSpec validation.
