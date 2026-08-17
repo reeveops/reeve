@@ -13,8 +13,8 @@ name: edge-build
 #
 # Artifacts are signed: checksums.txt is cosign keyless-signed (Sigstore,
 # GH OIDC) and its bundle is published alongside, exactly like the release
-# workflow. The fast-path (fetch-binary.sh) verifies the bundle when cosign
-# is available, and REEVE_REQUIRE_SIGNATURE=1 makes verification mandatory.
+# workflow. The fast-path requires a valid bundle and falls back to source
+# when signature verification is unavailable.
 
 on:
   push:
@@ -29,10 +29,10 @@ jobs:
   edge:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -54,7 +54,7 @@ jobs:
           ls -l dist
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign checksums (keyless)
         run: |
@@ -93,8 +93,7 @@ jobs:
 
           \`checksums.txt\` is cosign keyless-signed; \`checksums.txt.bundle\`
           carries the Sigstore certificate + transparency-log proof. The
-          fast-path verifies it when cosign is present, and
-          \`REEVE_REQUIRE_SIGNATURE=1\` makes verification mandatory. The
+          fast-path requires a valid signature before using the binary. The
           hand-cut \`vX.Y.Z\` releases remain the primary signed distribution.
           EOF
           )" || echo "release create failed (raced with a concurrent push?) - continuing"
