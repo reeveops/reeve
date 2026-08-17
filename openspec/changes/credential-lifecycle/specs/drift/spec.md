@@ -9,11 +9,11 @@ An auth-expiry rebind MUST clean the expired credential set before acquiring its
 
 #### Scenario: A drift check completes
 
-- **WHEN** a drift check acquires credentials and reaches any final outcome
-- **THEN** its cleanup callback runs exactly once
+- **WHEN** a drift check acquires a credential set and reaches an outcome without rebind
+- **THEN** that credential set's cleanup callback runs exactly once
 
 #### Scenario: Expired credentials are rebound
 
 - **WHEN** a drift check retries after an auth-expired result
 - **THEN** the expired credential cleanup runs before replacement acquisition
-- **AND** the replacement credential cleanup runs after the final attempt
+- **AND** the replacement credential set's cleanup callback runs exactly once after the final attempt
