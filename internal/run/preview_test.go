@@ -101,25 +101,33 @@ func TestPreviewEndToEnd(t *testing.T) {
 	}
 }
 
-func TestPlanSucceeded(t *testing.T) {
+func TestPreviewFailedRefs(t *testing.T) {
 	tests := []struct {
 		name   string
 		stacks []summary.StackSummary
-		want   bool
+		want   []string
 	}{
-		{"empty", nil, false},
+		{"empty", nil, nil},
 		{"all planned", []summary.StackSummary{
-			{Status: summary.StatusPlanned},
-			{Status: summary.StatusNoOp},
-		}, true},
+			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+			{Project: "web", Stack: "prod", Status: summary.StatusNoOp},
+		}, nil},
 		{"one error", []summary.StackSummary{
-			{Status: summary.StatusPlanned},
-			{Status: summary.StatusError},
-		}, false},
+			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+			{Project: "web", Stack: "prod", Status: summary.StatusError},
+		}, []string{"web/prod"}},
 	}
 	for _, tt := range tests {
-		if got := planSucceeded(tt.stacks); got != tt.want {
-			t.Errorf("%s: planSucceeded = %v, want %v", tt.name, got, tt.want)
+		got := previewFailedRefs(tt.stacks)
+		if len(got) != len(tt.want) {
+			t.Errorf("%s: previewFailedRefs = %v, want %v", tt.name, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("%s: previewFailedRefs = %v, want %v", tt.name, got, tt.want)
+				break
+			}
 		}
 	}
 }

@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -71,24 +73,35 @@ func loadRunEnv(cmd *cobra.Command) (*runEnv, error) {
 		return nil, err
 	}
 
+	// Each construction step below can block on the network - opening the
+	// bucket, and especially the federated credential exchange - so each
+	// one reports its own duration. Without these the run shows a single
+	// multi-minute gap after "config loaded" with nothing to attribute it
+	// to.
+	t := time.Now()
 	store, err := factory.Open(ctx, cfg.Shared.Bucket, root)
 	if err != nil {
 		return nil, err
 	}
+	slog.Debug("blob store opened", "type", cfg.Shared.Bucket.Type, "ms", time.Since(t).Milliseconds())
 
 	// The one place a repo-context command resolves which engine to use.
 	// Single-engine today - config.Validate rejects multi-engine configs -
 	// so this is the seam a multi-engine config would widen.
 	engineCfg := cfg.Engines[0]
+	t = time.Now()
 	engine, err := iac.New(engineCfg.Engine)
 	if err != nil {
 		return nil, err
 	}
+	slog.Debug("engine adapter constructed", "engine", engine.Name(), "ms", time.Since(t).Milliseconds())
 
+	t = time.Now()
 	authReg, err := authfac.Build(ctx, cfg.Auth)
 	if err != nil {
 		return nil, fmt.Errorf("build auth registry: %w", err)
 	}
+	slog.Debug("auth registry built", "ms", time.Since(t).Milliseconds())
 
 	return &runEnv{
 		ctx: ctx, cfg: cfg, root: root, store: store,

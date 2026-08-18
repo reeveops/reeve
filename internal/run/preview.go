@@ -101,6 +101,14 @@ type PreviewOutput struct {
 	CommentBody string
 	RunID       string
 	DurationSec int
+	// Failed is true when at least one stack errored during preview. The
+	// caller must surface a nonzero exit: a preview that could not plan
+	// every affected stack is not a successful preview.
+	Failed bool
+	// FailedStacks are the refs of the stacks that errored, in run order.
+	FailedStacks []string
+	// CommentPosted is true only when a PR comment was actually written.
+	CommentPosted bool
 }
 
 // Preview runs preview for every stack affected by the PR's changed files
@@ -252,11 +260,18 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 
 	appCfg := toApprovalsConfig(in.Shared)
 	summaries := make([]summary.StackSummary, 0, len(target))
-	for _, s := range target {
+	for i, s := range target {
+		// Stacks preview sequentially and an engine call can take minutes, so
+		// each one brackets itself: without this a multi-stack preview is a
+		// single silent block with no way to tell which stack is slow.
+		slog.Info("preview stack starting", "stack", s.Ref(), "n", i+1, "of", len(target))
+		stackStart := time.Now()
 		ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv)
 		rules := approvals.Resolve(appCfg, s.Ref())
 		ss.RequiredApprovers = rules.Approvers
 		summaries = append(summaries, ss)
+		slog.Info("preview stack finished", "stack", s.Ref(), "status", string(ss.Status),
+			"sec", int(time.Since(stackStart).Seconds()))
 	}
 
 	sort := "status_grouped"
@@ -303,10 +318,12 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		return nil, fmt.Errorf("write manifest: %w", err)
 	}
 
+	commentPosted := false
 	if in.Comments != nil && in.PRNumber > 0 {
 		if err := in.Comments.UpsertComment(ctx, in.PRNumber, body, render.Marker); err != nil {
 			return nil, fmt.Errorf("upsert pr comment: %w", err)
 		}
+		commentPosted = true
 		autoReady := in.Shared != nil && in.Shared.Apply.AutoReady
 		helpBody := render.BuildHelpComment(autoReady)
 		if err := in.Comments.UpsertComment(ctx, in.PRNumber, helpBody, render.HelpMarker); err != nil {
@@ -340,12 +357,23 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 	}
 
-	return &PreviewOutput{
-		Stacks:      summaries,
-		CommentBody: body,
-		RunID:       runID,
-		DurationSec: dur,
-	}, nil
+	failedRefs := previewFailedRefs(summaries)
+	out := &PreviewOutput{
+		Stacks:        summaries,
+		CommentBody:   body,
+		RunID:         runID,
+		DurationSec:   dur,
+		Failed:        len(failedRefs) > 0,
+		FailedStacks:  failedRefs,
+		CommentPosted: commentPosted,
+	}
+	if out.Failed {
+		// The comment and artifacts above are still written - reviewers need
+		// the failure detail on the PR - but the run must not report success.
+		return out, fmt.Errorf("preview failed for %d of %d stacks: %s",
+			len(failedRefs), len(summaries), strings.Join(failedRefs, ", "))
+	}
+	return out, nil
 }
 
 func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string) summary.StackSummary {
@@ -354,6 +382,7 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview,
 		LocalAuth{Enabled: in.Local, Providers: in.LocalAuthProviders})
 	if authErr != nil {
+		slog.Error("preview stack failed: auth resolution", "stack", s.Ref(), "err", authErr)
 		return summary.StackSummary{
 			Project: s.Project, Stack: s.Name, Env: s.Env,
 			Status: summary.StatusError, Error: redactor.Redact(authErr.Error()),
@@ -406,6 +435,7 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 	if err != nil {
 		ss.Status = summary.StatusError
 		ss.Error = redactor.Redact(err.Error())
+		slog.Error("preview stack failed: engine invocation", "stack", s.Ref(), "err", ss.Error)
 		return ss
 	}
 	ss.Counts = res.Counts
@@ -416,6 +446,7 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 	if res.Error != "" {
 		ss.Status = summary.StatusError
 		ss.Error = redactor.Redact(res.Error)
+		slog.Error("preview stack failed: engine reported error", "stack", s.Ref(), "err", ss.Error)
 		return ss
 	}
 	// Persist the saved plan next to the run manifest. A failure here is
@@ -439,17 +470,16 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 	return ss
 }
 
-// planSucceeded returns true if every stack planned without error.
-func planSucceeded(ss []summary.StackSummary) bool {
-	if len(ss) == 0 {
-		return false
-	}
+// previewFailedRefs returns the refs of stacks whose preview errored, in run
+// order. Non-empty means the run must surface a nonzero exit.
+func previewFailedRefs(ss []summary.StackSummary) []string {
+	var refs []string
 	for _, s := range ss {
 		if s.Status == summary.StatusError {
-			return false
+			refs = append(refs, s.Ref())
 		}
 	}
-	return true
+	return refs
 }
 
 func declarationsFromConfig(e *schemas.Engine) ([]discovery.Declaration, discovery.Filter) {
