@@ -16,10 +16,19 @@ An authorized fork preview MUST resolve only bindings explicitly matched to `tru
 #### Scenario: Approved fork preview
 
 - **WHEN** a valid one-shot authorization is consumed for the current fork HEAD
+- **AND** every selected approved-fork provider presents valid read-only proof for its exact exchanged identity
 - **THEN** only approved-fork preview bindings are resolved
 - **AND** ordinary preview and apply bindings are ignored
+
+#### Scenario: Approved-fork permission proof is unavailable
+
+- **WHEN** an approved-fork binding lacks supported and valid read-only proof
+- **THEN** configuration validation rejects the binding before credential acquisition
+- **AND** a provider label, role name, or self-declared boolean does not satisfy the requirement
 
 #### Scenario: No approved-fork binding
 
 - **WHEN** an authorized fork has no matching approved-fork binding
-- **THEN** the engine receives no cloud credentials
+- **THEN** no credential provider is resolved or invoked
+- **AND** no IaC engine is invoked
+- **AND** validation-only processing receives an allowlisted environment with no secret-bearing values

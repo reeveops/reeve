@@ -19,6 +19,19 @@ A credentialed fork preview MUST require a trusted actor, the current API-resolv
 - **THEN** authorization intent is durably recorded
 - **AND** that exact SHA may run one preview on a capable isolated worker
 
+#### Scenario: Worker executes the authorized source
+
+- **WHEN** an authorized fork preview starts on a capable isolated worker
+- **THEN** the worker fetches `authorization.head_sha` and checks it out in detached mode
+- **AND** the source-fetch credential is removed before engine execution
+- **AND** the worker verifies the checked-out commit equals `authorization.head_sha` immediately before credential acquisition
+- **AND** the engine runs only from that verified working tree
+
+#### Scenario: Worker source does not match the authorization
+
+- **WHEN** the authorized SHA cannot be fetched or the checked-out commit differs from `authorization.head_sha`
+- **THEN** preview records a blocked outcome before credential acquisition or engine execution
+
 #### Scenario: Fork HEAD changes
 
 - **WHEN** the fork HEAD differs from the SHA in the authorization
@@ -26,7 +39,7 @@ A credentialed fork preview MUST require a trusted actor, the current API-resolv
 
 #### Scenario: Authorization is replayed
 
-- **WHEN** a consumption receipt already exists for the authorization
+- **WHEN** the deterministic consumption receipt already exists or a concurrent create wins for the authorization
 - **THEN** preview is denied before credential acquisition
 
 #### Scenario: PR metadata cannot be resolved

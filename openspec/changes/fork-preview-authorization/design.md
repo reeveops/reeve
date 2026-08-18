@@ -8,17 +8,20 @@ The action passes the actor, comment ID, and exact command text to the binary wi
 ## Authorization record
 
 The record key is `fork-authorizations/<repo>/<pr>/<head-sha>/<comment-id>.json` in the operator-owned blob store.
-It contains the repository, PR number, head SHA, actor, association, justification, run URL, creation time, and consumption state.
+It contains immutable authorization intent: repository, PR number, head SHA, actor, association, justification, run URL, and creation time.
 
 Authorization creation uses an absent-object precondition and fails closed when metadata or storage cannot be read or written.
-The record is immutable, and consumption creates a separate write-once receipt tied to the preview run ID.
+The record never contains consumption state.
+
+The consumption receipt key is `fork-authorization-consumptions/<repo>/<pr>/<head-sha>/<comment-id>.json`.
+Its conditional existence is the sole authoritative consumed or replay state, and its immutable payload records the preview run ID and claim time.
 
 ## One-shot semantics
 
 The authorizing command creates the intent record and immediately invokes preview for the same API-resolved HEAD SHA.
-Preview atomically creates the consumption receipt before acquiring credentials or starting an engine.
+Preview creates the deterministic consumption receipt with an absent-object precondition before acquiring credentials or starting an engine.
 
-A rerun with the same record cannot acquire credentials because the receipt already exists.
+A concurrent claim or rerun for the same authorization receives a create conflict and cannot acquire credentials or start an engine.
 A new PR commit has a different key and requires a new authorization.
 
 ## Early trust classification
@@ -34,8 +37,11 @@ It does not resolve auth bindings, initialize PR-configured network sinks, or pe
 Auth bindings gain `trust: approved_fork` as an additional match dimension.
 An approved fork resolves only matching approved-fork bindings and never falls back to ordinary preview or apply bindings.
 
-The configuration validator requires every approved-fork provider to be distinct from providers selected for apply.
-Role permissions remain an operator responsibility and documentation labels these credentials as read-only.
+The approved-fork path requires each selected provider to be distinct from providers selected for apply and to supply provider-specific read-only proof.
+Proof MUST bind the exact exchanged identity to a read-only policy through provider API verification or a trusted IAM attestation whose issuer, signature, identity, and policy scope are validated from trusted configuration.
+
+A provider name, role name, configuration boolean, or unauthenticated operator assertion is not proof.
+Missing, unsupported, stale, or failed verification rejects the binding before credential acquisition, and the first implementation MAY keep credentialed fork preview disabled until a verifier exists.
 
 ## Worker prerequisite
 
@@ -44,6 +50,14 @@ If the capability is absent, authorization is recorded as blocked and no credent
 
 Environment filtering alone does not satisfy this capability.
 The first implementation may keep the capability permanently false until the worker boundary ships.
+
+## Pinned worker source
+
+The isolated worker fetches `authorization.head_sha` into its isolated workspace and checks it out in detached mode.
+The VCS credential used for the fetch is read-only, is removed before execution, and is never included in the engine environment.
+
+Immediately before approved-fork credential acquisition, the worker verifies that its checked-out commit equals `authorization.head_sha`.
+A fetch, checkout, or verification failure records a blocked outcome and prevents credential acquisition and engine execution.
 
 ## Apply and refresh
 
