@@ -87,7 +87,7 @@ subscriptions are unchanged unless you list them explicitly.
 | `github_issue` | GitHub issue per drifted stack | Drift events only; `labels`, `assignees`. Requires `GITHUB_TOKEN` with `issues: write` |
 | `otel_annotation` | Annotation emitters (Grafana/Datadog/Dash0) | Maps drift + apply lifecycle onto annotation events; configure emitters in `observability.yaml` |
 | `timeline_slack` | Slack thread under one PR-level anchor | Deployment timeline (see below). `channel`, `auth_token` |
-| `timeline_github` | One PR comment per commit SHA | Deployment timeline (see below). Requires `GITHUB_TOKEN` with PR write |
+| `timeline_github` | One PR comment per plan series | Deployment timeline (see below). Requires `GITHUB_TOKEN` with PR write |
 
 Common fields on every channel: `type`, `name` (defaults to the type),
 `enabled` (defaults to `true`), `on`.
@@ -148,7 +148,7 @@ channels:
     # on: defaults to [planning, plan, ready, approved, applying,
     #                  applied, failed, blocked, break_glass]
 
-  - type: timeline_github            # heartbeat: one comment per commit SHA
+  - type: timeline_github            # heartbeat: one comment per plan series
 ```
 
 **Slack** (`timeline_slack`): every entry is a thread reply under ONE
@@ -158,8 +158,8 @@ per-PR blob state), and the dashboard stops posting its own terse thread
 notes — the timeline's richer entries replace them. Without a dashboard
 channel, the timeline creates a minimal anchor message itself.
 
-**GitHub** (`timeline_github`): one comment per commit SHA, updated in
-place as that SHA's events land:
+**GitHub** (`timeline_github`): one comment per plan series, updated in
+place as that series' events land:
 
 > ### 🛰️ reeve · deployment timeline · commit `abc1234`
 > - 🔍 **preview started** · 2026-07-19 12:03:05 UTC · [run](#)
@@ -167,10 +167,26 @@ place as that SHA's events land:
 > - 🚀 **apply started** · 2026-07-19 12:10:02 UTC · [run](#)
 > - ✅ **apply finished**: app/prod +1 ~2 -0 ±0 · 2026-07-19 12:12:30 UTC · [run](#)
 
-Pushing a new commit starts a new comment; the old SHA's history stays
-intact. Timeline comments use their own marker namespace
-(`reeve:timeline:v1:{sha}`) — existing status/help/apply comment markers
-are untouched, so enabling the timeline never orphans an existing comment.
+A series starts at a plan and its first entry is that plan. A new series
+means a new comment; the previous series stays as written.
+
+A new series starts when:
+
+- A new commit is pushed.
+- A plan is explicitly requested for a commit that already has one. Pass
+  `--plan-requested` on `reeve run preview` when the run came from a
+  `/reeve plan` comment.
+
+A retried or re-dispatched CI job appends to the current series, so one plan
+is never split across two comments.
+
+Later series carry `· plan N` in the header. The first series on a commit is
+unnumbered and keeps the marker `reeve:timeline:v1:{sha}`; later series use
+`reeve:timeline:v1:{sha}:{n}`. Existing status/help/apply comment markers are
+untouched, so enabling the timeline never orphans an existing comment.
+
+`timeline_slack` is unaffected by series: entries keep threading under the
+one PR-level anchor.
 
 Entry history is persisted in the state bucket
 (`notifications/pr-{n}/timeline.json`) with conditional writes, so

@@ -141,6 +141,15 @@ type PRPayload struct {
 	RepoFull          string // "owner/repo"
 	RequiredApprovers []string
 	Stacks            []StackResult
+	// PlanRequested marks a plan an operator explicitly asked for, as
+	// opposed to one triggered by the PR head changing. The timeline uses
+	// it to decide whether a plan opens a new series or continues the
+	// current one, so a retried CI job does not split one plan in two.
+	//
+	// Set from an explicit preview input, never derived from a VCS
+	// provider's event names: core-adjacent code does not branch on
+	// provider identity, and a plain input is exercisable in local tests.
+	PlanRequested bool
 }
 
 // StackResult is one stack's summary inside a PR-flow payload.

@@ -387,7 +387,14 @@ runs:
                 REEVE_BREAK_GLASS_COMMENT="$COMMENT_BODY"
                 export REEVE_BREAK_GLASS_COMMENT
                 ;;
-              preview|plan)  CMD="preview" ;;
+              preview|plan)
+                CMD="preview"
+                # A person asked for this plan, so the deployment timeline
+                # starts a new series (a new comment) instead of appending to
+                # the plan already logged for this commit. The push-triggered
+                # path above deliberately omits the flag.
+                EXTRA_ARGS+=(--plan-requested)
+                ;;
               unlock)
                 CMD="unlock"
                 # Optional "project/stack" token scopes the unlock to one

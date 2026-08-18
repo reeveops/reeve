@@ -68,6 +68,8 @@ func addPreviewFlags(cmd *cobra.Command) {
 	cmd.Flags().String("token", "", "GitHub token (default: $GITHUB_TOKEN)")
 	cmd.Flags().String("root", "", "Repo root (default: cwd)")
 	cmd.Flags().Bool("force", false, "Re-run even if this commit was already applied (ignore the applied-state guard)")
+	cmd.Flags().Bool("plan-requested", false,
+		"Mark this plan as explicitly requested (e.g. a `/reeve plan` comment) rather than triggered by a new commit; the deployment timeline starts a new series for it")
 }
 
 func runPreview(cmd *cobra.Command, _ []string) error {
@@ -127,6 +129,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		LocalAuthProviders:       localAuth,
 		Force:                    flagBool(cmd, "force"),
 		Refresh:                  flagBool(cmd, "refresh"),
+		PlanRequested:            flagBool(cmd, "plan-requested"),
 	}
 
 	if !local {
