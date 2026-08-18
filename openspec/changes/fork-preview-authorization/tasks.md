@@ -19,7 +19,8 @@
 - [ ] Deny fork apply and refresh without override paths.
 - [ ] Add intent, consumption, and terminal audit records.
 - [ ] Add malicious fork, stale and mismatched SHA, replay, metadata failure, and audit failure tests.
-- [ ] Test unavailable worker isolation, missing approved-fork bindings, invalid read-only proof, and secret-free validation.
+- [ ] Test unavailable worker isolation, invalid read-only proof, and secret-free validation.
+- [ ] Test that a missing approved-fork binding resolves no provider and performs no credentialed source fetch.
 - [ ] Test that force and break-glass cannot authorize fork apply or refresh.
 - [ ] Add user documentation for runner isolation and read-only IAM.
 - [ ] Run `mise run check`, which includes race tests, `govulncheck`, and `gosec`.

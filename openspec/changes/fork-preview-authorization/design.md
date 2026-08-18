@@ -53,7 +53,10 @@ The first implementation may keep the capability permanently false until the wor
 
 ## Pinned worker source
 
-The isolated worker fetches `authorization.head_sha` into its isolated workspace and checks it out in detached mode.
+The pinned source-fetch path runs only after the authorization is consumed, a matching approved-fork binding and its read-only proof validate without invoking a credential provider, and worker isolation is available.
+If no binding matches or either gate fails, no VCS credential is resolved, no source fetch occurs, and no engine is invoked.
+
+The isolated worker then fetches `authorization.head_sha` into its isolated workspace and checks it out in detached mode.
 The VCS credential used for the fetch is read-only, is removed before execution, and is never included in the engine environment.
 
 Immediately before approved-fork credential acquisition, the worker verifies that its checked-out commit equals `authorization.head_sha`.

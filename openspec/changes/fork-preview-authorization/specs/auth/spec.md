@@ -17,8 +17,16 @@ An authorized fork preview MUST resolve only bindings explicitly matched to `tru
 
 - **WHEN** a valid one-shot authorization is consumed for the current fork HEAD
 - **AND** every selected approved-fork provider presents valid read-only proof for its exact exchanged identity
+- **AND** a capable isolated worker has checked out `authorization.head_sha` in detached mode
+- **AND** the worker has verified that checkout immediately before credential acquisition
 - **THEN** only approved-fork preview bindings are resolved
 - **AND** ordinary preview and apply bindings are ignored
+
+#### Scenario: Approved-fork execution gate fails
+
+- **WHEN** worker isolation is unavailable or the detached checkout cannot be verified against `authorization.head_sha`
+- **THEN** no credential provider binding is resolved or invoked
+- **AND** no IaC engine is invoked
 
 #### Scenario: Approved-fork permission proof is unavailable
 
@@ -30,5 +38,6 @@ An authorized fork preview MUST resolve only bindings explicitly matched to `tru
 
 - **WHEN** an authorized fork has no matching approved-fork binding
 - **THEN** no credential provider is resolved or invoked
+- **AND** no credentialed source fetch occurs
 - **AND** no IaC engine is invoked
 - **AND** validation-only processing receives an allowlisted environment with no secret-bearing values
