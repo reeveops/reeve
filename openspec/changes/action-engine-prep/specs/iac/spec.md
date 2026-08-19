@@ -37,14 +37,23 @@ Its documentation MUST state that an IaC program from the pull request branch
 can read that credential, and MUST direct the operator to scope it to the
 narrowest read-only access that satisfies the fetch.
 
-The action MUST NOT bypass the child environment allowlist to deliver such a
-credential: it MUST stage the value where the operator's declared configuration
-decides whether the engine receives it.
+Such a credential MUST NOT be placed in job-scoped environment state that
+persists to later steps in the caller's job. It MUST be scoped to the step that
+starts the engine.
+
+The action MUST NOT bypass the child environment allowlist to deliver the
+credential: the operator's declared configuration still decides whether the
+engine receives it.
 
 #### Scenario: Private module credential in use
 
 - **WHEN** a run uses the private-module credential input
 - **THEN** the run warns that the credential reaches the engine subprocess
+
+#### Scenario: Later step in the caller's job
+
+- **WHEN** a step runs after the action in the same job
+- **THEN** the private-module credential is not present in its environment
 
 #### Scenario: Credential set without a module scope
 

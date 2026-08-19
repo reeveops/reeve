@@ -261,20 +261,17 @@ runs:
         if [ -z "$GO_PRIVATE" ]; then
           echo "::warning::private-modules-token is set without go-private; Go will still route these modules through the public proxy and checksum database" >&2
         fi
-        # --global covers steps in this job (a prewarm build). The engine child
-        # gets a fresh HOME and never reads that file, so the same rewrites go
-        # out as GIT_CONFIG_* env. Both the https and scp forms are rewritten:
-        # a repo whose tooling pins the ssh form would otherwise ask for a key
-        # the runner does not have.
+        # --global covers this job's own later steps, notably a prewarm build.
+        # Both the https and scp forms are rewritten: a repo whose tooling pins
+        # the ssh form would otherwise ask for a key the runner does not have.
         git config --global "url.https://x-access-token:${TOKEN}@${HOST}/.insteadOf" "https://${HOST}/"
         git config --global --add "url.https://x-access-token:${TOKEN}@${HOST}/.insteadOf" "git@${HOST}:"
-        {
-          echo "GIT_CONFIG_COUNT=2"
-          echo "GIT_CONFIG_KEY_0=url.https://x-access-token:${TOKEN}@${HOST}/.insteadOf"
-          echo "GIT_CONFIG_VALUE_0=https://${HOST}/"
-          echo "GIT_CONFIG_KEY_1=url.https://x-access-token:${TOKEN}@${HOST}/.insteadOf"
-          echo "GIT_CONFIG_VALUE_1=git@${HOST}:"
-        } >> "$GITHUB_ENV"
+        # GOPRIVATE carries no credential, so GITHUB_ENV is fine for it. The
+        # token deliberately does NOT go there: GITHUB_ENV would put it in every
+        # later step of the caller's job, including steps added after reeve.
+        # The engine child cannot read ~/.gitconfig (fresh HOME), so it gets the
+        # same rewrites as GIT_CONFIG_* on the reeve step only - see the env:
+        # block on "Run reeve".
         if [ -n "$GO_PRIVATE" ]; then
           echo "GOPRIVATE=${GO_PRIVATE}" >> "$GITHUB_ENV"
         fi
@@ -398,6 +395,16 @@ runs:
         # command dispatch when it reads historical `/reeve approve` comments.
         REEVE_ALLOWED_ASSOCIATIONS: ${{ inputs.allowed-associations }}
         REEVE_COMMAND_PREFIXES: ${{ inputs.command-prefix }}
+        # Private-module git rewrite for the engine subprocess, which runs with
+        # a fresh HOME and cannot read ~/.gitconfig. Scoped to this step rather
+        # than GITHUB_ENV so the token never reaches the caller's later steps.
+        # COUNT is 0 when no token was supplied: a rewrite pointing at a
+        # credential-less URL would break every fetch, so it must not exist.
+        GIT_CONFIG_COUNT: ${{ inputs.private-modules-token != '' && '2' || '0' }}
+        GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ inputs.private-modules-token }}@${{ inputs.private-modules-host }}/.insteadOf"
+        GIT_CONFIG_VALUE_0: "https://${{ inputs.private-modules-host }}/"
+        GIT_CONFIG_KEY_1: "url.https://x-access-token:${{ inputs.private-modules-token }}@${{ inputs.private-modules-host }}/.insteadOf"
+        GIT_CONFIG_VALUE_1: "git@${{ inputs.private-modules-host }}:"
       run: |
         set -euo pipefail
         ROOT="$REEVE_INPUT_ROOT"

@@ -39,6 +39,11 @@ Scope it to the module repositories with `contents:read` and nothing else. Do
 not reuse the token reeve itself uses for PR comments, which needs write
 permissions.
 
+The action sets the git rewrite on its own engine step rather than in
+`GITHUB_ENV`, so the token does not reach steps your workflow runs after reeve.
+`GOPRIVATE` and the cache paths do go to `GITHUB_ENV`, since neither carries a
+credential and the prewarm build needs them.
+
 If you would rather reeve never touch that credential, keep the git-config step
 in your own workflow and forward it with the `env_passthrough` auth provider
 instead. See [auth.md](../../docs/auth.md).

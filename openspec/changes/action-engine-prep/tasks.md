@@ -9,6 +9,7 @@
 
 - [x] Add the private-module, cache, prewarm, and Terraform-pin inputs.
 - [x] Configure the git URL rewrite for both URL forms and export `GOPRIVATE`.
+- [x] Scope the credential to the engine step, never `GITHUB_ENV`.
 - [x] Warn on every run that uses `private-modules-token`.
 - [x] Warn when `private-modules-token` is set without `go-private`.
 - [x] Export the runner's resolved `GOMODCACHE` and `GOCACHE`.
@@ -25,6 +26,7 @@
 - [x] Parser step fails with a clear message when the field is absent.
 - [x] `setup-terraform` SHA pin matches the upstream `v3` tag.
 - [x] `action.yml` and both example workflows parse.
+- [x] The credential appears only in the engine step's env, not `GITHUB_ENV`.
 - [ ] End-to-end run on a repository with private modules.
 
 ## Documentation

@@ -308,6 +308,11 @@ off by default, warns loudly on every run, and the alternative is to keep that
 step in your own workflow and forward it with the `env_passthrough` auth
 provider (see [auth.md](auth.md)).
 
+The token is set on the action's own engine step, not in `GITHUB_ENV`, so it
+does not reach steps your workflow runs after reeve. `GOPRIVATE` and the cache
+paths do go to `GITHUB_ENV`: neither carries a credential, and a prewarm build
+in a later step needs them.
+
 ## 5. Move the bucket to real storage
 
 Filesystem buckets work great for smoke tests but every CI run starts fresh,

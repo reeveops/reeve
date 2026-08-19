@@ -17,14 +17,20 @@ The new steps run after cloud auth and the Pulumi install, and before reeve
 executes: the git rewrite and cache paths must be in `GITHUB_ENV` before the
 engine starts, and the prewarm build needs both.
 
-## Exporting to the engine
+## Where the credential goes
 
-Values go out through `GITHUB_ENV` rather than being written into the engine's
-environment directly. reeve's allowlist governs what the engine inherits, and
-`env_passthrough` is the operator-declared channel for anything beyond it. The
-action therefore stages values where an operator's existing configuration
-decides whether they reach the engine, instead of the action silently bypassing
-the allowlist it was built to respect.
+The git rewrite carrying the token is set on the action's own reeve step, not
+`GITHUB_ENV`. `GITHUB_ENV` persists for the remainder of the caller's job, so a
+token written there is readable by every later step, including steps a consumer
+adds after reeve. Scoping it to the one step that starts the engine keeps the
+exposure to the process that needs it.
+
+`GOPRIVATE` and the cache paths do go through `GITHUB_ENV`: neither carries a
+credential, and a prewarm build in a later step needs them.
+
+reeve's allowlist still governs what the engine inherits, and `env_passthrough`
+remains the operator-declared channel. The action stages values for the engine's
+environment; it does not widen the allowlist.
 
 ## Plugin versions come from go.mod
 
