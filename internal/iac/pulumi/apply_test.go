@@ -108,6 +108,8 @@ func TestApplyErrorKeepsStderrOnZeroExit(t *testing.T) {
 // stdout, writes to stderr, and exits zero. Both must reach the reported
 // error.
 func TestApplyKeepsStderrWithDiagnosticsOnZeroExit(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fake-pulumi")
 	script := "#!/bin/sh\n" +

@@ -142,6 +142,8 @@ func TestHookFailure(t *testing.T) {
 // Result.Error is an output path: RenderSection prints it. A hook that leaks a
 // known secret to stderr must not carry it there either.
 func TestRedactsStderrIntoError(t *testing.T) {
+	t.Parallel()
+
 	r := redact.New()
 	r.AddSecret("super-secret-value-123")
 	h := Hook{
