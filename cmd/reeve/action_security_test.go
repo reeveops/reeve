@@ -114,6 +114,54 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 	}
 }
 
+func TestActionPlanCommentMarksExplicitRequest(t *testing.T) {
+	script := extractRunReeveScript(t, readRepoFile(t, "action.yml"))
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	argsPath := filepath.Join(dir, "args")
+	fake := filepath.Join(dir, "reeve")
+	if err := os.WriteFile(eventPath, []byte(`{
+		"issue":{"number":42,"pull_request":{}},
+		"comment":{"body":"/reeve plan","author_association":"OWNER","user":{"type":"User","login":"operator"}}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGS_OUT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// #nosec G204 -- bash executes the repository-owned action script with a fixed event fixture.
+	cmd := exec.Command("bash", "-c", script)
+	for key, value := range map[string]string{
+		"GITHUB_WORKSPACE":           dir,
+		"GITHUB_EVENT_NAME":          "issue_comment",
+		"GITHUB_EVENT_PATH":          eventPath,
+		"REEVE_BIN":                  fake,
+		"REEVE_INPUT_ROOT":           dir,
+		"REEVE_INPUT_COMMAND":        "",
+		"REEVE_INPUT_EXTRA_ARGS":     "",
+		"REEVE_RUN_ON_APPROVAL":      "false",
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+		"ARGS_OUT":                   argsPath,
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("action script failed: %v\n%s", err, output)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Fields(string(args))
+	want := []string{"run", "preview", "--pr", "42", "--plan-requested"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("plan command args = %q, want %q", got, want)
+	}
+}
+
 func TestBinaryFetchRejectsMissingSignatureVerifier(t *testing.T) {
 	script := repoPath(t, ".github", "scripts", "fetch-binary.sh")
 	sums := filepath.Join(t.TempDir(), "checksums.txt")

@@ -32,6 +32,11 @@ Every non-plan event appends to the SHA's highest existing series. An event
 arriving for a SHA with no series (an apply on a commit whose plan predates
 this change) opens series 1 so no entry is dropped.
 
+Preview-started and preview-finished are separate deliveries. The channel
+matches them by CI run URL, so overlapping explicit plans finish in the series
+they opened even when a newer series exists. Retrying the same explicit
+planning delivery reuses that run's series instead of minting another.
+
 ## Signalling an explicit plan request
 
 `PRPayload` gains a field marking the plan as explicitly requested. `run.Preview`

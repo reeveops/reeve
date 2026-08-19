@@ -10,8 +10,8 @@
 //   - timeline_slack: entries become thread replies under ONE PR-level
 //     anchor message (no channel spam), composing with the dashboard slack
 //     channel's per-PR message via the shared blob state.
-//   - timeline_github: entries become PR comments GROUPED BY SHA - one
-//     comment per commit, maintained via marker + in-place edit, so
+//   - timeline_github: entries become PR comments grouped by plan series,
+//     maintained via marker + in-place edit, so
 //     "preview started/finished" stay visible even though GitHub renders
 //     comment edits silently.
 //
@@ -125,9 +125,9 @@ func refsWithStatus(stacks []notify.StackResult, status string) string {
 	return strings.Join(refs, ", ")
 }
 
-// markdownLine renders one entry for the per-SHA GitHub comment. The SHA
-// lives in the comment header (entries are grouped by it); each line carries
-// the event, timestamp, detail, and its own run's CI URL.
+// markdownLine renders one entry for a GitHub timeline series. The SHA lives
+// in the comment header; each line carries the event, timestamp, detail, and
+// its own run's CI URL.
 func (e Entry) markdownLine() string {
 	label, icon, _ := eventLabel(e.Event)
 	line := fmt.Sprintf("- %s **%s**", icon, label)

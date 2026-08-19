@@ -2,7 +2,7 @@
 
 ## Design gate
 
-- [ ] Approve series identity, marker compatibility, and the mint conditions.
+- [x] Approve series identity, marker compatibility, and the mint conditions.
 
 ## Implementation
 

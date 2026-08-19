@@ -484,9 +484,16 @@ func TestDefaultSubscriptionsCoverAllTimelineEvents(t *testing.T) {
 
 // requestedPlan is a planning payload an operator explicitly asked for, which
 // is what opens a new series on a SHA that already has one.
-func requestedPlan(sha string) notify.Payload {
+func requestedPlan(sha, run string) notify.Payload {
 	p := payload(notify.EventPlanning, sha)
 	p.PR.PlanRequested = true
+	p.PR.RunURL = "https://ci/run/" + run
+	return p
+}
+
+func finishedPlan(sha, run string) notify.Payload {
+	p := payload(notify.EventPlan, sha)
+	p.PR.RunURL = "https://ci/run/" + run
 	return p
 }
 
@@ -501,8 +508,8 @@ func TestGitHubExplicitPlanOpensNewComment(t *testing.T) {
 	for _, p := range []notify.Payload{
 		payload(notify.EventPlanning, sha),
 		payload(notify.EventPlan, sha),
-		requestedPlan(sha),
-		payload(notify.EventPlan, sha),
+		requestedPlan(sha, "requested-2"),
+		finishedPlan(sha, "requested-2"),
 	} {
 		if err := s.Deliver(ctx, p); err != nil {
 			t.Fatalf("Deliver %s: %v", p.Event, err)
@@ -640,11 +647,11 @@ func TestGitHubConcurrentSeriesMintsDoNotCollide(t *testing.T) {
 	// rather than both claiming the same ordinal.
 	store.putIfMatchHook = func() {
 		other := testGitHubChannel(&fakeComments{}, store)
-		if err := other.Deliver(ctx, requestedPlan(sha)); err != nil {
+		if err := other.Deliver(ctx, requestedPlan(sha, "requested-2")); err != nil {
 			t.Errorf("concurrent Deliver: %v", err)
 		}
 	}
-	if err := s.Deliver(ctx, requestedPlan(sha)); err != nil {
+	if err := s.Deliver(ctx, requestedPlan(sha, "requested-3")); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
 
@@ -660,6 +667,75 @@ func TestGitHubConcurrentSeriesMintsDoNotCollide(t *testing.T) {
 		if len(entries) != 1 {
 			t.Fatalf("series %d holds %d entries, want 1", i+1, len(entries))
 		}
+	}
+}
+
+func TestGitHubOverlappingPlansFinishInTheirOwnSeries(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	fc := &fakeComments{}
+	s := testGitHubChannel(fc, store)
+	ctx := context.Background()
+
+	const sha = "aaaa111bbbb"
+	for _, p := range []notify.Payload{
+		payload(notify.EventPlanning, sha),
+		requestedPlan(sha, "requested-2"),
+		requestedPlan(sha, "requested-3"),
+		finishedPlan(sha, "requested-2"),
+		finishedPlan(sha, "requested-3"),
+	} {
+		if err := s.Deliver(ctx, p); err != nil {
+			t.Fatalf("Deliver %s: %v", p.Event, err)
+		}
+	}
+
+	st, _, err := s.loadState(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	series := st.Series[shortSHA(sha)]
+	if len(series) != 3 {
+		t.Fatalf("series count = %d, want 3", len(series))
+	}
+	for i, run := range []string{"planning", "requested-2", "requested-3"} {
+		entries := series[i]
+		want := "https://ci/run/" + run
+		for _, entry := range entries {
+			if entry.RunURL != want {
+				t.Fatalf("series %d contains run %q, want %q: %+v", i+1, entry.RunURL, want, entries)
+			}
+		}
+	}
+	if got := fc.upserts[3].marker; got != SeriesMarker(sha, 2) {
+		t.Fatalf("second plan finish updated marker %q, want series 2", got)
+	}
+	if got := fc.upserts[4].marker; got != SeriesMarker(sha, 3) {
+		t.Fatalf("third plan finish updated marker %q, want series 3", got)
+	}
+}
+
+func TestGitHubRequestedPlanningRetryDoesNotMintAgain(t *testing.T) {
+	t.Parallel()
+	store := newMemStore()
+	s := testGitHubChannel(&fakeComments{}, store)
+	ctx := context.Background()
+
+	const sha = "aaaa111bbbb"
+	if err := s.Deliver(ctx, payload(notify.EventPlanning, sha)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := s.Deliver(ctx, requestedPlan(sha, "requested-2")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, _, err := s.loadState(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(st.Series[shortSHA(sha)]); got != 2 {
+		t.Fatalf("retried delivery minted %d series, want 2", got)
 	}
 }
 
@@ -689,7 +765,7 @@ func TestSlackNewSeriesKeepsOneThread(t *testing.T) {
 	const sha = "aaaa111bbbb"
 	for _, p := range []notify.Payload{
 		payload(notify.EventPlanning, sha),
-		requestedPlan(sha),
+		requestedPlan(sha, "requested-2"),
 	} {
 		if err := s.Deliver(ctx, p); err != nil {
 			t.Fatalf("Deliver %s: %v", p.Event, err)

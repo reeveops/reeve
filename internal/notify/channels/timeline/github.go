@@ -85,16 +85,40 @@ func (st *ghState) normalize() {
 // appends to the current series, so one plan is never split across two
 // comments. Every other event appends to the SHA's most recent series,
 // opening series 1 if apply arrives on a commit whose plan predates this.
-func (st *ghState) appendTo(sha string, e Entry, newSeries bool) (int, []Entry) {
+func (st *ghState) appendTo(sha string, e Entry, newSeries bool, targetSeries int) (int, []Entry) {
 	series := st.Series[sha]
+	var selected int
 	if len(series) == 0 || newSeries {
 		series = append(series, []Entry{e})
+		selected = len(series)
+	} else if targetSeries > 0 && targetSeries <= len(series) {
+		series[targetSeries-1] = append(series[targetSeries-1], e)
+		selected = targetSeries
 	} else {
 		series[len(series)-1] = append(series[len(series)-1], e)
+		selected = len(series)
 	}
 	st.Series[sha] = series
-	n := len(series)
-	return n, series[n-1]
+	return selected, series[selected-1]
+}
+
+// seriesForRun returns the series already associated with a CI run URL.
+// Preview-started and preview-finished are separate deliveries, and another
+// explicit preview can open a newer series between them. Matching the run URL
+// keeps each finish event with the start event from the same run.
+func (st *ghState) seriesForRun(sha, runURL string) int {
+	if runURL == "" {
+		return 0
+	}
+	series := st.Series[sha]
+	for i := len(series) - 1; i >= 0; i-- {
+		for _, entry := range series[i] {
+			if entry.RunURL == runURL {
+				return i + 1
+			}
+		}
+	}
+	return 0
 }
 
 // opensSeries reports whether this delivery starts a new plan series.
@@ -110,9 +134,9 @@ func opensSeries(p notify.Payload, existing int) bool {
 	return p.Event == notify.EventPlanning && p.PR.PlanRequested
 }
 
-// GitHubChannel maintains one PR comment per commit SHA: each event appends an
-// entry to the SHA's group in blob state (CAS) and rewrites that SHA's
-// comment in place. This makes preview start/finish visible entries -
+// GitHubChannel maintains one PR comment per plan series: each event appends
+// an entry to the series in blob state (CAS) and rewrites that series' comment
+// in place. This makes preview start/finish visible entries -
 // GitHub renders comment edits silently, so an edited-in-place dashboard
 // alone can't answer "did it even run?".
 type GitHubChannel struct {
@@ -146,7 +170,7 @@ func NewGitHub(_ context.Context, cfg schemas.ChannelYAML, deps notify.Deps) (no
 func (s *GitHubChannel) Name() string               { return s.name }
 func (s *GitHubChannel) Subscribes() []notify.Event { return s.events }
 
-// Deliver appends the entry to its SHA group and upserts that SHA's comment.
+// Deliver appends the entry to its plan series and upserts that series' comment.
 func (s *GitHubChannel) Deliver(ctx context.Context, p notify.Payload) error {
 	if p.PR == nil || p.PR.PR <= 0 {
 		return nil
@@ -173,8 +197,20 @@ func (s *GitHubChannel) appendEntry(ctx context.Context, pr int, e Entry, p noti
 		}
 		// Decided inside the CAS loop: whether this delivery opens a series
 		// depends on what is already stored, so a concurrent writer that
-		// won the race is accounted for on retry.
-		series, entries := st.appendTo(sha, e, opensSeries(p, len(st.Series[sha])))
+		// won the race is accounted for on retry. A finish event targets the
+		// series opened by its own CI run even if another plan started later.
+		targetSeries := 0
+		newSeries := opensSeries(p, len(st.Series[sha]))
+		if p.Event == notify.EventPlan {
+			targetSeries = st.seriesForRun(sha, e.RunURL)
+		}
+		if p.Event == notify.EventPlanning && p.PR.PlanRequested {
+			if existing := st.seriesForRun(sha, e.RunURL); existing > 0 {
+				newSeries = false
+				targetSeries = existing
+			}
+		}
+		series, entries := st.appendTo(sha, e, newSeries, targetSeries)
 		data, err := json.MarshalIndent(st, "", "  ")
 		if err != nil {
 			return 0, nil, err

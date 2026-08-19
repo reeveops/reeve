@@ -20,6 +20,9 @@ series, so a retried CI run does not split one plan across two comments.
 An event other than a plan MUST append to the SHA's most recent series, opening
 series 1 if the SHA has none.
 
+When plan runs overlap on the same SHA, each plan's finish event MUST append
+to the series opened by that plan's start event.
+
 The marker for the first series of a SHA MUST remain
 `<!-- reeve:timeline:v1:{shortsha} -->`. Later series MUST carry a distinct
 marker derived from the SHA and the series ordinal.
@@ -39,6 +42,12 @@ series grouping MUST load as that SHA's first series.
 - **WHEN** a planning event arrives for a SHA whose current series is not an explicit new request
 - **THEN** the entry appends to that series
 - **AND** no new comment is created
+
+#### Scenario: Explicit plans overlap
+
+- **WHEN** a second explicit plan starts before the first explicit plan finishes
+- **THEN** each finish event appends to the series opened by its own start event
+- **AND** neither series contains entries from the other plan run
 
 #### Scenario: Apply follows a plan
 
