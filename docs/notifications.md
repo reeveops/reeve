@@ -177,11 +177,12 @@ A new series starts when:
   `--plan-requested` on `reeve run preview` when the run came from a
   `/reeve plan` comment.
 
-A retried or re-dispatched CI job appends to the current series, so one plan
-is never split across two comments. Reeve correlates preview start and finish
-with the durable GitHub Actions run ID; the run URL is retained for display.
-If a finish arrives with an unknown identity, it opens a recovery series
-instead of being attached to a newer overlapping plan.
+- A retried or re-dispatched CI job appends to the current series, so one plan
+  is never split across two comments.
+- Reeve correlates preview start and finish with the durable GitHub Actions run
+  ID; the run URL is retained for display.
+- An unmatched finish opens a recovery series instead of attaching to a newer
+  overlapping plan.
 
 Later series carry `· plan N` in the header. The first series on a commit is
 unnumbered and keeps the marker `reeve:timeline:v1:{sha}`; later series use

@@ -24,7 +24,8 @@ series MUST append to that series, so a retried CI run does not split one plan
 across two comments.
 
 An event other than a plan MUST append to the SHA's most recent series, opening
-series 1 if the SHA has none.
+series 1 if the SHA has none, unless it is a preview-finished event with no
+matching request identity. Such an event MUST open a recovery series.
 
 When plan runs overlap on the same SHA, each plan's finish event MUST append to
 the series opened by the start event with the same durable request identity.

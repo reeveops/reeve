@@ -114,29 +114,45 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 	}
 }
 
-func TestActionPlanCommentMarksExplicitRequest(t *testing.T) {
-	got := runActionPreview(t, "issue_comment", `{
-		"issue":{"number":42,"pull_request":{}},
-		"comment":{"body":"/reeve plan","author_association":"OWNER","user":{"type":"User","login":"operator"}}
-	}`)
-	want := []string{"run", "preview", "--pr", "42", "--run-url", "https://github.com/org/repo/actions/runs/123", "--plan-requested"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("plan command args = %q, want %q", got, want)
+func TestActionPreviewRouting(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventName string
+		eventJSON string
+		want      []string
+	}{
+		{
+			name:      "plan comment marks explicit request",
+			eventName: "issue_comment",
+			eventJSON: `{
+				"issue":{"number":42,"pull_request":{}},
+				"comment":{"body":"/reeve plan","author_association":"OWNER","user":{"type":"User","login":"operator"}}
+			}`,
+			want: []string{"run", "preview", "--pr", "42", "--run-url", "https://github.com/org/repo/actions/runs/123", "--plan-requested"},
+		},
+		{
+			name:      "push preview omits explicit request",
+			eventName: "pull_request",
+			eventJSON: `{
+				"action":"synchronize",
+				"pull_request":{"number":42}
+			}`,
+			want: []string{"run", "preview", "--pr", "42", "--run-url", "https://github.com/org/repo/actions/runs/123"},
+		},
 	}
-}
-
-func TestActionPushPreviewOmitsExplicitRequest(t *testing.T) {
-	got := runActionPreview(t, "pull_request", `{
-		"action":"synchronize",
-		"pull_request":{"number":42}
-	}`)
-	want := []string{"run", "preview", "--pr", "42", "--run-url", "https://github.com/org/repo/actions/runs/123"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("push preview args = %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runActionPreview(t, tt.eventName, tt.eventJSON)
+			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
+				t.Fatalf("preview args = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
 func TestPlanRequestedFlagIsPreviewOnly(t *testing.T) {
+	t.Parallel()
+
 	runCmd := newRunCmd()
 	preview, _, err := runCmd.Find([]string{"preview"})
 	if err != nil {

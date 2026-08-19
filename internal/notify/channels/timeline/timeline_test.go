@@ -215,6 +215,8 @@ func TestDetailForBlockedListsBlockedRefs(t *testing.T) {
 // --- github channel ---------------------------------------------------------
 
 func TestGitHubGroupsCommentsBySHA(t *testing.T) {
+	t.Parallel()
+
 	fc := &fakeComments{}
 	s := testGitHubChannel(fc, newMemStore())
 	ctx := context.Background()
