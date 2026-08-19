@@ -135,6 +135,7 @@ func (d DriftPayload) Ref() string { return d.Project + "/" + d.Stack }
 type PRPayload struct {
 	PR                int
 	CommitSHA         string
+	RunID             string // Durable CI run identity used to correlate lifecycle deliveries.
 	RunURL            string
 	Title             string
 	Author            string

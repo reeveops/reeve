@@ -4,8 +4,10 @@
 
 ### Requirement: timeline_github groups entries into plan series
 
-`timeline_github` MUST group entries into series. A series MUST begin at a plan
-event, and the plan event MUST be the series' first entry.
+`timeline_github` MUST group entries into series. A normal series MUST begin at
+a planning event, and the planning event MUST be the series' first entry. A
+legacy or missing-plan recovery MAY begin with the first lifecycle event the
+channel observes.
 
 Each series MUST occupy its own PR comment. Delivering the first entry of a
 series MUST create a new comment; later entries in that series MUST edit that
@@ -13,22 +15,30 @@ comment in place. A previous series' comment MUST NOT be edited or deleted once
 its successor opens.
 
 A new series MUST be minted when the commit SHA has no series, and when a plan
-is explicitly requested for a SHA that already has one. A plan event that is
-not an explicit request and whose SHA already has a series MUST append to that
-series, so a retried CI run does not split one plan across two comments.
+is explicitly requested for a SHA that already has one. Each planning delivery
+MUST carry a durable request identity, such as the CI run ID. Duplicate explicit
+deliveries with the same identity MUST reuse the series already opened for that
+request; an explicit request with a different identity MUST mint a new series.
+A planning event that is not an explicit request and whose SHA already has a
+series MUST append to that series, so a retried CI run does not split one plan
+across two comments.
 
 An event other than a plan MUST append to the SHA's most recent series, opening
 series 1 if the SHA has none.
 
-When plan runs overlap on the same SHA, each plan's finish event MUST append
-to the series opened by that plan's start event.
+When plan runs overlap on the same SHA, each plan's finish event MUST append to
+the series opened by the start event with the same durable request identity.
+A finish event with no matching identity MUST open a recovery series rather
+than append to the SHA's newest series.
 
 The marker for the first series of a SHA MUST remain
 `<!-- reeve:timeline:v1:{shortsha} -->`. Later series MUST carry a distinct
 marker derived from the SHA and the series ordinal.
 
 Persisted timeline state MUST remain backward-readable: entries written before
-series grouping MUST load as that SHA's first series.
+series grouping MUST load as that SHA's first series. Series-aware state MUST
+use a versioned persistence path so older binaries cannot overwrite it with a
+schema that discards later series.
 
 #### Scenario: Plan requested again on the same commit
 
@@ -39,8 +49,14 @@ series grouping MUST load as that SHA's first series.
 
 #### Scenario: CI retries the same plan
 
-- **WHEN** a planning event arrives for a SHA whose current series is not an explicit new request
+- **WHEN** a non-explicit planning event arrives for a SHA that already has a series
 - **THEN** the entry appends to that series
+- **AND** no new comment is created
+
+#### Scenario: Explicit delivery is retried
+
+- **WHEN** an explicit planning delivery repeats with the same durable request identity
+- **THEN** it reuses the series already opened for that request
 - **AND** no new comment is created
 
 #### Scenario: Explicit plans overlap
@@ -59,6 +75,13 @@ series grouping MUST load as that SHA's first series.
 - **WHEN** timeline state written before this change is loaded
 - **THEN** its per-SHA entries load as series 1
 - **AND** that series keeps the pre-change marker
+
+#### Scenario: Preview finish has no matching start
+
+- **WHEN** a preview-finished event has an unknown or missing request identity
+- **AND** the SHA already has a series
+- **THEN** the event opens a recovery series
+- **AND** it does not modify the SHA's newest existing series
 
 ### Requirement: timeline_slack threading is unaffected by series
 

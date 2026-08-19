@@ -22,7 +22,8 @@ new plan starts a NEW series, and the previous series stays as written.
 - A new series is minted for a new commit SHA, and for an explicitly requested
   plan on a SHA that already has one. A retried CI job on the same commit
   appends to the current series rather than opening one.
-- The first entry of every series is the plan event.
+- The first entry of every normal series is the plan event. A legacy or
+  missing-plan recovery may begin with the first lifecycle event observed.
 
 ## Scope
 
@@ -36,4 +37,6 @@ The first series for a SHA keeps the existing marker
 `<!-- reeve:timeline:v1:{shortsha} -->` byte-identical, so comments already
 live on open PRs continue to be edited in place. Subsequent series carry an
 ordinal suffix. Persisted state gains series grouping and stays
-backward-readable: existing per-SHA entry lists load as series 1.
+backward-readable: existing per-SHA entry lists load as series 1. Series-aware
+state uses a versioned key so a workflow pinned to an older binary cannot
+truncate newer series.

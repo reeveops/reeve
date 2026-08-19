@@ -47,6 +47,7 @@ type PreviewInput struct {
 	PRTitle       string
 	CommitSHA     string
 	RunNumber     int
+	CIRunID       string
 	CIRunURL      string
 	RepoRoot      string
 	Engine        Engine
@@ -136,6 +137,13 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	slog.Debug("preview starting", "pr", in.PRNumber, "sha", in.CommitSHA, "local", in.Local)
 
 	runID := fmt.Sprintf("run-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	ciRunID := in.CIRunID
+	if ciRunID == "" {
+		// Direct callers and local tests may not have a provider run ID. The
+		// preview artifact ID still gives both lifecycle deliveries from this
+		// invocation one stable routing identity.
+		ciRunID = runID
+	}
 
 	// Changed files are fetched up front (also reused for change mapping
 	// below): both the pre-approval channel dispatch and the OTEL exporter
@@ -212,7 +220,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		// SHA, this run's CI URL).
 		if err := NotifyPREvent(ctx, channels, notify.EventPlanning, PRNotifyInput{
 			PlanRequested: in.PlanRequested,
-			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunID: ciRunID, RunURL: in.CIRunURL,
 			PRTitle: in.PRTitle,
 		}); err != nil {
 			slog.Warn("notify planning failed", "err", err, "pr", in.PRNumber)
@@ -362,7 +370,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	if notifyActive && !suppressChannels {
 		if err := NotifyPREvent(ctx, channels, notify.EventPlan, PRNotifyInput{
 			PlanRequested: in.PlanRequested,
-			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunID: ciRunID, RunURL: in.CIRunURL,
 			PRTitle: prTitle, PRAuthor: prAuthor, Stacks: summaries,
 		}); err != nil {
 			slog.Warn("notify plan-ready failed", "err", err, "pr", in.PRNumber)

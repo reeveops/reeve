@@ -162,10 +162,10 @@ channel, the timeline creates a minimal anchor message itself.
 place as that series' events land:
 
 > ### 🛰️ reeve · deployment timeline · commit `abc1234`
-> - 🔍 **preview started** · 2026-07-19 12:03:05 UTC · [run](#)
-> - 📋 **preview finished**: app/prod +1 ~2 -0 ±0, 1 no-op · 2026-07-19 12:04:41 UTC · [run](#)
-> - 🚀 **apply started** · 2026-07-19 12:10:02 UTC · [run](#)
-> - ✅ **apply finished**: app/prod +1 ~2 -0 ±0 · 2026-07-19 12:12:30 UTC · [run](#)
+> - 🔍 **preview started** · 2026-07-19 12:03:05 UTC · [run](https://github.com/acme/platform/actions/runs/123456789)
+> - 📋 **preview finished**: app/prod +1 ~2 -0 ±0, 1 no-op · 2026-07-19 12:04:41 UTC · [run](https://github.com/acme/platform/actions/runs/123456789)
+> - 🚀 **apply started** · 2026-07-19 12:10:02 UTC · [run](https://github.com/acme/platform/actions/runs/123456790)
+> - ✅ **apply finished**: app/prod +1 ~2 -0 ±0 · 2026-07-19 12:12:30 UTC · [run](https://github.com/acme/platform/actions/runs/123456790)
 
 A series starts at a plan and its first entry is that plan. A new series
 means a new comment; the previous series stays as written.
@@ -178,7 +178,10 @@ A new series starts when:
   `/reeve plan` comment.
 
 A retried or re-dispatched CI job appends to the current series, so one plan
-is never split across two comments.
+is never split across two comments. Reeve correlates preview start and finish
+with the durable GitHub Actions run ID; the run URL is retained for display.
+If a finish arrives with an unknown identity, it opens a recovery series
+instead of being attached to a newer overlapping plan.
 
 Later series carry `· plan N` in the header. The first series on a commit is
 unnumbered and keeps the marker `reeve:timeline:v1:{sha}`; later series use
@@ -189,8 +192,9 @@ untouched, so enabling the timeline never orphans an existing comment.
 one PR-level anchor.
 
 Entry history is persisted in the state bucket
-(`notifications/pr-{n}/timeline.json`) with conditional writes, so
-concurrent runs merge instead of overwriting each other.
+(`notifications/pr-{n}/timeline-v2.json`) with conditional writes, so
+concurrent runs merge instead of overwriting each other. The versioned key
+keeps workflows pinned to an older state schema from truncating plan series.
 
 ### Delivery guarantees
 

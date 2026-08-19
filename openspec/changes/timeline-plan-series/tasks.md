@@ -23,5 +23,7 @@
 - [x] Test: series 1 marker is byte-identical to the pre-change marker.
 - [x] Test: state written before this change loads as series 1.
 - [x] Test: concurrent series mints do not collide under CAS.
+- [x] Test: overlapping explicit plans route each finish event to the series
+      opened by its own CI run.
 - [x] No render goldens cover the timeline; none to regenerate.
 - [x] `mise run check` green.

@@ -218,6 +218,11 @@ runs:
           read -r -a EXTRA_ARGS <<< "$REEVE_INPUT_EXTRA_ARGS"
         fi
 
+        RUN_URL_ARGS=()
+        if [[ -n "${GITHUB_SERVER_URL:-}" && -n "${GITHUB_REPOSITORY:-}" && -n "${GITHUB_RUN_ID:-}" ]]; then
+          RUN_URL_ARGS+=(--run-url "${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
+        fi
+
         # Auto-detect command from event context when not explicitly set
         if [[ -z "$CMD" ]]; then
           if [[ "$GITHUB_EVENT_NAME" == "pull_request_review" ]]; then
@@ -443,31 +448,31 @@ runs:
           preview|"run preview")
             if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
               PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
-              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
+              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             elif [[ "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
               PR_NUMBER=$(jq -r '.issue.number' < "$GITHUB_EVENT_PATH")
-              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
+              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             else
-              "$REEVE_BIN" run preview --local "${EXTRA_ARGS[@]}"
+              "$REEVE_BIN" run preview --local "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             fi
             ;;
           approved|"run approved")
             # .pull_request.number on the review path; .issue.number on the
             # issue_comment path (/reeve approve).
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run approved --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run approved --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           ready|"run ready")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run ready --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run ready --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           apply|"run apply")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run apply --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run apply --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           refresh|"run refresh")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           unlock)
             # PR-scoped lock cleanup: removes this PR from lock holders and
@@ -504,7 +509,7 @@ runs:
             # .issue.number on the issue_comment path; .pull_request.number
             # when a workflow passes command "run explain" on a PR event.
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number // 0' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run explain --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run explain --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           *)
             CMD_ARGS=()

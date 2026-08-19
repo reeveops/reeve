@@ -171,6 +171,7 @@ func suppressPreApprovalConfig(local, hasVCS bool, changed []string, changedErr 
 type PRNotifyInput struct {
 	PR                int
 	CommitSHA         string
+	RunID             string
 	RunURL            string
 	PRTitle           string
 	PRAuthor          string
@@ -194,6 +195,7 @@ func NotifyPREvent(ctx context.Context, channels []notify.Channel, ev notify.Eve
 		PR: &notify.PRPayload{
 			PR:                in.PR,
 			CommitSHA:         in.CommitSHA,
+			RunID:             in.RunID,
 			RunURL:            in.RunURL,
 			Title:             in.PRTitle,
 			Author:            in.PRAuthor,

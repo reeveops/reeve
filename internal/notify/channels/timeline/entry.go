@@ -34,6 +34,7 @@ type Entry struct {
 	Event  string `json:"event"`
 	SHA    string `json:"sha,omitempty"`
 	At     string `json:"at"` // RFC3339 UTC
+	RunID  string `json:"run_id,omitempty"`
 	RunURL string `json:"run_url,omitempty"`
 	Detail string `json:"detail,omitempty"`
 }
@@ -44,6 +45,7 @@ func newEntry(p notify.Payload, now time.Time) Entry {
 		Event:  string(p.Event),
 		SHA:    p.PR.CommitSHA,
 		At:     now.UTC().Format(time.RFC3339),
+		RunID:  p.PR.RunID,
 		RunURL: p.PR.RunURL,
 		Detail: detailFor(p.Event, p.PR.Stacks),
 	}
@@ -126,8 +128,8 @@ func refsWithStatus(stacks []notify.StackResult, status string) string {
 }
 
 // markdownLine renders one entry for a GitHub timeline series. The SHA lives
-// in the comment header; each line carries the event, timestamp, detail, and
-// its own run's CI URL.
+// in the comment header; each line carries the event and timestamp, and may
+// include detail and its own run's CI URL when available.
 func (e Entry) markdownLine() string {
 	label, icon, _ := eventLabel(e.Event)
 	line := fmt.Sprintf("- %s **%s**", icon, label)

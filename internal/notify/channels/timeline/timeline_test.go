@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -145,7 +146,7 @@ func fixedNow() time.Time { return time.Date(2026, 7, 19, 12, 3, 5, 0, time.UTC)
 
 func payload(ev notify.Event, sha string) notify.Payload {
 	return notify.Payload{Event: ev, PR: &notify.PRPayload{
-		PR: 7, CommitSHA: sha, RunURL: "https://ci/run/" + string(ev),
+		PR: 7, CommitSHA: sha, RunID: "run-" + string(ev), RunURL: "https://ci/run/" + string(ev),
 		Title: "add thing", Author: "dev", RepoFull: "org/repo",
 	}}
 }
@@ -224,8 +225,9 @@ func TestGitHubGroupsCommentsBySHA(t *testing.T) {
 			t.Fatalf("Deliver: %v", err)
 		}
 	}
-	must(payload(notify.EventPlanning, "aaaa111bbbb"))
-	must(payload(notify.EventPlan, "aaaa111bbbb"))
+	for _, p := range planRun("aaaa111bbbb", "push-1", false) {
+		must(p)
+	}
 	must(payload(notify.EventPlanning, "cccc222dddd")) // new commit pushed
 
 	if len(fc.upserts) != 3 {
@@ -247,9 +249,9 @@ func TestGitHubGroupsCommentsBySHA(t *testing.T) {
 	if third.marker != CommentMarker("cccc222dddd") || strings.Contains(third.body, "preview finished") {
 		t.Fatalf("sha grouping leaked: %+v", third)
 	}
-	// Each entry links its own run.
-	if !strings.Contains(second, "https://ci/run/planning") || !strings.Contains(second, "https://ci/run/plan") {
-		t.Fatalf("per-run URLs missing:\n%s", second)
+	// Both preview lifecycle entries link the run they share.
+	if strings.Count(second, "https://ci/run/push-1") != 2 {
+		t.Fatalf("shared run URL missing:\n%s", second)
 	}
 }
 
@@ -487,109 +489,149 @@ func TestDefaultSubscriptionsCoverAllTimelineEvents(t *testing.T) {
 func requestedPlan(sha, run string) notify.Payload {
 	p := payload(notify.EventPlanning, sha)
 	p.PR.PlanRequested = true
+	p.PR.RunID = run
 	p.PR.RunURL = "https://ci/run/" + run
 	return p
 }
 
 func finishedPlan(sha, run string) notify.Payload {
 	p := payload(notify.EventPlan, sha)
+	p.PR.RunID = run
 	p.PR.RunURL = "https://ci/run/" + run
 	return p
 }
 
-func TestGitHubExplicitPlanOpensNewComment(t *testing.T) {
-	t.Parallel()
-	store := newMemStore()
-	fc := &fakeComments{}
-	s := testGitHubChannel(fc, store)
-	ctx := context.Background()
-
-	const sha = "aaaa111bbbb"
-	for _, p := range []notify.Payload{
-		payload(notify.EventPlanning, sha),
-		payload(notify.EventPlan, sha),
-		requestedPlan(sha, "requested-2"),
-		finishedPlan(sha, "requested-2"),
-	} {
-		if err := s.Deliver(ctx, p); err != nil {
-			t.Fatalf("Deliver %s: %v", p.Event, err)
-		}
-	}
-
-	// Series 1 keeps the pre-series marker; series 2 is a separate comment.
-	first, second := CommentMarker(sha), SeriesMarker(sha, 2)
-	if first == second {
-		t.Fatal("series 2 must not share series 1's marker")
-	}
-	markers := map[string]int{}
-	for _, u := range fc.upserts {
-		markers[u.marker]++
-	}
-	if markers[first] != 2 || markers[second] != 2 {
-		t.Fatalf("want 2 upserts per series, got %v", markers)
-	}
-
-	// The second series' comment carries only its own entries, so the
-	// earlier plan's log is not restated under the new plan.
-	last := fc.upserts[len(fc.upserts)-1]
-	if last.marker != second {
-		t.Fatalf("last upsert marker = %q, want %q", last.marker, second)
-	}
-	if strings.Count(last.body, "**preview started**") != 1 {
-		t.Fatalf("series 2 must hold one preview-started entry:\n%s", last.body)
-	}
-	if !strings.Contains(last.body, "plan 2") {
-		t.Fatalf("series 2 header must name the series:\n%s", last.body)
-	}
+func planRun(sha, run string, requested bool) []notify.Payload {
+	start := requestedPlan(sha, run)
+	start.PR.PlanRequested = requested
+	return []notify.Payload{start, finishedPlan(sha, run)}
 }
 
-func TestGitHubRetriedPlanAppendsToSeries(t *testing.T) {
-	t.Parallel()
-	store := newMemStore()
-	fc := &fakeComments{}
-	s := testGitHubChannel(fc, store)
-	ctx := context.Background()
-
-	const sha = "aaaa111bbbb"
-	// A re-dispatched CI job: planning again on the same SHA, not requested.
-	for i := 0; i < 3; i++ {
-		if err := s.Deliver(ctx, payload(notify.EventPlanning, sha)); err != nil {
-			t.Fatalf("Deliver: %v", err)
-		}
+func withoutRunURLs(payloads []notify.Payload) []notify.Payload {
+	for i := range payloads {
+		payloads[i].PR.RunURL = ""
 	}
-	st, _, err := s.loadState(ctx, 7)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := len(st.Series[shortSHA(sha)]); got != 1 {
-		t.Fatalf("retries opened %d series, want 1", got)
-	}
-	for _, u := range fc.upserts {
-		if u.marker != CommentMarker(sha) {
-			t.Fatalf("retry left series 1: marker %q", u.marker)
-		}
-	}
+	return payloads
 }
 
-func TestGitHubNewSHAOpensItsOwnSeries(t *testing.T) {
+func TestGitHubSeriesCountsAndMarkers(t *testing.T) {
 	t.Parallel()
-	store := newMemStore()
-	fc := &fakeComments{}
-	s := testGitHubChannel(fc, store)
-	ctx := context.Background()
+	const sha = "aaaa111bbbb"
+	tests := []struct {
+		name         string
+		payloads     []notify.Payload
+		wantSeries   int
+		wantMarkers  []string
+		lastContains []string
+		lastStarts   int
+	}{
+		{
+			name: "explicit plan opens new series",
+			payloads: append(planRun(sha, "push-1", false),
+				planRun(sha, "requested-2", true)...),
+			wantSeries: 2,
+			wantMarkers: []string{
+				CommentMarker(sha), CommentMarker(sha),
+				SeriesMarker(sha, 2), SeriesMarker(sha, 2),
+			},
+			lastContains: []string{"plan 2"},
+			lastStarts:   1,
+		},
+		{
+			name: "non-explicit retry stays in current series",
+			payloads: []notify.Payload{
+				payload(notify.EventPlanning, sha),
+				payload(notify.EventPlanning, sha),
+				payload(notify.EventPlanning, sha),
+			},
+			wantSeries:  1,
+			wantMarkers: []string{CommentMarker(sha), CommentMarker(sha), CommentMarker(sha)},
+		},
+		{
+			name: "new SHA opens its own series",
+			payloads: []notify.Payload{
+				payload(notify.EventPlanning, sha),
+				payload(notify.EventPlanning, "cccc222dddd"),
+			},
+			wantSeries:  2,
+			wantMarkers: []string{CommentMarker(sha), CommentMarker("cccc222dddd")},
+		},
+		{
+			name: "duplicate explicit delivery reuses request identity",
+			payloads: []notify.Payload{
+				payload(notify.EventPlanning, sha),
+				requestedPlan(sha, "requested-2"),
+				requestedPlan(sha, "requested-2"),
+			},
+			wantSeries:  2,
+			wantMarkers: []string{CommentMarker(sha), SeriesMarker(sha, 2), SeriesMarker(sha, 2)},
+		},
+		{
+			name: "run ID routes finish when run URL is empty",
+			payloads: append(withoutRunURLs(planRun(sha, "push-1", false)),
+				withoutRunURLs(planRun(sha, "requested-2", true))...),
+			wantSeries: 2,
+			wantMarkers: []string{
+				CommentMarker(sha), CommentMarker(sha),
+				SeriesMarker(sha, 2), SeriesMarker(sha, 2),
+			},
+		},
+		{
+			name: "unknown finish identity opens recovery series",
+			payloads: []notify.Payload{
+				requestedPlan(sha, "requested-1"),
+				requestedPlan(sha, "requested-2"),
+				finishedPlan(sha, "unknown-finish"),
+			},
+			wantSeries: 3,
+			wantMarkers: []string{
+				CommentMarker(sha), SeriesMarker(sha, 2), SeriesMarker(sha, 3),
+			},
+		},
+	}
 
-	// A push, not an explicit request: a SHA with no series still gets one.
-	if err := s.Deliver(ctx, payload(notify.EventPlanning, "aaaa111bbbb")); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Deliver(ctx, payload(notify.EventPlanning, "cccc222dddd")); err != nil {
-		t.Fatal(err)
-	}
-	if fc.upserts[0].marker == fc.upserts[1].marker {
-		t.Fatal("distinct commits must not share a comment")
-	}
-	if fc.upserts[1].marker != CommentMarker("cccc222dddd") {
-		t.Fatalf("new SHA marker = %q", fc.upserts[1].marker)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := newMemStore()
+			fc := &fakeComments{}
+			s := testGitHubChannel(fc, store)
+			ctx := context.Background()
+			for _, p := range tt.payloads {
+				if err := s.Deliver(ctx, p); err != nil {
+					t.Fatalf("Deliver %s: %v", p.Event, err)
+				}
+			}
+
+			st, _, err := s.loadState(ctx, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotSeries int
+			for _, series := range st.Series {
+				gotSeries += len(series)
+			}
+			if gotSeries != tt.wantSeries {
+				t.Fatalf("series count = %d, want %d: %+v", gotSeries, tt.wantSeries, st.Series)
+			}
+
+			gotMarkers := make([]string, 0, len(fc.upserts))
+			for _, u := range fc.upserts {
+				gotMarkers = append(gotMarkers, u.marker)
+			}
+			if !slices.Equal(gotMarkers, tt.wantMarkers) {
+				t.Fatalf("markers = %v, want %v", gotMarkers, tt.wantMarkers)
+			}
+			lastBody := fc.upserts[len(fc.upserts)-1].body
+			for _, want := range tt.lastContains {
+				if !strings.Contains(lastBody, want) {
+					t.Fatalf("last comment missing %q:\n%s", want, lastBody)
+				}
+			}
+			if tt.lastStarts > 0 && strings.Count(lastBody, "**preview started**") != tt.lastStarts {
+				t.Fatalf("last comment has wrong preview-started count:\n%s", lastBody)
+			}
+		})
 	}
 }
 
@@ -601,8 +643,8 @@ func TestGitHubPreSeriesStateLoadsAsSeriesOne(t *testing.T) {
 	ctx := context.Background()
 
 	// State as written before series grouping existed.
-	legacy := `{"entries":{"aaaa111":[{"event":"planning","sha":"aaaa111bbbb","at":"2026-07-19T12:03:05Z"}]}}`
-	if _, err := store.Put(ctx, stateKey(7), strings.NewReader(legacy)); err != nil {
+	legacy := `{"entries":{"aaaa111":[{"event":"planning","sha":"aaaa111bbbb","at":"2026-07-19T12:03:05Z","run_url":"https://ci/run/plan"}]}}`
+	if _, err := store.Put(ctx, legacyStateKey(7), strings.NewReader(legacy)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -630,9 +672,26 @@ func TestGitHubPreSeriesStateLoadsAsSeriesOne(t *testing.T) {
 	if len(st.Series["aaaa111"]) != 1 || len(st.Entries) != 0 {
 		t.Fatalf("state not migrated: %+v", st)
 	}
+	if _, _, err := store.Get(ctx, legacyStateKey(7)); err != nil {
+		t.Fatalf("legacy state was not retained for downgrade safety: %v", err)
+	}
+	if _, _, err := store.Get(ctx, stateKey(7)); err != nil {
+		t.Fatalf("versioned state was not written: %v", err)
+	}
+	// Simulate a pinned pre-series binary rewriting the legacy object after
+	// migration. The versioned history must remain authoritative.
+	if _, err := store.Put(ctx, legacyStateKey(7), strings.NewReader(`{"entries":{}}`)); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err = s.loadState(ctx, 7)
+	if err != nil || len(st.Series["aaaa111"]) != 1 || len(st.Series["aaaa111"][0]) != 2 {
+		t.Fatalf("legacy rewrite replaced versioned history: state=%+v err=%v", st, err)
+	}
 }
 
 func TestGitHubConcurrentSeriesMintsDoNotCollide(t *testing.T) {
+	t.Parallel()
+
 	store := newMemStore()
 	fc := &fakeComments{}
 	s := testGitHubChannel(fc, store)
@@ -712,30 +771,6 @@ func TestGitHubOverlappingPlansFinishInTheirOwnSeries(t *testing.T) {
 	}
 	if got := fc.upserts[4].marker; got != SeriesMarker(sha, 3) {
 		t.Fatalf("third plan finish updated marker %q, want series 3", got)
-	}
-}
-
-func TestGitHubRequestedPlanningRetryDoesNotMintAgain(t *testing.T) {
-	t.Parallel()
-	store := newMemStore()
-	s := testGitHubChannel(&fakeComments{}, store)
-	ctx := context.Background()
-
-	const sha = "aaaa111bbbb"
-	if err := s.Deliver(ctx, payload(notify.EventPlanning, sha)); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 2; i++ {
-		if err := s.Deliver(ctx, requestedPlan(sha, "requested-2")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	st, _, err := s.loadState(ctx, 7)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := len(st.Series[shortSHA(sha)]); got != 2 {
-		t.Fatalf("retried delivery minted %d series, want 2", got)
 	}
 }
 

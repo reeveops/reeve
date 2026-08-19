@@ -115,15 +115,55 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 }
 
 func TestActionPlanCommentMarksExplicitRequest(t *testing.T) {
+	got := runActionPreview(t, "issue_comment", `{
+		"issue":{"number":42,"pull_request":{}},
+		"comment":{"body":"/reeve plan","author_association":"OWNER","user":{"type":"User","login":"operator"}}
+	}`)
+	want := []string{"run", "preview", "--pr", "42", "--run-url", "https://github.com/org/repo/actions/runs/123", "--plan-requested"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("plan command args = %q, want %q", got, want)
+	}
+}
+
+func TestActionPushPreviewOmitsExplicitRequest(t *testing.T) {
+	got := runActionPreview(t, "pull_request", `{
+		"action":"synchronize",
+		"pull_request":{"number":42}
+	}`)
+	want := []string{"run", "preview", "--pr", "42", "--run-url", "https://github.com/org/repo/actions/runs/123"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("push preview args = %q, want %q", got, want)
+	}
+}
+
+func TestPlanRequestedFlagIsPreviewOnly(t *testing.T) {
+	runCmd := newRunCmd()
+	preview, _, err := runCmd.Find([]string{"preview"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Flags().Lookup("plan-requested") == nil {
+		t.Fatal("run preview is missing --plan-requested")
+	}
+	for _, name := range []string{"apply", "refresh"} {
+		cmd, _, err := runCmd.Find([]string{name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cmd.Flags().Lookup("plan-requested") != nil {
+			t.Fatalf("run %s unexpectedly accepts --plan-requested", name)
+		}
+	}
+}
+
+func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
+	t.Helper()
 	script := extractRunReeveScript(t, readRepoFile(t, "action.yml"))
 	dir := t.TempDir()
 	eventPath := filepath.Join(dir, "event.json")
 	argsPath := filepath.Join(dir, "args")
 	fake := filepath.Join(dir, "reeve")
-	if err := os.WriteFile(eventPath, []byte(`{
-		"issue":{"number":42,"pull_request":{}},
-		"comment":{"body":"/reeve plan","author_association":"OWNER","user":{"type":"User","login":"operator"}}
-	}`), 0o600); err != nil {
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGS_OUT\"\n"), 0o700); err != nil {
@@ -134,8 +174,11 @@ func TestActionPlanCommentMarksExplicitRequest(t *testing.T) {
 	cmd := exec.Command("bash", "-c", script)
 	for key, value := range map[string]string{
 		"GITHUB_WORKSPACE":           dir,
-		"GITHUB_EVENT_NAME":          "issue_comment",
+		"GITHUB_EVENT_NAME":          eventName,
 		"GITHUB_EVENT_PATH":          eventPath,
+		"GITHUB_SERVER_URL":          "https://github.com",
+		"GITHUB_REPOSITORY":          "org/repo",
+		"GITHUB_RUN_ID":              "123",
 		"REEVE_BIN":                  fake,
 		"REEVE_INPUT_ROOT":           dir,
 		"REEVE_INPUT_COMMAND":        "",
@@ -155,11 +198,7 @@ func TestActionPlanCommentMarksExplicitRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Fields(string(args))
-	want := []string{"run", "preview", "--pr", "42", "--plan-requested"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("plan command args = %q, want %q", got, want)
-	}
+	return strings.Fields(string(args))
 }
 
 func TestBinaryFetchRejectsMissingSignatureVerifier(t *testing.T) {

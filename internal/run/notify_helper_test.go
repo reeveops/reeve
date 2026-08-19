@@ -53,7 +53,7 @@ func TestNotifyPREventBuildsPayload(t *testing.T) {
 	t.Setenv("GITHUB_REPOSITORY", "org/repo")
 	channel := &captureChannel{events: notify.PREvents()}
 	err := NotifyPREvent(context.Background(), []notify.Channel{channel}, notify.EventPlan, PRNotifyInput{
-		PR: 9, CommitSHA: "abc", RunURL: "https://ci", PRTitle: "t", PRAuthor: "a",
+		PR: 9, CommitSHA: "abc", RunID: "run-9", RunURL: "https://ci", PRTitle: "t", PRAuthor: "a",
 		PlanRequested:     true,
 		RequiredApprovers: []string{"lead"},
 		Stacks: []summary.StackSummary{
@@ -73,7 +73,7 @@ func TestNotifyPREventBuildsPayload(t *testing.T) {
 		t.Fatalf("payload: %+v", p)
 	}
 	pr := p.PR
-	if pr.PR != 9 || pr.RepoFull != "org/repo" || pr.Title != "t" || pr.Author != "a" {
+	if pr.PR != 9 || pr.RepoFull != "org/repo" || pr.Title != "t" || pr.Author != "a" || pr.RunID != "run-9" {
 		t.Fatalf("pr payload: %+v", pr)
 	}
 	if !pr.PlanRequested {

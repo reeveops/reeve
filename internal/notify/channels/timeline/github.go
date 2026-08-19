@@ -38,10 +38,13 @@ func SeriesMarker(sha string, series int) string {
 	return fmt.Sprintf("<!-- reeve:timeline:v1:%s:%d -->", shortSHA(sha), series)
 }
 
-// stateKey is the per-PR blob object holding the accumulated entries.
-// Preview and apply are separate CI processes, so the entry history must be
-// persisted - a comment is re-rendered whole from state on every event.
-func stateKey(pr int) string { return fmt.Sprintf("notifications/pr-%d/timeline.json", pr) }
+// stateKey is versioned so a workflow pinned to a pre-series binary cannot
+// decode and then overwrite series-aware state. The current loader imports
+// legacyStateKey once when no v2 object exists; old binaries keep writing the
+// legacy object without truncating v2 history.
+func stateKey(pr int) string { return fmt.Sprintf("notifications/pr-%d/timeline-v2.json", pr) }
+
+func legacyStateKey(pr int) string { return fmt.Sprintf("notifications/pr-%d/timeline.json", pr) }
 
 // ghState is the persisted timeline. Entries are grouped by short SHA and,
 // within a SHA, by plan series: a new plan opens a new series (and so a new
@@ -57,8 +60,8 @@ type ghState struct {
 }
 
 // normalize migrates the pre-series Entries field into Series and ensures
-// both maps are non-nil. Called on every load, so a state object written by
-// either version is safe to append to.
+// both maps are non-nil. The legacy object itself remains untouched; migrated
+// state is persisted under the versioned key on the next append.
 func (st *ghState) normalize() {
 	if st.Series == nil {
 		st.Series = map[string][][]Entry{}
@@ -102,18 +105,31 @@ func (st *ghState) appendTo(sha string, e Entry, newSeries bool, targetSeries in
 	return selected, series[selected-1]
 }
 
-// seriesForRun returns the series already associated with a CI run URL.
+// seriesForRun returns the series already associated with a durable CI run
+// identity. RunID is authoritative when present. RunURL remains a fallback
+// for state written before RunID was persisted.
 // Preview-started and preview-finished are separate deliveries, and another
-// explicit preview can open a newer series between them. Matching the run URL
+// explicit preview can open a newer series between them. Matching identity
 // keeps each finish event with the start event from the same run.
-func (st *ghState) seriesForRun(sha, runURL string) int {
-	if runURL == "" {
+func (st *ghState) seriesForRun(sha string, run Entry) int {
+	series := st.Series[sha]
+	if run.RunID != "" {
+		for i := len(series) - 1; i >= 0; i-- {
+			for _, entry := range series[i] {
+				if entry.RunID == run.RunID {
+					return i + 1
+				}
+			}
+		}
+	}
+	if run.RunURL == "" {
 		return 0
 	}
-	series := st.Series[sha]
 	for i := len(series) - 1; i >= 0; i-- {
 		for _, entry := range series[i] {
-			if entry.RunURL == runURL {
+			// Do not merge two known, distinct run IDs merely because their
+			// display URL matches. Empty RunID is legacy state.
+			if entry.RunURL == run.RunURL && (run.RunID == "" || entry.RunID == "") {
 				return i + 1
 			}
 		}
@@ -202,10 +218,16 @@ func (s *GitHubChannel) appendEntry(ctx context.Context, pr int, e Entry, p noti
 		targetSeries := 0
 		newSeries := opensSeries(p, len(st.Series[sha]))
 		if p.Event == notify.EventPlan {
-			targetSeries = st.seriesForRun(sha, e.RunURL)
+			targetSeries = st.seriesForRun(sha, e)
+			// A finish with an unknown identity must not be attached to the
+			// newest series: overlapping plans make that guess unsafe. Isolate
+			// it in a recovery series instead.
+			if targetSeries == 0 && len(st.Series[sha]) > 0 {
+				newSeries = true
+			}
 		}
 		if p.Event == notify.EventPlanning && p.PR.PlanRequested {
-			if existing := st.seriesForRun(sha, e.RunURL); existing > 0 {
+			if existing := st.seriesForRun(sha, e); existing > 0 {
 				newSeries = false
 				targetSeries = existing
 			}
@@ -229,11 +251,32 @@ func (s *GitHubChannel) appendEntry(ctx context.Context, pr int, e Entry, p noti
 // loadState reads the per-PR timeline. Missing object = fresh state; any
 // other failure propagates so an outage cannot silently drop history.
 func (s *GitHubChannel) loadState(ctx context.Context, pr int) (*ghState, string, error) {
-	rc, meta, err := s.blob.Get(ctx, stateKey(pr))
+	st, etag, err := s.loadStateObject(ctx, pr, stateKey(pr))
+	if err == nil {
+		return st, etag, nil
+	}
+	if !errors.Is(err, blob.ErrNotFound) {
+		return nil, "", err
+	}
+
+	// Import pre-series state without reusing its ETag: the next append must
+	// create the independent v2 object, leaving the old key downgrade-safe.
+	st, _, err = s.loadStateObject(ctx, pr, legacyStateKey(pr))
+	if err == nil {
+		return st, "", nil
+	}
 	if errors.Is(err, blob.ErrNotFound) {
 		return &ghState{Series: map[string][][]Entry{}}, "", nil
 	}
+	return nil, "", err
+}
+
+func (s *GitHubChannel) loadStateObject(ctx context.Context, pr int, key string) (*ghState, string, error) {
+	rc, meta, err := s.blob.Get(ctx, key)
 	if err != nil {
+		if errors.Is(err, blob.ErrNotFound) {
+			return nil, "", blob.ErrNotFound
+		}
 		return nil, "", fmt.Errorf("load timeline state for pr %d: %w", pr, err)
 	}
 	defer rc.Close()
