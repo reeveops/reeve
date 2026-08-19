@@ -313,6 +313,11 @@ does not reach steps your workflow runs after reeve. `GOPRIVATE` and the cache
 paths do go to `GITHUB_ENV`: neither carries a credential, and a prewarm build
 in a later step needs them.
 
+If you already pass `GIT_CONFIG_*` to the reeve step yourself, that keeps
+working: the action sets those variables only when `private-modules-token` is
+given. Adopt the input and drop your own block, or keep your block and skip the
+input. Doing both is redundant, not broken.
+
 ## 5. Move the bucket to real storage
 
 Filesystem buckets work great for smoke tests but every CI run starts fresh,

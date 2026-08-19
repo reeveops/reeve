@@ -28,6 +28,13 @@ exposure to the process that needs it.
 `GOPRIVATE` and the cache paths do go through `GITHUB_ENV`: neither carries a
 credential, and a prewarm build in a later step needs them.
 
+The rewrite is exported by the reeve step's own script, not declared in its
+`env:` block. A step `env:` entry overrides the caller's job and workflow env,
+so declaring `GIT_CONFIG_*` there unconditionally would clobber a rewrite the
+caller had configured themselves - which is exactly how this was done before
+these inputs existed. Exporting inside the script leaves those names untouched
+when no token was supplied.
+
 reeve's allowlist still governs what the engine inherits, and `env_passthrough`
 remains the operator-declared channel. The action stages values for the engine's
 environment; it does not widen the allowlist.

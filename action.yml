@@ -395,18 +395,31 @@ runs:
         # command dispatch when it reads historical `/reeve approve` comments.
         REEVE_ALLOWED_ASSOCIATIONS: ${{ inputs.allowed-associations }}
         REEVE_COMMAND_PREFIXES: ${{ inputs.command-prefix }}
-        # Private-module git rewrite for the engine subprocess, which runs with
-        # a fresh HOME and cannot read ~/.gitconfig. Scoped to this step rather
+        # Private-module credentials for the engine subprocess, which runs with
+        # a fresh HOME and cannot read ~/.gitconfig. Passed on this step rather
         # than GITHUB_ENV so the token never reaches the caller's later steps.
-        # COUNT is 0 when no token was supplied: a rewrite pointing at a
-        # credential-less URL would break every fetch, so it must not exist.
-        GIT_CONFIG_COUNT: ${{ inputs.private-modules-token != '' && '2' || '0' }}
-        GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ inputs.private-modules-token }}@${{ inputs.private-modules-host }}/.insteadOf"
-        GIT_CONFIG_VALUE_0: "https://${{ inputs.private-modules-host }}/"
-        GIT_CONFIG_KEY_1: "url.https://x-access-token:${{ inputs.private-modules-token }}@${{ inputs.private-modules-host }}/.insteadOf"
-        GIT_CONFIG_VALUE_1: "git@${{ inputs.private-modules-host }}:"
+        #
+        # Deliberately NOT declared as GIT_CONFIG_* here. A step env: entry
+        # overrides the caller's job and workflow env, so declaring those names
+        # unconditionally would clobber a rewrite the caller configured
+        # themselves - the documented approach before these inputs existed. The
+        # run script below exports GIT_CONFIG_* only when a token was supplied,
+        # so the names stay untouched otherwise.
+        REEVE_PRIVATE_MODULES_TOKEN: ${{ inputs.private-modules-token }}
+        REEVE_PRIVATE_MODULES_HOST: ${{ inputs.private-modules-host }}
       run: |
         set -euo pipefail
+        # Only when a token was supplied: see the env: note above. Exported
+        # here, in the process that runs reeve, so the names are never set for
+        # a caller who configured their own rewrite.
+        if [ -n "${REEVE_PRIVATE_MODULES_TOKEN:-}" ]; then
+          rewrite="url.https://x-access-token:${REEVE_PRIVATE_MODULES_TOKEN}@${REEVE_PRIVATE_MODULES_HOST}/.insteadOf"
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0="$rewrite"
+          export GIT_CONFIG_VALUE_0="https://${REEVE_PRIVATE_MODULES_HOST}/"
+          export GIT_CONFIG_KEY_1="$rewrite"
+          export GIT_CONFIG_VALUE_1="git@${REEVE_PRIVATE_MODULES_HOST}:"
+        fi
         ROOT="$REEVE_INPUT_ROOT"
         if [ -z "$ROOT" ]; then ROOT="$GITHUB_WORKSPACE"; fi
         cd "$ROOT"

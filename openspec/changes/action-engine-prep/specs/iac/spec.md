@@ -41,6 +41,11 @@ Such a credential MUST NOT be placed in job-scoped environment state that
 persists to later steps in the caller's job. It MUST be scoped to the step that
 starts the engine.
 
+Preparation MUST NOT declare an environment variable the caller may already be
+setting for the same purpose unless that preparation is active. A step
+environment entry overrides the caller's own, so declaring such a name while
+inactive would silently disable the caller's configuration.
+
 The action MUST NOT bypass the child environment allowlist to deliver the
 credential: the operator's declared configuration still decides whether the
 engine receives it.
@@ -49,6 +54,12 @@ engine receives it.
 
 - **WHEN** a run uses the private-module credential input
 - **THEN** the run warns that the credential reaches the engine subprocess
+
+#### Scenario: Caller configures the same variables themselves
+
+- **WHEN** the caller sets the engine's git configuration variables and does not
+  set the private-module credential input
+- **THEN** the caller's values reach the engine unchanged
 
 #### Scenario: Later step in the caller's job
 
