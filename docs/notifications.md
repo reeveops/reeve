@@ -167,7 +167,7 @@ place as that series' events land:
 > - 🚀 **apply started** · 2026-07-19 12:10:02 UTC · [run](https://github.com/acme/platform/actions/runs/123456790)
 > - ✅ **apply finished**: app/prod +1 ~2 -0 ±0 · 2026-07-19 12:12:30 UTC · [run](https://github.com/acme/platform/actions/runs/123456790)
 
-A series starts at a plan and its first entry is that plan. A new series
+A normal series starts at a plan and its first entry is that plan. A new series
 means a new comment; the previous series stays as written.
 
 A new series starts when:
@@ -177,12 +177,15 @@ A new series starts when:
   `--plan-requested` on `reeve run preview` when the run came from a
   `/reeve plan` comment.
 
+Delivery guarantees:
+
 - A retried or re-dispatched CI job appends to the current series, so one plan
   is never split across two comments.
 - Reeve correlates preview start and finish with the durable GitHub Actions run
   ID; the run URL is retained for display.
 - An unmatched finish opens a recovery series instead of attaching to a newer
-  overlapping plan.
+  overlapping plan. This is the one case where a series does not start at a
+  plan.
 
 Later series carry `· plan N` in the header. The first series on a commit is
 unnumbered and keeps the marker `reeve:timeline:v1:{sha}`; later series use

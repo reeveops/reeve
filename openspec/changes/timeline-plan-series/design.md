@@ -18,11 +18,9 @@ previous series' comment stays as the historical record.
 
 ## When a series is minted
 
-Normally a planning event opens a series, and only when the payload marks it a
-fresh plan request. Two cases mint:
-
-- The SHA has no series yet. Covers a new commit.
-- The SHA has a series and the plan was explicitly requested.
+A planning event for a SHA with no series opens series 1, whether or not the
+payload marks it a fresh request. Covers a new commit. Once a SHA has a series,
+only a payload marked a fresh plan request mints another.
 
 A planning event that is neither - a retried or re-dispatched CI job for a plan
 already in progress on that SHA - appends to the current series. Without this
@@ -46,6 +44,23 @@ Series-aware state is persisted under a versioned object key. If that object is
 absent, the channel imports the pre-series object and writes the migrated state
 to the new key. The legacy object is left untouched so an older binary cannot
 decode and overwrite the newer series-aware history.
+
+Migration is one-way, and mixed-version operation is not supported: once the
+versioned object exists the loader stops consulting the legacy key, so an event
+processed by a pre-series binary after migration lands in the legacy object and
+is absent from the series-aware timeline. The loss is bounded - that binary
+still renders its own comment under the unchanged series-1 marker - but the
+entry does not appear in later series-aware renders.
+
+Neither a merge nor a dual write is used, deliberately. Legacy state is a flat
+per-SHA entry list carrying no series and no run identity, so merging it back
+after migration would have to guess which series each entry belongs to, which
+is the guessing the run-identity routing exists to remove. Dual writing would
+hand a pre-series binary a v2 object it decodes without series awareness and
+writes back truncated, which is the hazard the versioned key prevents.
+
+Operators upgrading mid-PR should therefore roll the reeve version forward for
+a repository in one step rather than running two versions against the same PR.
 
 ## Signalling an explicit plan request
 

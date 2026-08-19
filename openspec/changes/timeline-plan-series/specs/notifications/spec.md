@@ -41,6 +41,12 @@ series grouping MUST load as that SHA's first series. Series-aware state MUST
 use a versioned persistence path so older binaries cannot overwrite it with a
 schema that discards later series.
 
+Migration MUST be one-way: once series-aware state exists for a PR, the channel
+MUST NOT consult the pre-series object again. Running a pre-series and a
+series-aware binary against the same PR is therefore unsupported, and an event
+delivered by a pre-series binary after migration MAY be absent from the
+series-aware timeline.
+
 #### Scenario: Plan requested again on the same commit
 
 - **WHEN** a plan is explicitly requested for a SHA that already has a series
@@ -76,6 +82,12 @@ schema that discards later series.
 - **WHEN** timeline state written before this change is loaded
 - **THEN** its per-SHA entries load as series 1
 - **AND** that series keeps the pre-change marker
+
+#### Scenario: Pre-series binary delivers after migration
+
+- **WHEN** series-aware state already exists for a PR
+- **THEN** the pre-series object is not consulted again
+- **AND** the series-aware object is not overwritten with pre-series state
 
 #### Scenario: Preview finish has no matching start
 
