@@ -1,8 +1,14 @@
 package pulumi
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 func TestParseApplyFromEventStream(t *testing.T) {
@@ -79,5 +85,54 @@ func TestParseApplyIgnoresNonErrorDiagnostics(t *testing.T) {
 	}
 	if counts.Change != 1 {
 		t.Fatalf("counts: %+v", counts)
+	}
+}
+
+// The engine can report error diagnostics while exiting zero (a partial
+// failure), and stderr can carry a login or backend failure the event stream
+// never mentions. Neither may be dropped because runErr happens to be nil.
+func TestApplyErrorKeepsStderrOnZeroExit(t *testing.T) {
+	t.Parallel()
+	// parseApply is the seam under test: it must report the diagnostic
+	// regardless of how the process exited.
+	stream := []byte(`{"diagnosticEvent":{"severity":"error","message":"error: partial failure on aws:s3:Bucket (data)"}}
+{"summaryEvent":{"resourceChanges":{"create":1}}}
+`)
+	_, errMsg := parseApply(stream)
+	if !strings.Contains(errMsg, "partial failure") {
+		t.Fatalf("diagnostic dropped: %q", errMsg)
+	}
+}
+
+// End-to-end over Apply: a fake binary that emits an error diagnostic on
+// stdout, writes to stderr, and exits zero. Both must reach the reported
+// error.
+func TestApplyKeepsStderrWithDiagnosticsOnZeroExit(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fake-pulumi")
+	script := "#!/bin/sh\n" +
+		`echo '{"diagnosticEvent":{"severity":"error","message":"error: partial failure on aws:s3:Bucket (data)"}}'` + "\n" +
+		`echo '{"summaryEvent":{"resourceChanges":{"create":1}}}'` + "\n" +
+		"echo 'warning: backend token refresh failed' >&2\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &Engine{Binary: bin}
+	res, err := e.Apply(context.Background(),
+		discovery.Stack{Project: "app", Path: dir, Name: "prod", Env: "prod"},
+		iac.ApplyOpts{Cwd: dir, TimeoutSec: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Error, "partial failure") {
+		t.Fatalf("diagnostic dropped: %q", res.Error)
+	}
+	if !strings.Contains(res.Error, "backend token refresh failed") {
+		t.Fatalf("stderr dropped on zero exit: %q", res.Error)
+	}
+	if res.Counts.Add != 1 {
+		t.Fatalf("counts lost alongside the error: %+v", res.Counts)
 	}
 }

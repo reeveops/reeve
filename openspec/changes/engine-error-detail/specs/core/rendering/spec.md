@@ -2,6 +2,21 @@
 
 ## ADDED Requirements
 
+### Requirement: Rendered subprocess output is bounded and fence-safe
+
+A rendered summary line MUST be bounded in length, even when the value it
+summarizes is unbounded subprocess output. Full output MUST render in its own
+block rather than twice.
+
+Any block rendering subprocess output MUST be escaped so a fence sequence in
+that output cannot terminate the block.
+
+#### Scenario: Hook fails with large output on both streams
+
+- **WHEN** a policy hook fails writing large output to stdout and stderr
+- **THEN** its summary line stays bounded
+- **AND** each stream renders once, in a fence-safe block
+
 ### Requirement: Multi-line errors render in a fenced block
 
 A rendered error MUST preserve every line of the reported message.

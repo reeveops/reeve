@@ -73,10 +73,11 @@ func (e *Engine) Refresh(ctx context.Context, stack discovery.Stack, opts iac.Re
 	switch {
 	case diagErr != "":
 		res.Error = diagErr
-		if runErr != nil {
-			if extra := strings.TrimSpace(stderr.String()); extra != "" {
-				res.Error += "\n" + extra
-			}
+		// Regardless of exit code: the engine can report diagnostics while
+		// exiting zero, and stderr can still carry a login or backend failure
+		// the event stream never mentions.
+		if extra := strings.TrimSpace(stderr.String()); extra != "" {
+			res.Error += "\n" + extra
 		}
 	case runErr != nil:
 		res.Error = failureMessage(stderr.String(), runErr)

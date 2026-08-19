@@ -69,6 +69,8 @@ func TestPreviewGolden_AllErrors(t *testing.T) {
 // operator acts on, and folding it into one markdown line either breaks the
 // layout or loses everything after the first newline.
 func TestPreviewGolden_MultilineError(t *testing.T) {
+	t.Parallel()
+
 	in := PreviewInput{
 		Op: "preview", RunNumber: 9, CommitSHA: "deadbee",
 		Stacks: []summary.StackSummary{

@@ -22,4 +22,7 @@
 - [x] Test: `hookFailure` precedence and no-output fallback.
 - [x] Test: `writeError` inline vs fenced, and fence escaping.
 - [x] Golden: multi-line error renders fenced; existing goldens unchanged.
+- [x] Test: diagnostics plus stderr survive a zero-exit apply, end to end.
+- [x] Test: hook stderr redaction, including the setup-failure path.
+- [x] Test: hook output blocks are fence-safe and the summary line is bounded.
 - [x] `mise run check` green.

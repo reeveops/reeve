@@ -86,10 +86,11 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 	switch {
 	case diagErr != "":
 		result.Error = diagErr
-		if runErr != nil {
-			if extra := strings.TrimSpace(stderr.String()); extra != "" {
-				result.Error += "\n" + extra
-			}
+		// Regardless of exit code: the engine can report diagnostics while
+		// exiting zero, and stderr can still carry a login or backend failure
+		// the event stream never mentions.
+		if extra := strings.TrimSpace(stderr.String()); extra != "" {
+			result.Error += "\n" + extra
 		}
 	case runErr != nil:
 		result.Error = failureMessage(stderr.String(), runErr)

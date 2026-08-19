@@ -239,6 +239,15 @@ func (e *Engine) planFile() (string, error) {
 // failureMessage builds a non-empty error string from stderr, falling back
 // to the process error. Never returns "" (drift's fail-closed contract
 // depends on a non-empty Error).
+// firstLine bounds a message to its leading line. Used only by the workspace
+// enumeration fallback, which logs on a path with no redactor available.
+func firstLine(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx > 0 {
+		return s[:idx]
+	}
+	return s
+}
+
 func failureMessage(stderr string, err error) string {
 	stderr = strings.TrimSpace(stderr)
 	switch {
