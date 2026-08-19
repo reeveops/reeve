@@ -1,15 +1,21 @@
 package run
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/reeveops/reeve/internal/auth"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/core/summary"
 	"github.com/reeveops/reeve/internal/iac"
+	reevelog "github.com/reeveops/reeve/internal/log"
 	"github.com/reeveops/reeve/internal/vcs"
 )
 
@@ -52,6 +58,8 @@ func (f *fakeVCS) PostComment(ctx context.Context, _ int, body string) error {
 }
 
 func TestPreviewEndToEnd(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	engine := &fakeEngine{
 		enum: []discovery.Stack{
@@ -99,28 +107,119 @@ func TestPreviewEndToEnd(t *testing.T) {
 	if !strings.Contains(out.CommentBody, "api/prod") {
 		t.Fatalf("comment missing api/prod: %s", out.CommentBody)
 	}
+	if !out.CommentPosted {
+		t.Fatal("preview did not report the posted comment")
+	}
 }
 
-func TestPlanSucceeded(t *testing.T) {
+func TestPreviewFailedRefs(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		stacks []summary.StackSummary
-		want   bool
+		want   []string
 	}{
-		{"empty", nil, false},
+		{"empty", nil, nil},
 		{"all planned", []summary.StackSummary{
-			{Status: summary.StatusPlanned},
-			{Status: summary.StatusNoOp},
-		}, true},
+			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+			{Project: "web", Stack: "prod", Status: summary.StatusNoOp},
+		}, nil},
 		{"one error", []summary.StackSummary{
-			{Status: summary.StatusPlanned},
-			{Status: summary.StatusError},
-		}, false},
+			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+			{Project: "web", Stack: "prod", Status: summary.StatusError},
+		}, []string{"web/prod"}},
+		{"multiple errors preserve run order", []summary.StackSummary{
+			{Project: "api", Stack: "prod", Status: summary.StatusError},
+			{Project: "web", Stack: "prod", Status: summary.StatusNoOp},
+			{Project: "worker", Stack: "prod", Status: summary.StatusError},
+		}, []string{"api/prod", "worker/prod"}},
 	}
 	for _, tt := range tests {
-		if got := planSucceeded(tt.stacks); got != tt.want {
-			t.Errorf("%s: planSucceeded = %v, want %v", tt.name, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := previewFailedRefs(tt.stacks); !slices.Equal(got, tt.want) {
+				t.Errorf("previewFailedRefs = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPreviewFailurePreservesOutputAndArtifacts(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine := &fakeEngine{
+		enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"}},
+		results: map[string]iac.PreviewResult{
+			"api/prod": {Error: "engine preview failed"},
+		},
+	}
+	fvcs := &fakeVCS{changed: []string{"projects/api/main.ts"}, headSHA: "head-sha"}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := Preview(ctx, PreviewInput{
+		PRNumber: 1, CommitSHA: "head-sha", RunNumber: 7, RepoRoot: "/nope",
+		Engine: engine,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"prod"}}},
+		}},
+		Shared: &schemas.Shared{}, Blob: store, VCS: fvcs, Comments: fvcs,
+	})
+	if err == nil {
+		t.Fatal("Preview returned nil error for a failed stack")
+	}
+	if out == nil {
+		t.Fatal("Preview discarded output for a failed stack")
+	}
+	if !out.Failed || !slices.Equal(out.FailedStacks, []string{"api/prod"}) {
+		t.Fatalf("failure metadata = failed:%v stacks:%v", out.Failed, out.FailedStacks)
+	}
+	if !out.CommentPosted {
+		t.Fatal("Preview did not report the posted failure comment")
+	}
+	if !strings.Contains(out.CommentBody, "engine preview failed") {
+		t.Fatalf("failure comment missing engine error: %s", out.CommentBody)
+	}
+	found, findErr := FindPreviewForStack(ctx, store, 1, "head-sha", "api/prod")
+	if findErr != nil {
+		t.Fatal(findErr)
+	}
+	if !found.Found || found.Succeeded || found.Plan == nil || found.Plan.Status != summary.StatusError {
+		t.Fatalf("failed preview artifact = %+v", found)
+	}
+}
+
+func TestRunPreviewOneRedactsAuthFailureLog(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	reevelog.Install(&logs, slog.LevelDebug, reevelog.FormatText)
+
+	secret := "gho_" + strings.Repeat("a", 40)
+	reg := auth.NewRegistry()
+	if err := reg.Register(&fakeProvider{
+		name: "gcp-prod", typ: "gcp_wif", err: fmt.Errorf("exchange rejected token %s", secret),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := localAuthCfg()
+	stack := discovery.Stack{Project: "prod", Name: "api", Env: "prod"}
+
+	got := runPreviewOne(context.Background(), PreviewInput{
+		Shared: &schemas.Shared{}, AuthConfig: cfg, AuthRegistry: reg,
+	}, nil, stack, "run-1", nil)
+	if got.Status != summary.StatusError {
+		t.Fatalf("status = %s, want error", got.Status)
+	}
+	if strings.Contains(got.Error, secret) || !strings.Contains(got.Error, "[redacted]") {
+		t.Fatalf("summary error was not redacted: %q", got.Error)
+	}
+	if strings.Contains(logs.String(), secret) || !strings.Contains(logs.String(), "[redacted]") {
+		t.Fatalf("auth failure log was not redacted: %s", logs.String())
 	}
 }
 
@@ -352,6 +451,8 @@ func TestPreviewPatternDecl(t *testing.T) {
 }
 
 func TestPreviewLocalIgnoresChangedFiles(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	engine := &fakeEngine{
 		enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
@@ -371,6 +472,9 @@ func TestPreviewLocalIgnoresChangedFiles(t *testing.T) {
 	}
 	if len(out.Stacks) != 1 {
 		t.Fatalf("local mode should run all declared stacks, got %d", len(out.Stacks))
+	}
+	if out.CommentPosted {
+		t.Fatal("local preview reported a posted comment")
 	}
 }
 

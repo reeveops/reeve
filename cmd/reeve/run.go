@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -94,7 +96,11 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	engineCfg := env.engineCfg
 
 	// Opportunistic blob retention: prune run artifacts older than max_age.
+	// Timed: it lists and deletes against the bucket, so a slow or throttled
+	// backend shows up here rather than as an unexplained gap.
+	pruneStart := time.Now()
 	run.PruneRunArtifactsOpportunistic(ctx, store, cfg.Shared)
+	slog.Debug("run artifact prune finished", "ms", time.Since(pruneStart).Milliseconds())
 
 	// OTEL is NOT built here for preview: run.Preview constructs it after
 	// the pre-approval observability gate (a PR that modifies
@@ -140,27 +146,32 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return fmt.Errorf("invalid --repo %q: want owner/name", repoFull)
 		}
+		ghStart := time.Now()
 		client, err := gh.New(ctx, token, parts[0], parts[1])
 		if err != nil {
 			return err
 		}
+		slog.Debug("github client constructed", "repo", repoFull, "ms", time.Since(ghStart).Milliseconds())
 		in.VCS = client
 		in.Comments = client
 	}
 
+	// A failed preview still returns its output: the PR comment and the
+	// per-stack errors were already written, and the operator needs both the
+	// rendered detail and a nonzero exit.
 	out, err := run.Preview(ctx, in)
-	if err != nil {
+	if out == nil {
 		return err
 	}
 
-	if local || in.Comments == nil {
+	if local || !out.CommentPosted {
 		// Print the rendered comment to stdout so operators can review.
 		fmt.Fprintln(cmd.OutOrStdout(), out.CommentBody)
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "posted preview comment for PR #%d (run_id=%s, %d stacks)\n",
-			pr, out.RunID, len(out.Stacks))
+		fmt.Fprintf(cmd.OutOrStdout(), "posted preview comment for PR #%d (run_id=%s, %d stacks, %d failed)\n",
+			pr, out.RunID, len(out.Stacks), len(out.FailedStacks))
 	}
-	return nil
+	return err
 }
 
 func flagBool(cmd *cobra.Command, name string) bool {

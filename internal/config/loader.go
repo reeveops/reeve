@@ -218,7 +218,13 @@ func Load(root string) (*Config, error) {
 	}
 
 	if cfg.Shared != nil {
-		slog.Info("config loaded", "dir", dir, "log_level", cfg.Shared.LogLevel, "log_format", cfg.Shared.LogFormat)
+		// These are the values as written in shared.yaml, NOT the level the
+		// process ends up running at: --log-level and REEVE_LOG_LEVEL both
+		// outrank the file. Naming them config_* keeps an empty file value
+		// from reading as "your -log-level flag was dropped"; the effective
+		// level is logged by the caller after it re-installs the logger.
+		slog.Info("config loaded", "dir", dir,
+			"config_log_level", cfg.Shared.LogLevel, "config_log_format", cfg.Shared.LogFormat)
 	}
 	return cfg, nil
 }

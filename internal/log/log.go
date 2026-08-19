@@ -48,6 +48,15 @@ const (
 	FormatJSON
 )
 
+// String names the format for log output, so a "logging configured" line
+// reports "text"/"json" rather than an opaque enum ordinal.
+func (f Format) String() string {
+	if f == FormatJSON {
+		return "json"
+	}
+	return "text"
+}
+
 // ParseFormat maps "text" / "json" (case-insensitive) to a Format. Empty or
 // unknown values resolve to FormatText.
 func ParseFormat(name string) Format {
@@ -140,5 +149,24 @@ func FromConfig(levelFlag, formatFlag, cfgLevel, cfgFormat string) *slog.Logger 
 		format = cfgFormat
 	}
 	// nil writer -> level-split (Debug/Info to stdout, Warn/Error to stderr).
-	return Install(nil, Level(level), ParseFormat(format))
+	lvl, fmtv := Level(level), ParseFormat(format)
+	lg := Install(nil, lvl, fmtv)
+	// Report what actually won, and from where: an operator who passes
+	// --log-level debug must be able to confirm it took effect without
+	// inferring it from whether debug lines appear later.
+	lg.Debug("logging configured", "level", lvl.String(), "format", fmtv.String(), "source", levelSource(levelFlag))
+	return lg
+}
+
+// levelSource names the precedence tier that supplied the level, for the
+// confirmation line above.
+func levelSource(levelFlag string) string {
+	switch {
+	case levelFlag != "":
+		return "flag"
+	case os.Getenv("REEVE_LOG_LEVEL") != "":
+		return "env"
+	default:
+		return "config"
+	}
 }
