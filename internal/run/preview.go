@@ -324,12 +324,14 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	})
 
 	if err := writeManifest(ctx, in.Blob, in.PRNumber, runID, summaries, in.CommitSHA); err != nil {
+		outcome = "failed"
 		return nil, fmt.Errorf("write manifest: %w", err)
 	}
 
 	commentPosted := false
 	if in.Comments != nil && in.PRNumber > 0 {
 		if err := in.Comments.UpsertComment(ctx, in.PRNumber, body, render.Marker); err != nil {
+			outcome = "failed"
 			return nil, fmt.Errorf("upsert pr comment: %w", err)
 		}
 		commentPosted = true
@@ -378,6 +380,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		CommentPosted: commentPosted,
 	}
 	if out.Failed {
+		outcome = "failed"
 		// The comment and artifacts above are still written - reviewers need
 		// the failure detail on the PR - but the run must not report success.
 		return out, fmt.Errorf("preview failed for %d of %d stacks: %s",
@@ -392,10 +395,11 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview,
 		LocalAuth{Enabled: in.Local, Providers: in.LocalAuthProviders})
 	if authErr != nil {
-		slog.Error("preview stack failed: auth resolution", "stack", s.Ref(), "err", authErr)
+		redactedErr := redactor.Redact(authErr.Error())
+		slog.Error("preview stack failed: auth resolution", "stack", s.Ref(), "err", redactedErr)
 		return summary.StackSummary{
 			Project: s.Project, Stack: s.Name, Env: s.Env,
-			Status: summary.StatusError, Error: redactor.Redact(authErr.Error()),
+			Status: summary.StatusError, Error: redactedErr,
 		}
 	}
 	defer authCleanup()
