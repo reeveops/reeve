@@ -195,6 +195,12 @@ That's it. The action auto-detects the command from the event:
 | `/reeve help` comment                              | posts available commands |
 | Any other comment, or any bot-authored comment     | silent no-op             |
 
+**`reeve run preview` exit behavior**:
+
+- A preview exits `0` only when every targeted stack plans successfully or is a no-op.
+- If any stack fails, reeve writes the manifest and PR comment with the failure details before exiting nonzero.
+- Reeve reports a posted comment only when the PR comment was written; local runs and runs without a comment client print the rendered comment instead.
+
 **`reeve run apply` exit codes** (this is what turns the PR check red or
 green):
 
