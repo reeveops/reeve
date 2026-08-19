@@ -114,6 +114,109 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 	}
 }
 
+func TestActionPreviewRouting(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventName string
+		eventJSON string
+		want      []string
+	}{
+		{
+			name:      "plan comment marks explicit request",
+			eventName: "issue_comment",
+			eventJSON: `{
+				"issue":{"number":42,"pull_request":{}},
+				"comment":{"body":"/reeve plan","author_association":"OWNER","user":{"type":"User","login":"operator"}}
+			}`,
+			want: []string{"run", "preview", "--pr", "42", "--run-url", "https://github.com/org/repo/actions/runs/123", "--plan-requested"},
+		},
+		{
+			name:      "push preview omits explicit request",
+			eventName: "pull_request",
+			eventJSON: `{
+				"action":"synchronize",
+				"pull_request":{"number":42}
+			}`,
+			want: []string{"run", "preview", "--pr", "42", "--run-url", "https://github.com/org/repo/actions/runs/123"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runActionPreview(t, tt.eventName, tt.eventJSON)
+			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
+				t.Fatalf("preview args = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPlanRequestedFlagIsPreviewOnly(t *testing.T) {
+	t.Parallel()
+
+	runCmd := newRunCmd()
+	preview, _, err := runCmd.Find([]string{"preview"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Flags().Lookup("plan-requested") == nil {
+		t.Fatal("run preview is missing --plan-requested")
+	}
+	for _, name := range []string{"apply", "refresh"} {
+		cmd, _, err := runCmd.Find([]string{name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cmd.Flags().Lookup("plan-requested") != nil {
+			t.Fatalf("run %s unexpectedly accepts --plan-requested", name)
+		}
+	}
+}
+
+func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
+	t.Helper()
+	script := extractRunReeveScript(t, readRepoFile(t, "action.yml"))
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	argsPath := filepath.Join(dir, "args")
+	fake := filepath.Join(dir, "reeve")
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGS_OUT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// #nosec G204 -- bash executes the repository-owned action script with a fixed event fixture.
+	cmd := exec.Command("bash", "-c", script)
+	for key, value := range map[string]string{
+		"GITHUB_WORKSPACE":           dir,
+		"GITHUB_EVENT_NAME":          eventName,
+		"GITHUB_EVENT_PATH":          eventPath,
+		"GITHUB_SERVER_URL":          "https://github.com",
+		"GITHUB_REPOSITORY":          "org/repo",
+		"GITHUB_RUN_ID":              "123",
+		"REEVE_BIN":                  fake,
+		"REEVE_INPUT_ROOT":           dir,
+		"REEVE_INPUT_COMMAND":        "",
+		"REEVE_INPUT_EXTRA_ARGS":     "",
+		"REEVE_RUN_ON_APPROVAL":      "false",
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+		"ARGS_OUT":                   argsPath,
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("action script failed: %v\n%s", err, output)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(args))
+}
+
 func TestBinaryFetchRejectsMissingSignatureVerifier(t *testing.T) {
 	script := repoPath(t, ".github", "scripts", "fetch-binary.sh")
 	sums := filepath.Join(t.TempDir(), "checksums.txt")

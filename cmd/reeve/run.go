@@ -23,6 +23,8 @@ func newRunCmd() *cobra.Command {
 		RunE:  runPreview,
 	}
 	addPreviewFlags(preview)
+	preview.Flags().Bool("plan-requested", false,
+		"Mark this plan as explicitly requested (e.g. a `/reeve plan` comment) rather than triggered by a new commit; the deployment timeline starts a new series for it")
 	preview.Flags().Bool("refresh", false,
 		"Reconcile state with live infrastructure before planning, so the diff is against reality rather than possibly-stale state")
 
@@ -111,6 +113,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		PRNumber:                 pr,
 		CommitSHA:                sha,
 		RunNumber:                runNum,
+		CIRunID:                  os.Getenv("GITHUB_RUN_ID"),
 		CIRunURL:                 runURL,
 		RepoRoot:                 root,
 		Engine:                   engine,
@@ -127,6 +130,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		LocalAuthProviders:       localAuth,
 		Force:                    flagBool(cmd, "force"),
 		Refresh:                  flagBool(cmd, "refresh"),
+		PlanRequested:            flagBool(cmd, "plan-requested"),
 	}
 
 	if !local {

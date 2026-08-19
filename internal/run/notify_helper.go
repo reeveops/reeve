@@ -171,11 +171,15 @@ func suppressPreApprovalConfig(local, hasVCS bool, changed []string, changedErr 
 type PRNotifyInput struct {
 	PR                int
 	CommitSHA         string
+	RunID             string
 	RunURL            string
 	PRTitle           string
 	PRAuthor          string
 	RequiredApprovers []string
 	Stacks            []summary.StackSummary
+	// PlanRequested marks an explicitly requested plan. See
+	// notify.PRPayload.PlanRequested.
+	PlanRequested bool
 }
 
 // NotifyPREvent publishes one PR-flow event to the configured channels. The
@@ -191,12 +195,14 @@ func NotifyPREvent(ctx context.Context, channels []notify.Channel, ev notify.Eve
 		PR: &notify.PRPayload{
 			PR:                in.PR,
 			CommitSHA:         in.CommitSHA,
+			RunID:             in.RunID,
 			RunURL:            in.RunURL,
 			Title:             in.PRTitle,
 			Author:            in.PRAuthor,
 			RepoFull:          os.Getenv("GITHUB_REPOSITORY"),
 			RequiredApprovers: in.RequiredApprovers,
 			Stacks:            toStackResults(in.Stacks),
+			PlanRequested:     in.PlanRequested,
 		},
 	}
 	return errors.Join(notify.Dispatch(ctx, channels, []notify.Payload{payload})...)

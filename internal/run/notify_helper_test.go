@@ -53,7 +53,8 @@ func TestNotifyPREventBuildsPayload(t *testing.T) {
 	t.Setenv("GITHUB_REPOSITORY", "org/repo")
 	channel := &captureChannel{events: notify.PREvents()}
 	err := NotifyPREvent(context.Background(), []notify.Channel{channel}, notify.EventPlan, PRNotifyInput{
-		PR: 9, CommitSHA: "abc", RunURL: "https://ci", PRTitle: "t", PRAuthor: "a",
+		PR: 9, CommitSHA: "abc", RunID: "run-9", RunURL: "https://ci", PRTitle: "t", PRAuthor: "a",
+		PlanRequested:     true,
 		RequiredApprovers: []string{"lead"},
 		Stacks: []summary.StackSummary{
 			{Project: "app", Stack: "prod", Env: "prod", Status: summary.StatusPlanned,
@@ -72,8 +73,11 @@ func TestNotifyPREventBuildsPayload(t *testing.T) {
 		t.Fatalf("payload: %+v", p)
 	}
 	pr := p.PR
-	if pr.PR != 9 || pr.RepoFull != "org/repo" || pr.Title != "t" || pr.Author != "a" {
+	if pr.PR != 9 || pr.RepoFull != "org/repo" || pr.Title != "t" || pr.Author != "a" || pr.RunID != "run-9" {
 		t.Fatalf("pr payload: %+v", pr)
+	}
+	if !pr.PlanRequested {
+		t.Fatal("explicit-plan signal was not carried into the notification payload")
 	}
 	if len(pr.Stacks) != 2 || pr.Stacks[0].Status != "planned" || pr.Stacks[1].Status != "error" {
 		t.Fatalf("stacks: %+v", pr.Stacks)

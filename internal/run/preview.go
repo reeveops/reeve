@@ -47,6 +47,7 @@ type PreviewInput struct {
 	PRTitle       string
 	CommitSHA     string
 	RunNumber     int
+	CIRunID       string
 	CIRunURL      string
 	RepoRoot      string
 	Engine        Engine
@@ -88,6 +89,14 @@ type PreviewInput struct {
 	// Force re-runs even when this commit is already recorded as applied,
 	// bypassing the already-applied guard.
 	Force bool
+	// PlanRequested marks a plan an operator explicitly asked for (a
+	// `/reeve plan` comment) rather than one triggered by the PR head
+	// changing. It rides the published plan events; the timeline channel
+	// uses it to open a new series instead of continuing the current one.
+	//
+	// An explicit input, not something derived from a VCS provider's event
+	// names: see notify.PRPayload.PlanRequested.
+	PlanRequested bool
 	// Refresh reconciles engine state with live infrastructure before
 	// planning, so the diff is against reality rather than against state
 	// that clickops may have invalidated. Off by default: a refresh costs a
@@ -128,6 +137,13 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	slog.Debug("preview starting", "pr", in.PRNumber, "sha", in.CommitSHA, "local", in.Local)
 
 	runID := fmt.Sprintf("run-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	ciRunID := in.CIRunID
+	if ciRunID == "" {
+		// Direct callers and local tests may not have a provider run ID. The
+		// preview artifact ID still gives both lifecycle deliveries from this
+		// invocation one stable routing identity.
+		ciRunID = runID
+	}
 
 	// Changed files are fetched up front (also reused for change mapping
 	// below): both the pre-approval channel dispatch and the OTEL exporter
@@ -203,7 +219,8 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		// fetched yet; the payload carries what the timeline needs (event,
 		// SHA, this run's CI URL).
 		if err := NotifyPREvent(ctx, channels, notify.EventPlanning, PRNotifyInput{
-			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+			PlanRequested: in.PlanRequested,
+			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunID: ciRunID, RunURL: in.CIRunURL,
 			PRTitle: in.PRTitle,
 		}); err != nil {
 			slog.Warn("notify planning failed", "err", err, "pr", in.PRNumber)
@@ -352,7 +369,8 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	// captured. Same pre-approval suppression as the planning event above.
 	if notifyActive && !suppressChannels {
 		if err := NotifyPREvent(ctx, channels, notify.EventPlan, PRNotifyInput{
-			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+			PlanRequested: in.PlanRequested,
+			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunID: ciRunID, RunURL: in.CIRunURL,
 			PRTitle: prTitle, PRAuthor: prAuthor, Stacks: summaries,
 		}); err != nil {
 			slog.Warn("notify plan-ready failed", "err", err, "pr", in.PRNumber)
