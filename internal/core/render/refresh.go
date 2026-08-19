@@ -118,9 +118,7 @@ func renderRefresh(in RefreshInput, opts renderOpts) string {
 				}
 			}
 		}
-		if s.Error != "" {
-			fmt.Fprintf(&b, "  **Error:** %s\n\n", s.Error)
-		}
+		writeError(&b, s.Error)
 		if s.PlanSummary != "" {
 			fmt.Fprintf(&b, "<details><summary>Reconciled resources</summary>\n\n%s\n\n</details>\n\n", s.PlanSummary)
 		}

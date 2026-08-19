@@ -39,7 +39,7 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 	start := time.Now()
 	fail := func(msg, output string) (iac.ApplyResult, error) {
 		return iac.ApplyResult{
-			Error:      firstLine(msg),
+			Error:      msg,
 			Output:     output,
 			DurationMS: time.Since(start).Milliseconds(),
 		}, nil
@@ -101,7 +101,7 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 		DurationMS: time.Since(start).Milliseconds(),
 	}
 	if applyErr != nil || apply.ExitCode != 0 {
-		result.Error = firstLine(failureMessage(string(apply.Stderr), applyErr))
+		result.Error = failureMessage(string(apply.Stderr), applyErr)
 	}
 	return result, nil
 }

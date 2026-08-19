@@ -245,7 +245,7 @@ func (e *Engine) workspaceNames(ctx context.Context, cwd, rel string) []string {
 	res, err := e.run(ctx, cwd, nil, e.Binary, "workspace", "list")
 	if err != nil || res.ExitCode != 0 {
 		slog.Info("terraform workspace list unavailable; assuming the default workspace (declare stacks in engine config or run init to enumerate workspaces)",
-			"engine", e.dialect.TypeName, "dir", rel, "reason", firstLine(failureMessage(string(res.Stderr), err)))
+			"engine", e.dialect.TypeName, "dir", rel, "reason", failureMessage(string(res.Stderr), err))
 		return []string{defaultWorkspace}
 	}
 	var names []string

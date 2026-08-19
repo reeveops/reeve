@@ -2,7 +2,9 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/reeveops/reeve/internal/core/redact"
@@ -88,4 +90,51 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// A hook that fails writing its diagnosis to stderr used to report only
+// "exit status 1", with the actual reason held in Result.Stderr and never
+// rendered.
+func TestRunFailureSurfacesStderr(t *testing.T) {
+	h := Hook{
+		Name:     "policy",
+		Command:  []string{"sh", "-c", "echo 'denied: missing tag owner' >&2; echo 'and more' >&2; exit 1"},
+		OnFail:   FailBlock,
+		Required: true,
+	}
+	res := Run(context.Background(), h, Context{}, redact.New())
+	if res.Outcome != "fail" {
+		t.Fatalf("expected fail, got %+v", res)
+	}
+	for _, want := range []string{"denied: missing tag owner", "and more"} {
+		if !strings.Contains(res.Error, want) {
+			t.Fatalf("error lost %q: %q", want, res.Error)
+		}
+	}
+
+	// And the rendered section shows it, not just the exit status.
+	out := RenderSection([]Result{res})
+	if !strings.Contains(out, "denied: missing tag owner") {
+		t.Fatalf("rendered section dropped stderr:\n%s", out)
+	}
+}
+
+func TestHookFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		stderr string
+		err    error
+		want   string
+	}{
+		{"stderr and error", "denied\n", errors.New("exit status 1"), "denied (exit status 1)"},
+		{"stderr only", "denied", nil, "denied"},
+		{"error only", "  ", errors.New("signal: killed"), "signal: killed"},
+		{"neither", "", nil, "hook failed with no output"},
+	}
+	for _, tt := range tests {
+		if got := hookFailure(tt.stderr, tt.err); got != tt.want {
+			t.Errorf("%s: hookFailure = %q, want %q", tt.name, got, tt.want)
+		}
+	}
 }

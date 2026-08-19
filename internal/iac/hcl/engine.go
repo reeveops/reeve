@@ -253,13 +253,6 @@ func failureMessage(stderr string, err error) string {
 	}
 }
 
-func firstLine(s string) string {
-	if idx := strings.IndexByte(s, '\n'); idx > 0 {
-		return s[:idx]
-	}
-	return s
-}
-
 // formatDiff moves +/-/~ from after indentation to line start so GitHub's
 // diff code fence colors them (same transform as the pulumi adapter).
 func formatDiff(text string) string {

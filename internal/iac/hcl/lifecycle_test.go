@@ -308,8 +308,10 @@ func TestApplyFailureSurfaced(t *testing.T) {
 	if !strings.Contains(res.Error, "AccessDenied") {
 		t.Fatalf("apply error must surface stderr, got %q", res.Error)
 	}
-	if strings.Contains(res.Error, "more context") {
-		t.Fatalf("apply error should be first-line only, got %q", res.Error)
+	// Every line, not just the first: the cause is often below line one, and
+	// dropping the rest is what made a failed apply unactionable.
+	if !strings.Contains(res.Error, "more context") {
+		t.Fatalf("apply error must keep the whole message, got %q", res.Error)
 	}
 }
 

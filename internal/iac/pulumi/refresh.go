@@ -65,17 +65,21 @@ func (e *Engine) Refresh(ctx context.Context, stack discovery.Stack, opts iac.Re
 		Output:     stderr.String() + stdout.String(),
 		DurationMS: time.Since(start).Milliseconds(),
 	}
-	counts, summaryErr := parseApply(stdout.Bytes())
+	counts, diagErr := parseApply(stdout.Bytes())
 	res.Counts = counts
 
-	if runErr != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = runErr.Error()
+	// Same rule as apply: engine diagnostics carry the cause, stderr is the
+	// fallback, and nothing is truncated to one line.
+	switch {
+	case diagErr != "":
+		res.Error = diagErr
+		if runErr != nil {
+			if extra := strings.TrimSpace(stderr.String()); extra != "" {
+				res.Error += "\n" + extra
+			}
 		}
-		res.Error = firstLine(msg)
-	} else if summaryErr != "" {
-		res.Error = summaryErr
+	case runErr != nil:
+		res.Error = failureMessage(stderr.String(), runErr)
 	}
 	return res, nil
 }

@@ -118,9 +118,29 @@ func Run(ctx context.Context, h Hook, tc Context, r *redact.Redactor) Result {
 		res.Outcome = "fail"
 	}
 	if runErr != nil {
-		res.Error = firstLine(runErr.Error())
+		// The process error is usually just "exit status N"; the hook's own
+		// stderr is what says why. Lead with that and keep every line.
+		res.Error = hookFailure(errOut, runErr)
 	}
 	return res
+}
+
+// hookFailure builds the reported error from the hook's stderr and the
+// process error. stderr leads because "exit status 1" alone tells an operator
+// nothing; the process error is kept so a timeout kill or a missing
+// interpreter (which leave stderr empty) is still named.
+func hookFailure(stderr string, err error) string {
+	stderr = strings.TrimSpace(stderr)
+	switch {
+	case stderr != "" && err != nil:
+		return stderr + " (" + err.Error() + ")"
+	case stderr != "":
+		return stderr
+	case err != nil:
+		return err.Error()
+	default:
+		return "hook failed with no output"
+	}
 }
 
 func failedResult(h Hook, err error) Result {
@@ -128,7 +148,7 @@ func failedResult(h Hook, err error) Result {
 	if h.OnFail == FailWarn {
 		outcome = "warn"
 	}
-	return Result{Name: h.Name, Outcome: outcome, ExitCode: -1, Error: firstLine(err.Error())}
+	return Result{Name: h.Name, Outcome: outcome, ExitCode: -1, Error: err.Error()}
 }
 
 // Aggregate tells preconditions whether any blocking hooks failed.
@@ -150,13 +170,6 @@ func expand(s string, c Context) string {
 	s = strings.ReplaceAll(s, "{{stack_name}}", c.StackName)
 	s = strings.ReplaceAll(s, "{{project}}", c.Project)
 	s = strings.ReplaceAll(s, "{{env}}", c.Env)
-	return s
-}
-
-func firstLine(s string) string {
-	if idx := strings.IndexByte(s, '\n'); idx > 0 {
-		return s[:idx]
-	}
 	return s
 }
 
@@ -183,8 +196,15 @@ func RenderSection(results []Result) string {
 			fmt.Fprintf(&b, ": %s", r.Error)
 		}
 		b.WriteString("\n")
-		if (r.Outcome == "fail" || r.Outcome == "warn") && r.Stdout != "" {
-			fmt.Fprintf(&b, "    ```\n%s\n    ```\n", trim(r.Stdout, 2000))
+		if r.Outcome == "fail" || r.Outcome == "warn" {
+			// Both streams: a hook that writes its diagnosis to stderr used
+			// to render as a bare exit status with no output at all.
+			if r.Stdout != "" {
+				fmt.Fprintf(&b, "    ```\n%s\n    ```\n", trim(r.Stdout, 2000))
+			}
+			if r.Stderr != "" {
+				fmt.Fprintf(&b, "    ```\n%s\n    ```\n", trim(r.Stderr, 2000))
+			}
 		}
 	}
 	return b.String()
