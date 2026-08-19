@@ -143,9 +143,7 @@ func renderApply(in ApplyInput, opts renderOpts) string {
 				}
 			}
 		}
-		if s.Error != "" {
-			fmt.Fprintf(&b, "  **Error:** %s\n\n", s.Error)
-		}
+		writeError(&b, s.Error)
 		if s.PlanSummary != "" {
 			fmt.Fprintf(&b, "<details><summary>Summary (%d add, %d change, %d delete, %d replace)</summary>\n\n%s\n\n</details>\n\n",
 				s.Counts.Add, s.Counts.Change, s.Counts.Delete, s.Counts.Replace,

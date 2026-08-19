@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/reeveops/reeve/internal/core/redact"
 	"github.com/reeveops/reeve/internal/iac"
@@ -83,7 +84,7 @@ func Run(ctx context.Context, h Hook, tc Context, r *redact.Redactor) Result {
 	cmd.Stderr = &stderr
 	childEnv, cleanup, envErr := iac.CommandEnv(nil, nil)
 	if envErr != nil {
-		return failedResult(h, fmt.Errorf("prepare child environment: %w", envErr))
+		return failedResult(h, fmt.Errorf("prepare child environment: %w", envErr), r)
 	}
 	defer cleanup()
 	cmd.Env = childEnv
@@ -118,17 +119,42 @@ func Run(ctx context.Context, h Hook, tc Context, r *redact.Redactor) Result {
 		res.Outcome = "fail"
 	}
 	if runErr != nil {
-		res.Error = firstLine(runErr.Error())
+		// The process error is usually just "exit status N"; the hook's own
+		// stderr is what says why. Lead with that and keep every line.
+		// errOut is already redacted; the process error is not, and it can
+		// carry an expanded command path or env detail.
+		res.Error = hookFailure(errOut, runErr, r)
 	}
 	return res
 }
 
-func failedResult(h Hook, err error) Result {
+// hookFailure builds the reported error from the hook's stderr and the
+// process error. stderr leads because "exit status 1" alone tells an operator
+// nothing; the process error is kept so a timeout kill or a missing
+// interpreter (which leave stderr empty) is still named.
+func hookFailure(stderr string, err error, r *redact.Redactor) string {
+	stderr = strings.TrimSpace(stderr)
+	switch {
+	case stderr != "" && err != nil:
+		return stderr + " (" + r.Redact(err.Error()) + ")"
+	case stderr != "":
+		return stderr
+	case err != nil:
+		return r.Redact(err.Error())
+	default:
+		return "hook failed with no output"
+	}
+}
+
+// failedResult reports a hook that never ran. It takes the redactor because
+// this path returns before the normal stdout/stderr redaction: a setup failure
+// message can name an expanded path or environment detail.
+func failedResult(h Hook, err error, r *redact.Redactor) Result {
 	outcome := "fail"
 	if h.OnFail == FailWarn {
 		outcome = "warn"
 	}
-	return Result{Name: h.Name, Outcome: outcome, ExitCode: -1, Error: firstLine(err.Error())}
+	return Result{Name: h.Name, Outcome: outcome, ExitCode: -1, Error: r.Redact(err.Error())}
 }
 
 // Aggregate tells preconditions whether any blocking hooks failed.
@@ -153,13 +179,6 @@ func expand(s string, c Context) string {
 	return s
 }
 
-func firstLine(s string) string {
-	if idx := strings.IndexByte(s, '\n'); idx > 0 {
-		return s[:idx]
-	}
-	return s
-}
-
 // RenderSection returns a markdown section summarizing hook results for
 // inclusion in the PR comment.
 func RenderSection(results []Result) string {
@@ -180,14 +199,48 @@ func RenderSection(results []Result) string {
 		}
 		fmt.Fprintf(&b, "  %s %s", icon, r.Name)
 		if r.Error != "" {
-			fmt.Fprintf(&b, ": %s", r.Error)
+			// Error holds the hook's full stderr, which is unbounded and is
+			// rendered in its own block below. The header carries one bounded
+			// line so a large failure cannot inflate the section.
+			fmt.Fprintf(&b, ": %s", headline(r.Error, 200))
 		}
 		b.WriteString("\n")
-		if (r.Outcome == "fail" || r.Outcome == "warn") && r.Stdout != "" {
-			fmt.Fprintf(&b, "    ```\n%s\n    ```\n", trim(r.Stdout, 2000))
+		if r.Outcome == "fail" || r.Outcome == "warn" {
+			// Both streams: a hook that writes its diagnosis to stderr used
+			// to render as a bare exit status with no output at all.
+			writeBlock(&b, r.Stdout)
+			writeBlock(&b, r.Stderr)
 		}
 	}
 	return b.String()
+}
+
+// headline reduces a possibly multi-line message to one bounded line for the
+// hook's summary row. The full text still renders in the block below.
+func headline(s string, n int) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		s = s[:idx] + " …"
+	}
+	if len(s) > n {
+		cut := n
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "…"
+	}
+	return s
+}
+
+// writeBlock renders one output stream in a fenced block. A hook can emit a
+// fence sequence, which would close the block early and let the remainder
+// render as markup, so the payload's fence runs are broken with a zero-width
+// space (same treatment as the PR comment's error block).
+func writeBlock(b *strings.Builder, s string) {
+	if s == "" {
+		return
+	}
+	fmt.Fprintf(b, "    ```\n%s\n    ```\n",
+		strings.ReplaceAll(trim(s, 2000), "```", "`\u200b`\u200b`"))
 }
 
 func trim(s string, n int) string {

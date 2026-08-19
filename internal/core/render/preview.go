@@ -210,9 +210,7 @@ func writeSections(b *strings.Builder, in PreviewInput, opts renderOpts) {
 		if s.Status == summary.StatusBlocked && s.BlockedBy > 0 {
 			fmt.Fprintf(b, "  Queued behind #%d.\n\n", s.BlockedBy)
 		}
-		if s.Error != "" {
-			fmt.Fprintf(b, "  **Error:** %s\n\n", s.Error)
-		}
+		writeError(b, s.Error)
 		if len(s.RequiredApprovers) > 0 {
 			fmt.Fprintf(b, "👥 **Required approvers:** %s\n\n", strings.Join(s.RequiredApprovers, ", "))
 		}
@@ -285,6 +283,27 @@ func overallIcon(ss []summary.StackSummary) string {
 	default:
 		return "⚪"
 	}
+}
+
+// writeError renders a stack's error. A single line stays inline; anything
+// multi-line goes in a fenced block, because engine diagnostics are the part
+// an operator acts on and folding them into one markdown line either breaks
+// the layout or loses everything after the first newline.
+func writeError(b *strings.Builder, msg string) {
+	msg = strings.TrimRight(msg, "\n")
+	if msg == "" {
+		return
+	}
+	if !strings.Contains(msg, "\n") {
+		fmt.Fprintf(b, "  **Error:** %s\n\n", msg)
+		return
+	}
+	b.WriteString("  **Error:**\n\n```\n")
+	// A ``` run in the message would close the fence early and let the rest
+	// render as markup. Engine errors quote resource names and properties
+	// that come from the PR, so this text is not trusted to be fence-safe.
+	b.WriteString(strings.ReplaceAll(msg, "```", "`\u200b`\u200b`"))
+	b.WriteString("\n```\n\n")
 }
 
 func statusCell(s summary.StackSummary) string {

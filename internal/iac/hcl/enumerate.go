@@ -244,6 +244,13 @@ func matchPattern(pattern, dir string) bool {
 func (e *Engine) workspaceNames(ctx context.Context, cwd, rel string) []string {
 	res, err := e.run(ctx, cwd, nil, e.Binary, "workspace", "list")
 	if err != nil || res.ExitCode != 0 {
+		// First line only, deliberately, and unlike the error surfaces this
+		// change widened. This is a soft fallback on an enumeration path that
+		// carries no redactor: EnumerateStacks takes none and the adapter
+		// holds none, so full backend stderr (which can echo a connection
+		// string from the operator's .tf files) would reach the log
+		// unredacted. The reason a fallback happened is enough here; a real
+		// failure surfaces through init or plan, which do redact.
 		slog.Info("terraform workspace list unavailable; assuming the default workspace (declare stacks in engine config or run init to enumerate workspaces)",
 			"engine", e.dialect.TypeName, "dir", rel, "reason", firstLine(failureMessage(string(res.Stderr), err)))
 		return []string{defaultWorkspace}

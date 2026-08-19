@@ -77,17 +77,23 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 		Output:     stderr.String() + stdout.String(),
 	}
 
-	counts, summaryErr := parseApply(stdout.Bytes())
+	counts, diagErr := parseApply(stdout.Bytes())
 	result.Counts = counts
 
-	if runErr != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = runErr.Error()
+	// Engine diagnostics beat the process error: `exit status 255` says
+	// nothing, the diagnostic names the resource and the cause. Keep every
+	// line - truncating to the first threw away the part an operator needs.
+	switch {
+	case diagErr != "":
+		result.Error = diagErr
+		// Regardless of exit code: the engine can report diagnostics while
+		// exiting zero, and stderr can still carry a login or backend failure
+		// the event stream never mentions.
+		if extra := strings.TrimSpace(stderr.String()); extra != "" {
+			result.Error += "\n" + extra
 		}
-		result.Error = firstLine(msg)
-	} else if summaryErr != "" {
-		result.Error = summaryErr
+	case runErr != nil:
+		result.Error = failureMessage(stderr.String(), runErr)
 	}
 	return result, nil
 }
@@ -98,6 +104,7 @@ func (e *Engine) Apply(ctx context.Context, stack discovery.Stack, opts iac.Appl
 // summary in case --json is not honored by the user's pulumi version.
 func parseApply(out []byte) (summary.Counts, string) {
 	var counts summary.Counts
+	var diags []string
 
 	// Try JSON event stream first - one JSON object per line.
 	scanner := byteLineScanner(out)
@@ -125,6 +132,18 @@ func parseApply(out []byte) (summary.Counts, string) {
 			counts.Delete += rc["delete"]
 			counts.Replace += rc["replace"] + rc["create-replacement"]
 		}
+		// Diagnostics are where the engine reports WHY a resource operation
+		// failed. In --json mode they arrive on stdout, so a failed apply
+		// often leaves only a generic wrapper line on stderr; dropping these
+		// is what made "reeve said failed" unactionable.
+		if d := evt.DiagnosticEvent; d != nil && d.Severity == "error" {
+			if msg := strings.TrimSpace(d.Message); msg != "" {
+				diags = append(diags, msg)
+			}
+		}
+	}
+	if len(diags) > 0 {
+		return counts, strings.Join(diags, "\n")
 	}
 	if counts.Total() > 0 {
 		return counts, ""
@@ -172,10 +191,3 @@ func (s *byteScanner) Scan() bool {
 }
 
 func (s *byteScanner) Bytes() []byte { return s.line }
-
-func firstLine(s string) string {
-	if idx := strings.IndexByte(s, '\n'); idx > 0 {
-		return s[:idx]
-	}
-	return s
-}

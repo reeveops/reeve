@@ -33,7 +33,7 @@ func (e *Engine) Refresh(ctx context.Context, stack discovery.Stack, opts iac.Re
 	start := time.Now()
 	fail := func(msg, output string) (iac.RefreshResult, error) {
 		return iac.RefreshResult{
-			Error:      firstLine(msg),
+			Error:      msg,
 			Output:     output,
 			DurationMS: time.Since(start).Milliseconds(),
 		}, nil
@@ -84,7 +84,7 @@ func (e *Engine) Refresh(ctx context.Context, stack discovery.Stack, opts iac.Re
 	res.Output = out + string(apply.Stderr) + string(apply.Stdout)
 	res.DurationMS = time.Since(start).Milliseconds()
 	if applyErr != nil || apply.ExitCode != 0 {
-		res.Error = firstLine(failureMessage(string(apply.Stderr), applyErr))
+		res.Error = failureMessage(string(apply.Stderr), applyErr)
 	}
 	return res, nil
 }

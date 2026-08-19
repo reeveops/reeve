@@ -65,6 +65,67 @@ func TestPreviewGolden_AllErrors(t *testing.T) {
 	assertGolden(t, "preview_error.md", Preview(in))
 }
 
+// A multi-line engine error goes in a fenced block: it is the part an
+// operator acts on, and folding it into one markdown line either breaks the
+// layout or loses everything after the first newline.
+func TestPreviewGolden_MultilineError(t *testing.T) {
+	t.Parallel()
+
+	in := PreviewInput{
+		Op: "preview", RunNumber: 9, CommitSHA: "deadbee",
+		Stacks: []summary.StackSummary{
+			{
+				Project: "api", Stack: "prod", Env: "prod",
+				Status: summary.StatusError,
+				Error: "aws:s3:Bucket (data):\n" +
+					"  error: creating S3 bucket: AccessDenied: not authorized\n" +
+					"aws:iam:Role (task): error: entity already exists",
+			},
+		},
+	}
+	assertGolden(t, "preview_error_multiline.md", Preview(in))
+}
+
+func TestWriteError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{"empty", "", ""},
+		{"single line stays inline", "boom", "  **Error:** boom\n\n"},
+		{"trailing newline is not multi-line", "boom\n", "  **Error:** boom\n\n"},
+		{"multi-line is fenced", "one\ntwo", "  **Error:**\n\n```\none\ntwo\n```\n\n"},
+	}
+	for _, tt := range tests {
+		var b strings.Builder
+		writeError(&b, tt.msg)
+		if got := b.String(); got != tt.want {
+			t.Errorf("%s: writeError = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+// Engine errors quote resource names and properties that come from the PR, so
+// a ``` run in the message must not close the fence and let the rest render as
+// markup.
+func TestWriteErrorFenceSafe(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	writeError(&b, "line one\n```\n### not a heading")
+	got := b.String()
+	if strings.Contains(got, "\n```\n### not a heading") {
+		t.Fatalf("payload fence escaped the block: %q", got)
+	}
+	if !strings.HasSuffix(got, "\n```\n\n") {
+		t.Fatalf("block must still be closed: %q", got)
+	}
+	if !strings.Contains(got, "### not a heading") {
+		t.Fatalf("content lost: %q", got)
+	}
+}
+
 func assertGolden(t *testing.T, name, got string) {
 	t.Helper()
 	path := filepath.Join("testdata", name)
