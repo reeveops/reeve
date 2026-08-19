@@ -12,10 +12,11 @@ file. Copy whichever one matches your setup and adapt.
 | [`multi-cloud/`](multi-cloud/) | AWS + GCP + secrets manager per-stack bindings, mode-scoped drift role. |
 | [`drift-scheduled/`](drift-scheduled/) | Drift detection with named schedules, Slack + PagerDuty channels. |
 | [`policy-opa/`](policy-opa/) | Conftest-backed policy hooks with a cost-gate script. |
+| [`private-modules/`](private-modules/) | Private Go modules, Go cache reuse, and pre-warming a heavy program. Workflow-only; pair with an auth example. |
 
 ## Conventions
 
-Every example ships:
+Most examples ship:
 
 - `.reeve/*.yaml` - the reeve config
 - `.github/workflows/reeve.yml` - a working Actions workflow

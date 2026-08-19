@@ -256,6 +256,58 @@ cache hit nothing is downloaded or built:
 The prebuilt paths skip the Go toolchain setup + compile, saving ~30s+ on
 first runs and cache misses.
 
+## 4b. Private Go modules, caches, and heavy programs
+
+reeve runs the IaC engine with an isolated `HOME` and a narrow env allowlist, so
+the engine never inherits the controller's credentials. Two consequences hit
+real repos:
+
+- The engine cannot read the runner's `~/.gitconfig`, so a `git config --global`
+  rewrite for private modules is invisible to it.
+- `GOMODCACHE` and `GOCACHE` default inside that temp `HOME`, so a cache the job
+  warmed is invisible and modules re-download inside the run.
+
+The action re-supplies only what you opt into. Nothing below changes the default
+behavior when unset.
+
+```yaml
+- uses: actions/setup-go@v6          # needed for go-cache and prewarm-dir
+  with:
+    go-version-file: go.mod
+    cache: false
+
+- uses: reeveops/reeve@v1
+  with:
+    # Private modules. WIDENS what the engine can reach: an IaC program on the
+    # PR branch can read this token. Scope it to the module repositories with
+    # contents:read and nothing else.
+    private-modules-token: ${{ steps.modules-token.outputs.token }}
+    go-private: github.com/acme/*
+
+    # Export the runner's real cache paths so the engine sees a warmed cache.
+    go-cache: "true"
+
+    # Compile before reeve starts, so a large Go program does not spend the
+    # engine's own preview timeout on compilation.
+    prewarm-dir: "."
+    # Plugin versions are read from go.mod, never passed in.
+    prewarm-plugins: "aws gcp"
+```
+
+Terraform and OpenTofu users can pin the CLI to what engine config declares,
+so runtime and config cannot drift:
+
+```yaml
+- uses: reeveops/reeve@v1
+  with:
+    terraform-version-from-config: "true"   # reads engine.binary.version
+```
+
+`private-modules-token` is the one input that widens the engine's reach. It is
+off by default, warns loudly on every run, and the alternative is to keep that
+step in your own workflow and forward it with the `env_passthrough` auth
+provider (see [auth.md](auth.md)).
+
 ## 5. Move the bucket to real storage
 
 Filesystem buckets work great for smoke tests but every CI run starts fresh,

@@ -89,6 +89,60 @@ inputs:
     description: Log level for reeve (debug, info, warn, error).
     required: false
     default: ""
+  private-modules-token:
+    description: >-
+      Token for fetching private Go modules. Configures a git URL rewrite and
+      exports it to the engine subprocess, which runs with an isolated HOME and
+      therefore cannot read the runner's ~/.gitconfig. WIDENS what the engine
+      can reach: an IaC program from the PR branch can read this token, so
+      scope it to the module repositories with contents:read and nothing more.
+      Leave blank to skip.
+    required: false
+    default: ""
+  private-modules-host:
+    description: Host the private-module rewrite applies to.
+    required: false
+    default: "github.com"
+  go-private:
+    description: >-
+      GOPRIVATE value exported to the engine, e.g. "github.com/acme/*". Keeps
+      the module proxy and checksum database out of the path for these modules.
+      Required alongside private-modules-token for private fetches to work.
+    required: false
+    default: ""
+  go-cache:
+    description: >-
+      Set "true" to export the runner's resolved GOMODCACHE and GOCACHE to the
+      engine subprocess. Without it the engine's isolated HOME makes it default
+      both inside that temp directory, so a warmed module cache is invisible
+      and every module re-downloads inside the run. Requires Go on PATH.
+    required: false
+    default: "false"
+  prewarm-dir:
+    description: >-
+      Directory to `go build ./...` before reeve runs, so compilation happens
+      outside the engine's own preview timeout. Relative to the repo root.
+      Leave blank to skip.
+    required: false
+    default: ""
+  prewarm-plugins:
+    description: >-
+      Whitespace-separated Pulumi resource plugin NAMES to pre-install before
+      reeve runs (e.g. "aws gcp"). Each version is read from the repo's go.mod,
+      never passed in, so the plugin cannot drift from the SDK it pairs with.
+    required: false
+    default: ""
+  terraform-version-from-config:
+    description: >-
+      Set "true" to install Terraform pinned to engine.binary.version from the
+      engine config, so the runtime cannot drift from what config declares.
+      Fails if that field is unset.
+    required: false
+    default: "false"
+  terraform-config-path:
+    description: Engine config file read for the Terraform version.
+    required: false
+    default: ".reeve/terraform.yaml"
 
 runs:
   using: composite
@@ -189,6 +243,144 @@ runs:
       uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7
       with:
         pulumi-version: ${{ inputs.pulumi-version }}
+
+    # reeve runs the IaC engine with an isolated HOME and a narrow env
+    # allowlist, so the engine never inherits the controller's credentials.
+    # That also means it cannot see the runner's ~/.gitconfig or a warmed Go
+    # cache. The steps below re-supply only what an operator explicitly opts
+    # into, as env, which the engine's env_passthrough auth provider forwards.
+    - name: Configure private module access
+      if: ${{ inputs.private-modules-token != '' }}
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.private-modules-token }}
+        HOST: ${{ inputs.private-modules-host }}
+        GO_PRIVATE: ${{ inputs.go-private }}
+      run: |
+        set -euo pipefail
+        if [ -z "$GO_PRIVATE" ]; then
+          echo "::warning::private-modules-token is set without go-private; Go will still route these modules through the public proxy and checksum database" >&2
+        fi
+        # --global covers steps in this job (a prewarm build). The engine child
+        # gets a fresh HOME and never reads that file, so the same rewrites go
+        # out as GIT_CONFIG_* env. Both the https and scp forms are rewritten:
+        # a repo whose tooling pins the ssh form would otherwise ask for a key
+        # the runner does not have.
+        git config --global "url.https://x-access-token:${TOKEN}@${HOST}/.insteadOf" "https://${HOST}/"
+        git config --global --add "url.https://x-access-token:${TOKEN}@${HOST}/.insteadOf" "git@${HOST}:"
+        {
+          echo "GIT_CONFIG_COUNT=2"
+          echo "GIT_CONFIG_KEY_0=url.https://x-access-token:${TOKEN}@${HOST}/.insteadOf"
+          echo "GIT_CONFIG_VALUE_0=https://${HOST}/"
+          echo "GIT_CONFIG_KEY_1=url.https://x-access-token:${TOKEN}@${HOST}/.insteadOf"
+          echo "GIT_CONFIG_VALUE_1=git@${HOST}:"
+        } >> "$GITHUB_ENV"
+        if [ -n "$GO_PRIVATE" ]; then
+          echo "GOPRIVATE=${GO_PRIVATE}" >> "$GITHUB_ENV"
+        fi
+        echo "::warning::private-modules-token is exported to the IaC engine subprocess; an IaC program from this branch can read it. Scope it to the module repositories with contents:read." >&2
+
+    - name: Export Go cache paths
+      if: ${{ inputs.go-cache == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v go >/dev/null 2>&1; then
+          echo "::error::go-cache is set but Go is not on PATH; add actions/setup-go before this action" >&2
+          exit 1
+        fi
+        # Resolved here, not defaulted in the child: the engine's temp HOME
+        # would otherwise place both inside it, hiding whatever the job warmed.
+        {
+          echo "GOMODCACHE=$(go env GOMODCACHE)"
+          echo "GOCACHE=$(go env GOCACHE)"
+        } >> "$GITHUB_ENV"
+
+    - name: Pre-warm Go build
+      if: ${{ inputs.prewarm-dir != '' }}
+      shell: bash
+      env:
+        PREWARM_DIR: ${{ inputs.prewarm-dir }}
+        REEVE_INPUT_ROOT: ${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        ROOT="$REEVE_INPUT_ROOT"
+        if [ -z "$ROOT" ]; then ROOT="$GITHUB_WORKSPACE"; fi
+        # Compiling a large Go program can consume most of the engine's own
+        # preview timeout. Doing it here moves that cost outside the timeout.
+        cd "$ROOT/$PREWARM_DIR"
+        go build -o /dev/null ./...
+
+    - name: Pre-install Pulumi plugins
+      if: ${{ inputs.prewarm-plugins != '' }}
+      shell: bash
+      env:
+        PREWARM_PLUGINS: ${{ inputs.prewarm-plugins }}
+        REEVE_INPUT_ROOT: ${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        ROOT="$REEVE_INPUT_ROOT"
+        if [ -z "$ROOT" ]; then ROOT="$GITHUB_WORKSPACE"; fi
+        if [ ! -f "$ROOT/go.mod" ]; then
+          echo "::error::prewarm-plugins needs $ROOT/go.mod to resolve plugin versions" >&2
+          exit 1
+        fi
+        # Versions come from go.mod, never from an input: a plugin pinned
+        # separately from the SDK it pairs with is a drift source.
+        for plugin in $PREWARM_PLUGINS; do
+          ver=$(grep -E "pulumi/pulumi-${plugin}/sdk/v[0-9]+ v" "$ROOT/go.mod" \
+            | awk '{print $2}' | sed 's/^v//' | head -1)
+          if [ -z "$ver" ]; then
+            echo "::error::no pulumi-${plugin} SDK version found in $ROOT/go.mod" >&2
+            exit 1
+          fi
+          echo "pre-installing ${plugin} v${ver} (from go.mod)"
+          pulumi plugin install resource "$plugin" "$ver"
+        done
+
+    - name: Read Terraform version from engine config
+      id: tf-version
+      if: ${{ inputs.terraform-version-from-config == 'true' }}
+      shell: bash
+      env:
+        TF_CONFIG_PATH: ${{ inputs.terraform-config-path }}
+        REEVE_INPUT_ROOT: ${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        ROOT="$REEVE_INPUT_ROOT"
+        if [ -z "$ROOT" ]; then ROOT="$GITHUB_WORKSPACE"; fi
+        CONFIG="$ROOT/$TF_CONFIG_PATH"
+        if [ ! -f "$CONFIG" ]; then
+          echo "::error::terraform-version-from-config is set but $CONFIG does not exist" >&2
+          exit 1
+        fi
+        # Read without yq: it is not guaranteed on every runner image, and
+        # this is one scalar at a known path. Tracks indentation rather than
+        # key order, and leaves the block when a key at or above binary's own
+        # depth appears, so a `version:` elsewhere in the file is never read.
+        version=$(awk '
+          match($0, /^[[:space:]]*/) { indent = RLENGTH }
+          /^[[:space:]]*binary:[[:space:]]*$/ { in_binary = 1; binary_indent = indent; next }
+          in_binary && indent <= binary_indent { in_binary = 0 }
+          in_binary && $1 == "version:" {
+            sub(/^[[:space:]]*version:[[:space:]]*/, "")
+            gsub(/["'"'"']/, "")
+            print; exit
+          }
+        ' "$CONFIG")
+        if [ -z "$version" ]; then
+          echo "::error::engine.binary.version is not set in $CONFIG" >&2
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Install Terraform
+      if: ${{ inputs.terraform-version-from-config == 'true' }}
+      uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      with:
+        terraform_version: ${{ steps.tf-version.outputs.version }}
+        # The wrapper shim wraps stdout, which breaks reeve's output parsing.
+        terraform_wrapper: false
 
     - name: Run reeve
       shell: bash

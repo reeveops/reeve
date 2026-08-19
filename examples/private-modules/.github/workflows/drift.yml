@@ -1,0 +1,57 @@
+name: drift
+
+# Scheduled drift for the same repo. Drift runs the engine too, so it needs the
+# same private-module and cache handling the PR workflow uses.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      schedule:
+        description: "Schedule name from .reeve/drift.yaml"
+        required: false
+        default: prod
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Generate module download token
+        id: modules-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.MODULES_APP_ID }}
+          private-key: ${{ secrets.MODULES_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('go.sum') }}
+          restore-keys: ${{ runner.os }}-go-
+
+      - uses: reeveops/reeve@v1
+        with:
+          command: "drift run"
+          extra-args: "--schedule ${{ inputs.schedule || 'prod' }}"
+          pulumi-version: latest
+          private-modules-token: ${{ steps.modules-token.outputs.token }}
+          go-private: github.com/${{ github.repository_owner }}/*
+          go-cache: "true"
+          prewarm-dir: "."
+          slack-token: ${{ secrets.SLACK_BOT_TOKEN }}

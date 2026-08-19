@@ -1,0 +1,67 @@
+name: reeve
+
+# A Pulumi Go program that imports private modules from your own org, big
+# enough that compiling it inside the engine's preview timeout is a problem.
+#
+# reeve runs the engine with an isolated HOME and a narrow env allowlist, so it
+# never inherits the controller's credentials. That also means a
+# `git config --global` rewrite and a warmed Go cache are invisible to it. The
+# action re-supplies both, but only what you opt into here.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: reeve-${{ github.event_name == 'pull_request' && 'preview' || 'command' }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  reeve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # A token scoped to the module repositories only. It reaches the engine
+      # subprocess, where an IaC program on the PR branch can read it, so it
+      # carries contents:read on those repos and nothing more.
+      - name: Generate module download token
+        id: modules-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.MODULES_APP_ID }}
+          private-key: ${{ secrets.MODULES_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      # Needed by go-cache and prewarm-dir below. cache: false because the
+      # cache step that follows owns the restore.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('go.sum') }}
+          restore-keys: ${{ runner.os }}-go-
+
+      - uses: reeveops/reeve@v1
+        with:
+          pulumi-version: latest
+          private-modules-token: ${{ steps.modules-token.outputs.token }}
+          go-private: github.com/${{ github.repository_owner }}/*
+          go-cache: "true"
+          prewarm-dir: "."
+          # Versions come from go.mod, so a plugin cannot drift from its SDK.
+          prewarm-plugins: "aws"
