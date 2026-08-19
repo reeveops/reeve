@@ -58,6 +58,8 @@ func (f *fakeVCS) PostComment(ctx context.Context, _ int, body string) error {
 }
 
 func TestPreviewEndToEnd(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	engine := &fakeEngine{
 		enum: []discovery.Stack{
@@ -144,6 +146,8 @@ func TestPreviewFailedRefs(t *testing.T) {
 }
 
 func TestPreviewFailurePreservesOutputAndArtifacts(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	engine := &fakeEngine{
 		enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"}},
@@ -447,6 +451,8 @@ func TestPreviewPatternDecl(t *testing.T) {
 }
 
 func TestPreviewLocalIgnoresChangedFiles(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	engine := &fakeEngine{
 		enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
