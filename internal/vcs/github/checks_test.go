@@ -120,6 +120,27 @@ func TestChecksGreenInProgressCheckRunBlocks(t *testing.T) {
 	}
 }
 
+func TestChecksGreenDerivesReusableWorkflowSelfName(t *testing.T) {
+	srv := checksServer(t, `{
+		"total_count": 5,
+		"check_runs": [
+			{"name": "infra / Reeve", "status": "completed", "conclusion": "failure", "details_url": "https://github.com/o/r/actions/runs/122/job/1"},
+			{"name": "build", "status": "completed", "conclusion": "success", "details_url": "https://github.com/o/r/actions/runs/121/job/2"},
+			{"name": "infra / Reeve", "status": "in_progress", "details_url": "https://github.com/o/r/actions/runs/123/job/3"},
+			{"name": "deploy", "status": "in_progress", "details_url": "https://github.com/o/r/actions/runs/123/job/4"},
+			{"name": "deploy", "status": "completed", "conclusion": "failure", "details_url": "https://github.com/o/r/actions/runs/120/job/5"}
+		]
+	}`, `{"state": "pending", "statuses": []}`)
+	c := newFakeClient(t, srv)
+	green, failing, err := c.ChecksGreen(context.Background(), "abc1234", vcs.ChecksGreenOpts{IgnoreRunID: 123})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if green || len(failing) != 1 || failing[0] != "deploy:failure" {
+		t.Fatalf("only the prior Reeve result should be excluded, got green=%v failing=%v", green, failing)
+	}
+}
+
 func TestChecksGreenPaginatesCombinedStatuses(t *testing.T) {
 	// The failing status context lives on page 2; enumeration must paginate
 	// past the first 100 statuses to name it.

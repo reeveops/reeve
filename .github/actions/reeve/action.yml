@@ -16,6 +16,14 @@ branding:
 #      source (~30s on the first miss).
 
 inputs:
+  source-ref:
+    description: Exact Reeve ref supplied by the wrapper or reusable workflow.
+    required: false
+    default: ""
+  source-repository:
+    description: Reeve owner/repository supplied by the wrapper or reusable workflow.
+    required: false
+    default: ""
   command:
     description: >-
       reeve subcommand: "preview", "ready", "apply", "refresh", "pr-help", "lint", "stacks",
@@ -126,9 +134,8 @@ runs:
         "$ACTION_PATH/.github/scripts/classify-event.sh"
 
     # reeve's own source is already on disk above github.action_path - it's the
-    # tree GHA checked out for the @ref this action was pinned with (@v1, @master,
-    # @v1.2.3). Build from there directly: no re-clone, no ref resolution, so the
-    # binary always matches the pinned action version.
+    # tree GHA loaded for the pinned action or reusable workflow commit. Build
+    # from there directly, so the binary always matches that source.
     - name: Hash reeve source
       id: reeve-hash
       if: steps.reeve-dispatch.outputs.run == 'true'
@@ -149,7 +156,7 @@ runs:
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/reeve-bin/reeve
-        key: reeve-bin-v2-${{ github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
+        key: reeve-bin-v2-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
 
     # On a cache miss, try a prebuilt binary before reaching for the Go
     # toolchain (see the NOTE at the top for the ref semantics). The script
@@ -168,8 +175,8 @@ runs:
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}/../../..
-        REEVE_REF: ${{ github.action_ref }}
-        REEVE_REPO: ${{ github.action_repository }}
+        REEVE_REF: ${{ inputs.source-ref || github.action_ref }}
+        REEVE_REPO: ${{ inputs.source-repository || github.action_repository }}
         REEVE_SOURCE_HASH: ${{ steps.reeve-hash.outputs.hash }}
         REEVE_OS: ${{ runner.os }}
         REEVE_ARCH: ${{ runner.arch }}
@@ -203,7 +210,7 @@ runs:
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/reeve-bin/reeve
-        key: reeve-bin-v2-${{ github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
+        key: reeve-bin-v2-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
 
     - name: Add reeve to PATH
       if: steps.reeve-dispatch.outputs.run == 'true'

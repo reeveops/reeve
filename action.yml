@@ -81,6 +81,8 @@ runs:
     - name: Run pinned Reeve action
       uses: $/.github/actions/reeve
       with:
+        source-ref: ${{ github.action_ref }}
+        source-repository: ${{ github.action_repository }}
         command: ${{ inputs.command }}
         root: ${{ inputs.root }}
         pulumi-version: ${{ inputs.pulumi-version }}

@@ -4,7 +4,7 @@
 # error path logs why and reports fetched=false so the action falls back to
 # building from source.
 #
-# Ref semantics (github.action_ref):
+# Ref semantics (the wrapper's action ref or reusable workflow SHA):
 #   vX.Y.Z        -> that release's goreleaser tarball, verified against the
 #                    release's checksums.txt (signed release pipeline).
 #   master | next -> the per-push prerelease whose signed source hash matches
@@ -13,8 +13,8 @@
 #   anything else -> source build (feature branches, forks).
 #
 # Inputs (env):
-#   REEVE_REF      github.action_ref       (may be empty, e.g. local runs)
-#   REEVE_REPO     github.action_repository ("owner/repo"; empty on some runners)
+#   REEVE_REF      exact action ref or reusable workflow SHA
+#   REEVE_REPO     action or reusable workflow owner/repo
 #   REEVE_SOURCE_HASH canonical hash of the action source already on disk
 #   REEVE_OS       runner.os   (Linux, macOS, Windows)
 #   REEVE_ARCH     runner.arch (X64, ARM64, ...)

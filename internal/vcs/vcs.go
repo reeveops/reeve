@@ -57,8 +57,8 @@ type CommentApprovalConfig struct {
 // Two skip mechanisms exist because each handles a different failure mode:
 //
 //   - IgnoreRunID skips check_runs created by the *current* CI run (e.g.
-//     GitHub Actions GITHUB_RUN_ID). Required because the run cannot be
-//     green while it is itself running.
+//     GitHub Actions GITHUB_RUN_ID). Adapters may also derive the current
+//     check name from that run and skip prior runs with the same name.
 //   - IgnoreNames skips check_runs whose name appears in this list,
 //     regardless of which run produced them. Required because a previous
 //     failed reeve apply leaves a `conclusion=failure` check_run on the same

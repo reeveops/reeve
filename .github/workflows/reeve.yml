@@ -38,7 +38,7 @@ on:
         type: string
         default: ""
       command_prefix:
-        description: Comma-separated accepted PR comment prefixes.
+        description: Accepted PR comment prefix. Use one prefix so unrelated comments skip before runner assignment.
         required: false
         type: string
         default: /reeve
@@ -58,10 +58,10 @@ on:
         type: string
         default: ""
       self_check_names:
-        description: Comma-separated Reeve check names excluded from apply gates.
+        description: Optional additional Reeve check names excluded from apply gates.
         required: false
         type: string
-        default: reeve / Reeve,reeve / gitops
+        default: ""
       drift_schedule:
         description: Named drift.yaml schedule.
         required: false
@@ -118,10 +118,21 @@ jobs:
           printf 'unsupported Reeve workflow mode: %s\n' "$REEVE_MODE" >&2
           exit 1
 
+  invalid-command-prefix:
+    if: inputs.mode == 'gitops' && contains(inputs.command_prefix, ',')
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Reject multiple comment prefixes
+        run: |
+          printf 'command_prefix accepts one prefix so unrelated comments can skip before runner assignment\n' >&2
+          exit 1
+
   gitops:
     name: Reeve
     if: >-
-      inputs.mode == 'gitops' && (
+      inputs.mode == 'gitops' && !contains(inputs.command_prefix, ',') && (
         (
           github.event_name == 'pull_request' && (
             contains(fromJSON('["opened","reopened","synchronize","ready_for_review"]'), github.event.action) ||
@@ -140,10 +151,7 @@ jobs:
           github.event.issue.pull_request &&
           github.event.comment.user.type != 'Bot' &&
           !endsWith(github.event.comment.user.login, '[bot]') &&
-          (
-            contains(inputs.command_prefix, ',') ||
-            startsWith(github.event.comment.body, format('{0} ', inputs.command_prefix))
-          )
+          startsWith(github.event.comment.body, format('{0} ', inputs.command_prefix))
         )
       )
     runs-on: ${{ inputs.runner }}
@@ -160,6 +168,8 @@ jobs:
       - name: Run Reeve GitOps
         uses: $/.github/actions/reeve
         with:
+          source-ref: ${{ job.workflow_sha }}
+          source-repository: ${{ job.workflow_repository }}
           root: ${{ inputs.root }}
           pulumi-version: ${{ inputs.pulumi_version }}
           opentofu-version: ${{ inputs.opentofu_version }}
@@ -189,6 +199,8 @@ jobs:
       - name: Run Reeve drift detection
         uses: $/.github/actions/reeve
         with:
+          source-ref: ${{ job.workflow_sha }}
+          source-repository: ${{ job.workflow_repository }}
           command: drift run
           root: ${{ inputs.root }}
           pulumi-version: ${{ inputs.pulumi_version }}
@@ -215,6 +227,8 @@ jobs:
       - name: Run Reeve bucket maintenance
         uses: $/.github/actions/reeve
         with:
+          source-ref: ${{ job.workflow_sha }}
+          source-repository: ${{ job.workflow_repository }}
           command: maintenance run
           root: ${{ inputs.root }}
           github-token: ${{ secrets.reeve_token || github.token }}

@@ -153,17 +153,26 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	// Sanity: everything on disk (ours + pre-existing) must pass the strict
 	// loader. A failure here can only come from pre-existing files.
 	engine := opts.EngineType
+	var loadedCfg *config.Config
 	if cfg, err := config.Load(root); err != nil {
 		fmt.Fprintf(w, "\nwarning: .reeve/ does not pass the strict loader: %v\n", err)
 	} else if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(w, "\nwarning: .reeve/ does not validate: %v\n", err)
-	} else if len(cfg.Engines) == 1 {
-		engine = cfg.Engines[0].Engine.Type
+	} else {
+		loadedCfg = cfg
+		if len(cfg.Engines) == 1 {
+			engine = cfg.Engines[0].Engine.Type
+		}
+	}
+	workflowOpts := scaffold.GitHubWorkflowOptions{Engine: engine, Ref: workflowRef}
+	if loadedCfg != nil {
+		workflowOpts.ApplyTrigger = loadedCfg.Shared.Apply.TriggerMode()
+		workflowOpts.NeedsOIDC = configNeedsOIDC(loadedCfg)
 	}
 
 	workflowChanged := false
 	if workflowRef != "" {
-		workflow, err := scaffold.RenderGitHubWorkflow(engine, workflowRef)
+		workflow, err := scaffold.RenderGitHubWorkflow(workflowOpts)
 		if err != nil {
 			return err
 		}
@@ -181,8 +190,21 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(w, "\nNothing to do - every generated file already exists. Use --force to regenerate .reeve/ config.")
 	}
 
-	printNextSteps(w, engine, workflowRef)
+	printNextSteps(w, workflowOpts)
 	return nil
+}
+
+func configNeedsOIDC(cfg *config.Config) bool {
+	if cfg == nil || cfg.Auth == nil {
+		return false
+	}
+	for _, provider := range cfg.Auth.Providers {
+		switch provider.Type {
+		case "aws_oidc", "gcp_wif", "azure_federated":
+			return true
+		}
+	}
+	return false
 }
 
 func resolveWorkflowRef(explicit string) (string, error) {
@@ -334,7 +356,9 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-func printNextSteps(w io.Writer, engine, workflowRef string) {
+func printNextSteps(w io.Writer, workflowOpts scaffold.GitHubWorkflowOptions) {
+	engine := workflowOpts.Engine
+	workflowRef := workflowOpts.Ref
 	versionInput := "pulumi_version: latest"
 	switch engine {
 	case "tofu":
@@ -356,6 +380,14 @@ See docs/getting-started.md for the full walk-through.
 `)
 		return
 	}
+	pullRequestTypes := "opened, synchronize, reopened, ready_for_review"
+	if workflowOpts.ApplyTrigger == "merge" {
+		pullRequestTypes += ", closed"
+	}
+	idTokenPermission := ""
+	if workflowOpts.NeedsOIDC {
+		idTokenPermission = "         id-token: write\n"
+	}
 	fmt.Fprintf(w, `
 Next steps:
   1. Review the generated files under .reeve/ (settings you skipped are
@@ -369,7 +401,7 @@ Next steps:
        name: reeve
        on:
          pull_request:
-           types: [opened, synchronize, reopened, ready_for_review]
+           types: [%s]
          merge_group:
            types: [checks_requested]
          issue_comment:
@@ -377,7 +409,7 @@ Next steps:
        permissions:
          contents: read
          checks: read
-         pull-requests: write
+%s         pull-requests: write
          issues: write
        jobs:
          reeve:
@@ -387,5 +419,5 @@ Next steps:
              %s
 
 See docs/getting-started.md for the full walk-through.
-`, versionInput)
+`, pullRequestTypes, idTokenPermission, versionInput)
 }

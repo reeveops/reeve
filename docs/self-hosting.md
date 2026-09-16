@@ -233,7 +233,10 @@ The shared workflow uses the composite action from the same pinned Reeve commit.
 Set `pulumi_version`, `opentofu_version`, or `terraform_version` to install the workload CLI after event classification.
 
 The standard `reeve` caller job publishes the stable `reeve / Reeve` check for branch protection.
-Set `self_check_names` when using another caller job ID so required-check evaluation excludes Reeve's own prior runs.
+Reeve derives a custom caller check name from the current run; `self_check_names` remains available for nonstandard check publishers.
+
+The shared workflow accepts one `command_prefix` so unrelated comments skip before runner assignment.
+Use the composite action directly when multiple prefixes are required.
 
 The shared workflow inherits the caller's permissions so GitOps and drift callers can grant different minimum sets.
 Use the permissions shown above for GitOps and omit PR write access from drift callers.

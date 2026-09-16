@@ -46,6 +46,12 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 - WHEN a comment does not begin with that prefix and a following space
 - THEN the reusable workflow job MUST skip before a runner is assigned.
 
+#### Scenario: Multiple shared-workflow prefixes
+
+- GIVEN a GitOps caller supplies more than one comma-separated command prefix
+- WHEN the reusable workflow validates its inputs
+- THEN it MUST reject the configuration instead of assigning runners to unrelated comments.
+
 #### Scenario: Merge queue required check
 
 - GIVEN a consumer configures `reeve / Reeve` as a required check
@@ -104,6 +110,18 @@ It MUST preserve an existing workflow and MUST reject a moving workflow ref.
 - GIVEN a release binary embeds its full source commit
 - WHEN a user runs `reeve init` in a repository without a Reeve workflow
 - THEN it MUST write a caller pinned to that commit with the detected engine setup, baseline permissions, and comment-trigger events only.
+
+#### Scenario: Existing federated configuration
+
+- GIVEN initialization preserves config containing a federated auth provider
+- WHEN it generates a missing caller workflow
+- THEN the caller MUST grant `id-token: write`.
+
+#### Scenario: Existing merge-trigger configuration
+
+- GIVEN initialization preserves config with `apply.trigger: merge`
+- WHEN it generates a missing caller workflow
+- THEN the caller MUST subscribe to merged pull request events.
 
 #### Scenario: Existing workflow
 

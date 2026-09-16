@@ -97,6 +97,7 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"uses: $/.github/actions/reeve",
 		"github.event.action == 'created'",
 		"startsWith(github.event.comment.body, format('{0} ', inputs.command_prefix))",
+		"!contains(inputs.command_prefix, ',')",
 		"cancel-in-progress:",
 		"opentofu-version:",
 		"terraform-version:",
@@ -104,7 +105,8 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"reeve_token:",
 		"name: Reeve",
 		"REEVE_SELF_CHECK_NAMES:",
-		"default: reeve / Reeve,reeve / gitops",
+		"source-ref: ${{ job.workflow_sha }}",
+		"source-repository: ${{ job.workflow_repository }}",
 		"drift_schedule:",
 		"drift-schedule: ${{ inputs.drift_schedule }}",
 		"command: maintenance run",
@@ -119,6 +121,9 @@ func TestReusableWorkflowContract(t *testing.T) {
 	}
 	if strings.Contains(workflow, "contains(github.event.comment.body") {
 		t.Fatal("reusable workflow must not admit commands quoted inside ordinary comments")
+	}
+	if strings.Contains(workflow, "contains(inputs.command_prefix, ',') ||") {
+		t.Fatal("multiple prefixes must not bypass the pre-runner comment gate")
 	}
 	if strings.Contains(workflow, "pull-requests: write") {
 		t.Fatal("reusable workflow must inherit mode-specific caller permissions")
@@ -159,6 +164,14 @@ func TestPublicActionForwardsInputs(t *testing.T) {
 	implementation := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
 	if !strings.Contains(wrapper, "uses: $/.github/actions/reeve") {
 		t.Fatal("public action must invoke the pinned internal implementation")
+	}
+	for _, want := range []string{
+		"source-ref: ${{ github.action_ref }}",
+		"source-repository: ${{ github.action_repository }}",
+	} {
+		if !strings.Contains(wrapper, want) {
+			t.Errorf("public action is missing source identity %q", want)
+		}
 	}
 	for _, input := range []string{
 		"command", "root", "pulumi-version", "opentofu-version", "terraform-version",

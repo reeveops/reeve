@@ -72,17 +72,27 @@ type File struct {
 	Content    []byte
 }
 
+// GitHubWorkflowOptions controls the caller generated for the public reusable
+// workflow.
+type GitHubWorkflowOptions struct {
+	Engine       string
+	Ref          string
+	ApplyTrigger string
+	NeedsOIDC    bool
+}
+
 // RenderGitHubWorkflow produces the GitOps caller for the public reusable
-// workflow. The ref must be a full commit SHA so generated CI never follows a
+// workflow. Ref must be a full commit SHA so generated CI never follows a
 // moving branch or tag.
-func RenderGitHubWorkflow(engine, ref string) ([]byte, error) {
+func RenderGitHubWorkflow(opts GitHubWorkflowOptions) ([]byte, error) {
+	engine := opts.Engine
 	if engine == "" {
 		engine = "pulumi"
 	}
 	if engine != "pulumi" && engine != "terraform" && engine != "tofu" {
 		return nil, fmt.Errorf("unknown engine %q (pulumi | terraform | tofu)", engine)
 	}
-	if !fullCommitRE.MatchString(ref) {
+	if !fullCommitRE.MatchString(opts.Ref) {
 		return nil, fmt.Errorf("workflow ref must be a full 40-character commit SHA")
 	}
 
@@ -94,11 +104,20 @@ func RenderGitHubWorkflow(engine, ref string) ([]byte, error) {
 		versionInput = "opentofu_version: latest"
 	}
 
+	pullRequestTypes := "opened, reopened, synchronize, ready_for_review"
+	if opts.ApplyTrigger == "merge" {
+		pullRequestTypes += ", closed"
+	}
+	idTokenPermission := ""
+	if opts.NeedsOIDC {
+		idTokenPermission = "  id-token: write\n" // #nosec G101 -- GitHub permission name, not a credential.
+	}
+
 	return []byte(fmt.Sprintf(`name: reeve
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [%s]
   merge_group:
     types: [checks_requested]
   issue_comment:
@@ -107,7 +126,7 @@ on:
 permissions:
   contents: read
   checks: read
-  pull-requests: write
+%s  pull-requests: write
   issues: write
 
 jobs:
@@ -116,7 +135,7 @@ jobs:
     with:
       mode: gitops
       %s
-`, strings.ToLower(ref), versionInput)), nil
+`, pullRequestTypes, idTokenPermission, strings.ToLower(opts.Ref), versionInput)), nil
 }
 
 // Validate rejects option combinations that would render broken config.
