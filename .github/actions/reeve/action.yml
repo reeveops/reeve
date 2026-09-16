@@ -133,6 +133,17 @@ runs:
         set -euo pipefail
         "$ACTION_PATH/.github/scripts/classify-event.sh"
 
+    - name: Resolve immutable workload revision
+      id: reeve-workload
+      if: steps.reeve-dispatch.outputs.run == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}/../../..
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        "$ACTION_PATH/.github/scripts/resolve-workload-ref.sh" resolve
+
     # reeve's own source is already on disk above github.action_path - it's the
     # tree GHA loaded for the pinned action or reusable workflow commit. Build
     # from there directly, so the binary always matches that source.
@@ -251,9 +262,23 @@ runs:
       if: steps.reeve-dispatch.outputs.run == 'true'
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
-        ref: ${{ (github.event.pull_request.number || github.event.issue.pull_request) && format('refs/pull/{0}/head', github.event.pull_request.number || github.event.issue.number) || '' }}
+        ref: ${{ steps.reeve-workload.outputs.sha }}
         fetch-depth: 1
         persist-credentials: false
+
+    - name: Verify immutable workload revision
+      if: steps.reeve-dispatch.outputs.run == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ steps.reeve-hash.outputs.root }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REEVE_WORKLOAD_SHA: ${{ steps.reeve-workload.outputs.sha }}
+        REEVE_WORKLOAD_PR: ${{ steps.reeve-workload.outputs.pr_number }}
+        REEVE_WORKLOAD_IS_PR: ${{ steps.reeve-workload.outputs.is_pr }}
+        REEVE_WORKLOAD_ROOT: ${{ inputs.root || github.workspace }}
+      run: |
+        set -euo pipefail
+        "$ACTION_PATH/.github/scripts/resolve-workload-ref.sh" verify
 
     - name: Authenticate to GCP
       if: ${{ steps.reeve-dispatch.outputs.run == 'true' && inputs.gcp-workload-identity-provider != '' }}
@@ -286,6 +311,7 @@ runs:
       if: steps.reeve-dispatch.outputs.run == 'true'
       shell: bash
       env:
+        ACTION_PATH: ${{ steps.reeve-hash.outputs.root }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         SLACK_BOT_TOKEN: ${{ inputs.slack-token }}
         REEVE_BIN: ${{ runner.temp }}/reeve-bin/reeve
@@ -303,11 +329,19 @@ runs:
         REEVE_DISPATCH_AUTO_ARGS: ${{ steps.reeve-dispatch.outputs.auto_args }}
         REEVE_DISPATCH_UNLOCK_REF: ${{ steps.reeve-dispatch.outputs.unlock_ref }}
         REEVE_DISPATCH_BREAK_GLASS: ${{ steps.reeve-dispatch.outputs.break_glass }}
+        REEVE_WORKLOAD_SHA: ${{ steps.reeve-workload.outputs.sha }}
+        REEVE_WORKLOAD_PR: ${{ steps.reeve-workload.outputs.pr_number }}
+        REEVE_WORKLOAD_IS_PR: ${{ steps.reeve-workload.outputs.is_pr }}
+        REEVE_EXPECTED_HEAD_SHA: ${{ steps.reeve-workload.outputs.is_pr == 'true' && steps.reeve-workload.outputs.sha || '' }}
       run: |
         set -euo pipefail
         ROOT="$REEVE_INPUT_ROOT"
         if [ -z "$ROOT" ]; then ROOT="$GITHUB_WORKSPACE"; fi
         cd "$ROOT"
+
+        if [[ -n "${REEVE_WORKLOAD_SHA:-}" ]]; then
+          REEVE_WORKLOAD_ROOT="$PWD" "$ACTION_PATH/.github/scripts/resolve-workload-ref.sh" verify
+        fi
 
         CMD="$REEVE_DISPATCH_COMMAND"
         EXTRA_ARGS=()
@@ -356,14 +390,19 @@ runs:
           RUN_URL_ARGS+=(--run-url "${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
         fi
 
+        HEAD_ARGS=()
+        if [[ "${REEVE_WORKLOAD_IS_PR:-false}" == "true" ]]; then
+          HEAD_ARGS+=(--sha "$REEVE_WORKLOAD_SHA")
+        fi
+
         case "$CMD" in
           preview|"run preview")
             if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
               PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
-              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${HEAD_ARGS[@]}" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             elif [[ "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
               PR_NUMBER=$(jq -r '.issue.number' < "$GITHUB_EVENT_PATH")
-              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${HEAD_ARGS[@]}" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             else
               "$REEVE_BIN" run preview --local "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             fi
@@ -372,19 +411,19 @@ runs:
             # .pull_request.number on the review path; .issue.number on the
             # issue_comment path (/reeve approve).
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run approved --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run approved --pr "$PR_NUMBER" "${HEAD_ARGS[@]}" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           ready|"run ready")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run ready --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run ready --pr "$PR_NUMBER" "${HEAD_ARGS[@]}" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           apply|"run apply")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run apply --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run apply --pr "$PR_NUMBER" "${HEAD_ARGS[@]}" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           refresh|"run refresh")
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" "${HEAD_ARGS[@]}" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           unlock)
             # PR-scoped lock cleanup: removes this PR from lock holders and
@@ -421,7 +460,7 @@ runs:
             # .issue.number on the issue_comment path; .pull_request.number
             # when a workflow passes command "run explain" on a PR event.
             PR_NUMBER=$(jq -r '.pull_request.number // .issue.number // 0' < "$GITHUB_EVENT_PATH")
-            "$REEVE_BIN" run explain --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            "$REEVE_BIN" run explain --pr "$PR_NUMBER" "${HEAD_ARGS[@]}" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
             ;;
           *)
             CMD_ARGS=()

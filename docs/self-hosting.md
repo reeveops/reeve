@@ -231,6 +231,7 @@ jobs:
 
 The shared workflow uses the composite action from the same pinned Reeve commit.
 Set `pulumi_version`, `opentofu_version`, or `terraform_version` to install the workload CLI after event classification.
+PR jobs resolve an immutable head SHA and verify it before authentication, engine setup, and Reeve execution.
 
 The standard `reeve` caller job publishes the stable `reeve / Reeve` check for branch protection.
 Reeve derives a custom caller check name from the current run; `self_check_names` remains available for nonstandard check publishers.

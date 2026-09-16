@@ -118,6 +118,29 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 - WHEN the binary cache misses
 - THEN it MUST resolve and verify that tag's release artifact before falling back to source.
 
+### Requirement: Workload checkout uses an immutable revision
+
+The maintained action MUST resolve one full workload commit SHA before checkout.
+It MUST verify the checkout and current PR head before authentication, engine setup, and Reeve execution.
+
+#### Scenario: Pull request event
+
+- GIVEN a pull request or review event carries a full head SHA
+- WHEN the action prepares the workload
+- THEN it MUST checkout that exact SHA instead of a moving pull request ref.
+
+#### Scenario: Pull request comment
+
+- GIVEN an accepted issue comment targets a pull request
+- WHEN the action resolves the workload
+- THEN it MUST read the current full head SHA through the GitHub API before checkout.
+
+#### Scenario: Head moves before execution
+
+- GIVEN the action checked out an immutable PR head
+- WHEN the live PR head differs before setup or command execution
+- THEN it MUST fail without authenticating or invoking Reeve against a mixed revision.
+
 ### Requirement: Pinned workflow scaffolding
 
 `reeve init` MUST generate a GitOps caller when it has an exact Reeve source commit.

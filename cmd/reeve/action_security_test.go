@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -529,6 +530,7 @@ func TestActionClassifier(t *testing.T) {
 func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
 	action := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
 	for _, name := range []string{
+		"Resolve immutable workload revision",
 		"Hash reeve source",
 		"Restore reeve binary cache",
 		"Classify prebuilt binary eligibility",
@@ -538,6 +540,7 @@ func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
 		"Build reeve",
 		"Add reeve to PATH",
 		"Checkout workload",
+		"Verify immutable workload revision",
 		"Authenticate to GCP",
 		"Install Pulumi CLI",
 		"Install OpenTofu CLI",
@@ -557,6 +560,120 @@ func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
 		if !strings.Contains(rest, "steps.reeve-dispatch.outputs.run == 'true'") {
 			t.Errorf("action step %q is not guarded by early dispatch", name)
 		}
+	}
+}
+
+func TestActionUsesImmutableWorkloadRevision(t *testing.T) {
+	t.Parallel()
+	action := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
+	for _, want := range []string{
+		"ref: ${{ steps.reeve-workload.outputs.sha }}",
+		"persist-credentials: false",
+		"REEVE_EXPECTED_HEAD_SHA:",
+		"resolve-workload-ref.sh\" verify",
+		"HEAD_ARGS+=(--sha \"$REEVE_WORKLOAD_SHA\")",
+	} {
+		if !strings.Contains(action, want) {
+			t.Errorf("action is missing immutable workload binding %q", want)
+		}
+	}
+	if strings.Contains(action, "refs/pull/") {
+		t.Fatal("action must not checkout a moving pull request ref")
+	}
+}
+
+func TestResolveWorkloadRevision(t *testing.T) {
+	const eventHead = "1111111111111111111111111111111111111111"
+	const apiHead = "2222222222222222222222222222222222222222"
+	const scheduledHead = "3333333333333333333333333333333333333333"
+	tests := []struct {
+		name         string
+		eventName    string
+		eventJSON    string
+		githubSHA    string
+		curlResponse string
+		wantSHA      string
+		wantPR       string
+		wantIsPR     string
+	}{
+		{
+			name:      "pull request payload",
+			eventName: "pull_request",
+			eventJSON: `{"pull_request":{"number":17,"head":{"sha":"` + eventHead + `"}}}`,
+			wantSHA:   eventHead,
+			wantPR:    "17",
+			wantIsPR:  "true",
+		},
+		{
+			name:         "issue comment API snapshot",
+			eventName:    "issue_comment",
+			eventJSON:    `{"issue":{"number":18,"pull_request":{}}}`,
+			curlResponse: `{"head":{"sha":"` + apiHead + `"}}`,
+			wantSHA:      apiHead,
+			wantPR:       "18",
+			wantIsPR:     "true",
+		},
+		{
+			name:      "scheduled commit",
+			eventName: "schedule",
+			eventJSON: `{}`,
+			githubSHA: scheduledHead,
+			wantSHA:   scheduledHead,
+			wantIsPR:  "false",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := runWorkloadResolver(t, "resolve", tt.eventName, tt.eventJSON, tt.githubSHA, tt.curlResponse, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["sha"] != tt.wantSHA || got["pr_number"] != tt.wantPR || got["is_pr"] != tt.wantIsPR {
+				t.Fatalf("outputs = %#v, want sha=%s pr=%s is_pr=%s", got, tt.wantSHA, tt.wantPR, tt.wantIsPR)
+			}
+		})
+	}
+}
+
+func TestVerifyWorkloadRevision(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "config", "user.name", "Reeve Test")
+	runGit(t, repo, "config", "user.email", "reeve@example.invalid")
+	if err := os.WriteFile(filepath.Join(repo, "fixture"), []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "fixture")
+	runGit(t, repo, "commit", "-qm", "fixture")
+	head := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	moved := strings.Repeat("b", 40)
+
+	tests := []struct {
+		name         string
+		expected     string
+		isPR         string
+		curlResponse string
+		wantError    string
+	}{
+		{name: "matching checkout and PR", expected: head, isPR: "true", curlResponse: `{"head":{"sha":"` + head + `"}}`},
+		{name: "PR moved", expected: head, isPR: "true", curlResponse: `{"head":{"sha":"` + moved + `"}}`, wantError: "pull request head moved"},
+		{name: "checkout mismatch", expected: strings.Repeat("a", 40), isPR: "false", wantError: "checkout is"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := runWorkloadResolver(t, "verify", "issue_comment", `{"issue":{"number":18,"pull_request":{}}}`, "", tt.curlResponse, map[string]string{
+				"REEVE_WORKLOAD_SHA":   tt.expected,
+				"REEVE_WORKLOAD_PR":    "18",
+				"REEVE_WORKLOAD_IS_PR": tt.isPR,
+				"REEVE_WORKLOAD_ROOT":  repo,
+			})
+			switch {
+			case tt.wantError == "" && err != nil:
+				t.Fatal(err)
+			case tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)):
+				t.Fatalf("verify error = %v, want text %q", err, tt.wantError)
+			}
+		})
 	}
 }
 
@@ -783,6 +900,76 @@ func extractRunReeveScript(t *testing.T, action string) string {
 	}
 	t.Fatal("Run reeve script not found")
 	return ""
+}
+
+func runWorkloadResolver(t *testing.T, mode, eventName, eventJSON, githubSHA, curlResponse string, extraEnv map[string]string) (map[string]string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	outputPath := filepath.Join(dir, "output")
+	responsePath := filepath.Join(dir, "response.json")
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(responsePath, []byte(curlResponse), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte("#!/bin/sh\ncat \"$FAKE_CURL_RESPONSE\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	script := repoPath(t, ".github", "scripts", "resolve-workload-ref.sh")
+	// #nosec G204 -- the executable is a repository-owned script and all fixtures travel through environment variables.
+	cmd := exec.Command(script, mode)
+	env := append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GITHUB_OUTPUT="+outputPath,
+		"GITHUB_EVENT_NAME="+eventName,
+		"GITHUB_EVENT_PATH="+eventPath,
+		"GITHUB_REPOSITORY=org/repo",
+		"GITHUB_API_URL=https://api.github.test",
+		"GITHUB_TOKEN=test-token",
+		"GITHUB_SHA="+githubSHA,
+		"FAKE_CURL_RESPONSE="+responsePath,
+	)
+	for key, value := range extraEnv {
+		env = append(env, key+"="+value)
+	}
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	values := map[string]string{}
+	data, readErr := os.ReadFile(outputPath)
+	if readErr != nil {
+		if mode == "verify" && os.IsNotExist(readErr) {
+			return values, nil
+		}
+		t.Fatal(readErr)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	return values, nil
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	// #nosec G204 -- tests execute git with fixed arguments against a temporary repository.
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
 }
 
 func readRepoFile(t *testing.T, parts ...string) string {
