@@ -100,7 +100,7 @@ func TestRenderGitHubWorkflow(t *testing.T) {
 	} {
 		t.Run(tc.engine, func(t *testing.T) {
 			t.Parallel()
-			got, err := RenderGitHubWorkflow(tc.engine, ref)
+			got, err := RenderGitHubWorkflow(GitHubWorkflowOptions{Engine: tc.engine, Ref: ref})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -128,8 +128,29 @@ func TestRenderGitHubWorkflow(t *testing.T) {
 
 func TestRenderGitHubWorkflowRejectsUnpinnedRef(t *testing.T) {
 	for _, ref := range []string{"master", "v1.0.0", "0123456", ""} {
-		if _, err := RenderGitHubWorkflow("pulumi", ref); err == nil {
+		if _, err := RenderGitHubWorkflow(GitHubWorkflowOptions{Engine: "pulumi", Ref: ref}); err == nil {
 			t.Errorf("ref %q: want error", ref)
+		}
+	}
+}
+
+func TestRenderGitHubWorkflowAddsConfigDependentEventsAndPermissions(t *testing.T) {
+	const ref = "0123456789abcdef0123456789abcdef01234567"
+	got, err := RenderGitHubWorkflow(GitHubWorkflowOptions{
+		Engine:       "pulumi",
+		Ref:          ref,
+		ApplyTrigger: "merge",
+		NeedsOIDC:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"types: [opened, reopened, synchronize, ready_for_review, closed]",
+		"id-token: write",
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("workflow missing %q:\n%s", want, got)
 		}
 	}
 }

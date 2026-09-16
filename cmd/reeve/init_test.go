@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // fakeTTY overrides the injected TTY probe for one test.
@@ -116,6 +117,73 @@ func TestInitWritesPinnedWorkflowForReleaseBuild(t *testing.T) {
 		"mode: gitops",
 		"pulumi_version: latest",
 	} {
+		if !strings.Contains(string(workflow), want) {
+			t.Errorf("workflow missing %q:\n%s", want, workflow)
+		}
+	}
+}
+
+func TestConfigNeedsOIDC(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  string
+		want bool
+	}{
+		{name: "none"},
+		{name: "AWS OIDC", typ: "aws_oidc", want: true},
+		{name: "GCP WIF", typ: "gcp_wif", want: true},
+		{name: "Azure federation", typ: "azure_federated", want: true},
+		{name: "GitHub App", typ: "github_app"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			if tc.typ != "" {
+				cfg.Auth = &schemas.Auth{Providers: map[string]schemas.ProviderYAML{
+					"provider": {Type: tc.typ},
+				}}
+			}
+			if got := configNeedsOIDC(cfg); got != tc.want {
+				t.Fatalf("configNeedsOIDC() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInitWorkflowMatchesPreservedConfig(t *testing.T) {
+	fakeTTY(t, false)
+	root := pulumiRepo(t)
+	if out, err := runReeve(t, "init", "-n"); err != nil {
+		t.Fatalf("baseline init: %v\n%s", err, out)
+	}
+
+	sharedPath := filepath.Join(root, ".reeve", "shared.yaml")
+	shared, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared = []byte(strings.Replace(string(shared), "trigger: comment", "trigger: merge", 1))
+	mustWrite(t, sharedPath, string(shared))
+	mustWrite(t, filepath.Join(root, ".reeve", "auth.yaml"), `version: 1
+config_type: auth
+providers:
+  aws-prod:
+    type: aws_oidc
+    role_arn: arn:aws:iam::111111111111:role/reeve-prod
+bindings:
+  - match: {stack: "*"}
+    providers: [aws-prod]
+`)
+
+	const ref = "0123456789abcdef0123456789abcdef01234567"
+	out, err := runReeve(t, "init", "-n", "--workflow-ref", ref)
+	if err != nil {
+		t.Fatalf("init with existing config: %v\n%s", err, out)
+	}
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "reeve.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ready_for_review, closed", "id-token: write"} {
 		if !strings.Contains(string(workflow), want) {
 			t.Errorf("workflow missing %q:\n%s", want, workflow)
 		}

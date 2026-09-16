@@ -183,12 +183,12 @@ Scheduled bucket cleanup uses the same workflow with `mode: maintenance` and run
 It executes `reeve maintenance run` for expired locks and configured artifact retention.
 
 Use `opentofu_version` or `terraform_version` instead of `pulumi_version` for an HCL engine.
-Add `id-token: write` only when an AWS OIDC, GCP WIF, or Azure federated provider needs it.
+`reeve init` adds `id-token: write` when the loaded config declares AWS OIDC, GCP WIF, or Azure federated auth.
 
-Add the `closed` pull request type only when `apply.trigger` is `merge`.
+It adds the `closed` pull request type only when `apply.trigger` is `merge`.
 
 Keep the caller job ID `reeve` and require the `reeve / Reeve` check in branch protection.
-If the caller job ID changes, pass its full check name through `self_check_names` so apply does not wait on an earlier Reeve run.
+Reeve derives a custom caller check name from the current run and excludes its prior results from apply gates.
 
 That's it. The action auto-detects the command from the event:
 
@@ -224,12 +224,11 @@ green):
 | `0`  | Every targeted stack applied cleanly or was a no-op — or every stack was **blocked** by preconditions/locks. Blocked is a deliberate non-failure: the gates held the apply back, nothing was attempted, and a later re-run can proceed. |
 | `1`  | One or more stacks **failed** to apply (engine, auth, or lock-storage error), the run was cancelled by a signal, post-apply persistence failed, or the run errored before applying (config, VCS, storage). The error message names the failed stacks. A failed apply never renders as a green check. |
 
-Accepted comment prefixes are configurable via the `command-prefix` input
-(default `"/reeve"`). Mention style (`@reeve apply`) is **not** accepted by
-default: `github.com/reeve` is a real person's account, so every such comment
-pinged someone with no connection to your repo. You can add `@reeve` back —
-`command-prefix: "/reeve,@reeve"` — but a handle your org actually owns is the
-better answer. Comments authored by bots (user type `Bot` or a
+The reusable workflow accepts one `command_prefix` (default `"/reeve"`) so
+unrelated comments skip before GitHub assigns a runner. The composite action
+still accepts multiple comma-separated `command-prefix` values when used
+directly. Mention style (`@reeve apply`) is **not** accepted by default because
+`github.com/reeve` is a real person's account. Comments authored by bots (user type `Bot` or a
 login ending in `[bot]`) are always skipped, so reeve's own PR comments can
 never re-trigger a run.
 

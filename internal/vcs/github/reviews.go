@@ -206,53 +206,70 @@ func (c *Client) ChecksGreen(ctx context.Context, sha string, opts vcs.ChecksGre
 		ignoreNames[n] = struct{}{}
 	}
 
-	var failing []string
+	var checkRuns []*gh.CheckRun
 	checkOpt := &gh.ListCheckRunsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
 	for {
 		runs, resp, err := c.gh.Checks.ListCheckRunsForRef(ctx, c.owner, c.repo, sha, checkOpt)
 		if err != nil {
 			return false, nil, fmt.Errorf("list check runs: %w", err)
 		}
-		for _, r := range runs.CheckRuns {
-			name, status, conclusion, url := r.GetName(), r.GetStatus(), r.GetConclusion(), r.GetDetailsURL()
-			logger.Debug("check_run inspected",
-				"name", name, "status", status, "conclusion", conclusion, "url", url)
-
-			// Skip the current workflow run - it cannot be green while running.
-			if ignoreURLFragment != "" && strings.Contains(url, ignoreURLFragment) {
-				logger.Debug("check_run skipped: current run", "name", name)
-				continue
-			}
-			// Skip reeve's own check_runs from prior workflow runs on this
-			// SHA. Without this, a single failed apply pins the gate red
-			// forever because the failed check_run lives on the SHA, not the
-			// run.
-			if _, self := ignoreNames[name]; self {
-				logger.Debug("check_run skipped: self by name", "name", name)
-				continue
-			}
-			// A check that hasn't concluded is pending, not passing. GitHub's
-			// own required-checks gate blocks on pending; skipping these let
-			// an apply pass while a failing-destined check was still running
-			// (reeve's own current run is already skipped above).
-			if status != "completed" {
-				logger.Debug("check_run pending: not yet concluded", "name", name, "status", status)
-				failing = append(failing, name+":"+status+" (still running)")
-				continue
-			}
-			switch conclusion {
-			case "success", "skipped", "neutral":
-				continue
-			case "":
-				failing = append(failing, name+":pending (still running)")
-			default:
-				failing = append(failing, name+":"+conclusion)
-			}
-		}
+		checkRuns = append(checkRuns, runs.CheckRuns...)
 		if resp.NextPage == 0 {
 			break
 		}
 		checkOpt.Page = resp.NextPage
+	}
+
+	// The current run's check name includes the caller job ID for reusable
+	// workflows, and GitHub does not expose that ID inside the called workflow.
+	// Derive the exact published name from the current run's details URL, then
+	// ignore prior check runs with the same name on this SHA.
+	if ignoreURLFragment != "" {
+		for _, r := range checkRuns {
+			name := r.GetName()
+			if strings.Contains(r.GetDetailsURL(), ignoreURLFragment) &&
+				(name == "Reeve" || strings.HasSuffix(name, " / Reeve")) {
+				ignoreNames[r.GetName()] = struct{}{}
+			}
+		}
+	}
+
+	var failing []string
+	for _, r := range checkRuns {
+		name, status, conclusion, url := r.GetName(), r.GetStatus(), r.GetConclusion(), r.GetDetailsURL()
+		logger.Debug("check_run inspected",
+			"name", name, "status", status, "conclusion", conclusion, "url", url)
+
+		// Skip the current workflow run - it cannot be green while running.
+		if ignoreURLFragment != "" && strings.Contains(url, ignoreURLFragment) {
+			logger.Debug("check_run skipped: current run", "name", name)
+			continue
+		}
+		// Skip reeve's own check_runs from prior workflow runs on this
+		// SHA. Without this, a single failed apply pins the gate red
+		// forever because the failed check_run lives on the SHA, not the
+		// run.
+		if _, self := ignoreNames[name]; self {
+			logger.Debug("check_run skipped: self by name", "name", name)
+			continue
+		}
+		// A check that hasn't concluded is pending, not passing. GitHub's
+		// own required-checks gate blocks on pending; skipping these let
+		// an apply pass while a failing-destined check was still running
+		// (reeve's own current run is already skipped above).
+		if status != "completed" {
+			logger.Debug("check_run pending: not yet concluded", "name", name, "status", status)
+			failing = append(failing, name+":"+status+" (still running)")
+			continue
+		}
+		switch conclusion {
+		case "success", "skipped", "neutral":
+			continue
+		case "":
+			failing = append(failing, name+":pending (still running)")
+		default:
+			failing = append(failing, name+":"+conclusion)
+		}
 	}
 
 	// Commit statuses (legacy, separate from check runs). A combined state of
