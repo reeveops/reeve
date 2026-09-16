@@ -226,6 +226,9 @@ reeve expects these events:
 - `schedule` - fires `drift run`
 - `workflow_dispatch` - manual re-runs
 
+The composite action classifies the event before restoring a binary, checking out code, authenticating, or installing an engine.
+Rejected comments, reviews, and PR actions stop after that classifier.
+
 For run coalescing, use a `concurrency` group keyed per PR with
 `cancel-in-progress` limited to preview runs: previews never take apply
 locks, so cancelling one loses nothing, while an apply holds per-stack locks

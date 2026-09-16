@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,9 +92,12 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 		"REEVE_INPUT_ROOT":           dir,
 		"REEVE_INPUT_COMMAND":        "lint",
 		"REEVE_INPUT_EXTRA_ARGS":     "$(touch " + marker + ") ; touch " + marker,
-		"REEVE_RUN_ON_APPROVAL":      "false",
 		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER",
 		"REEVE_COMMAND_PREFIXES":     "/reeve",
+		"REEVE_DISPATCH_COMMAND":     "lint",
+		"REEVE_DISPATCH_AUTO_ARGS":   "[]",
+		"REEVE_DISPATCH_UNLOCK_REF":  "",
+		"REEVE_DISPATCH_BREAK_GLASS": "false",
 		"ARGS_OUT":                   argsPath,
 	} {
 		t.Setenv(key, value)
@@ -114,6 +118,178 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 	}
 }
 
+func TestActionClassifier(t *testing.T) {
+	tests := []struct {
+		name          string
+		eventName     string
+		eventJSON     string
+		command       string
+		runOnApproval string
+		wantRun       bool
+		wantCommand   string
+		wantArgs      []string
+		wantUnlockRef string
+	}{
+		{
+			name:      "ordinary comment",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"looks good","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:      "plain issue command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"number":42},"comment":{"body":"/reeve apply","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:      "bot command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve apply","author_association":"OWNER","user":{"type":"Bot","login":"reeve[bot]"}}}`,
+		},
+		{
+			name:      "unauthorized command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve apply","author_association":"NONE","user":{"type":"User","login":"stranger"}}}`,
+		},
+		{
+			name:      "unknown command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve deploy","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:      "irrelevant pull request action",
+			eventName: "pull_request",
+			eventJSON: `{"action":"labeled","pull_request":{"number":42}}`,
+		},
+		{
+			name:          "review disabled",
+			eventName:     "pull_request_review",
+			eventJSON:     `{"action":"submitted","review":{"state":"approved","author_association":"OWNER"}}`,
+			runOnApproval: "false",
+		},
+		{
+			name:          "authorized review",
+			eventName:     "pull_request_review",
+			eventJSON:     `{"action":"submitted","review":{"state":"approved","author_association":"OWNER"}}`,
+			runOnApproval: "true",
+			wantRun:       true,
+			wantCommand:   "approved",
+		},
+		{
+			name:      "edited command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"edited","issue":{"pull_request":{}},"comment":{"body":"/reeve apply","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:        "authorized apply flags",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve apply --force --refresh","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "apply",
+			wantArgs:    []string{"--trigger-source", "comment", "--force", "--refresh"},
+		},
+		{
+			name:        "refresh flags",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve refresh --dry-run --all","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "refresh",
+			wantArgs:    []string{"--dry-run", "--all"},
+		},
+		{
+			name:          "scoped unlock",
+			eventName:     "issue_comment",
+			eventJSON:     `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve unlock project/prod --force","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:       true,
+			wantCommand:   "unlock",
+			wantArgs:      []string{"--force"},
+			wantUnlockRef: "project/prod",
+		},
+		{
+			name:        "scoped explain",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve explain project/prod","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "run explain",
+			wantArgs:    []string{"--stack", "project/prod"},
+		},
+		{
+			name:        "break glass reaches cli parser",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve breakglass \"incident 42\" apply","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "apply",
+			wantArgs:    []string{"--break-glass"},
+		},
+		{
+			name:      "malformed explain",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve explain one two","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:        "merged pull request",
+			eventName:   "pull_request",
+			eventJSON:   `{"action":"closed","pull_request":{"number":42,"merged":true}}`,
+			wantRun:     true,
+			wantCommand: "apply",
+			wantArgs:    []string{"--trigger-source", "merge"},
+		},
+		{
+			name:        "explicit scheduled command",
+			eventName:   "schedule",
+			eventJSON:   `{}`,
+			command:     "drift run",
+			wantRun:     true,
+			wantCommand: "drift run",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dispatch := classifyActionEvent(t, tt.eventName, tt.eventJSON, tt.command, tt.runOnApproval)
+			if dispatch.Run != tt.wantRun || dispatch.Command != tt.wantCommand {
+				t.Fatalf("dispatch = %+v, want run=%v command=%q", dispatch, tt.wantRun, tt.wantCommand)
+			}
+			if strings.Join(dispatch.Args, " ") != strings.Join(tt.wantArgs, " ") {
+				t.Fatalf("args = %q, want %q", dispatch.Args, tt.wantArgs)
+			}
+			if dispatch.UnlockRef != tt.wantUnlockRef {
+				t.Fatalf("unlock ref = %q, want %q", dispatch.UnlockRef, tt.wantUnlockRef)
+			}
+		})
+	}
+}
+
+func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
+	action := readRepoFile(t, "action.yml")
+	for _, name := range []string{
+		"Hash reeve source",
+		"Restore reeve binary cache",
+		"Install cosign for binary verification",
+		"Fetch prebuilt binary",
+		"Set up Go (from reeve's go.mod)",
+		"Build reeve",
+		"Add reeve to PATH",
+		"Checkout PR HEAD",
+		"Authenticate to GCP",
+		"Install Pulumi CLI",
+		"Run reeve",
+	} {
+		marker := "- name: " + name
+		start := strings.Index(action, marker)
+		if start < 0 {
+			t.Fatalf("missing action step %q", name)
+		}
+		rest := action[start+len(marker):]
+		end := strings.Index(rest, "\n    - name:")
+		if end >= 0 {
+			rest = rest[:end]
+		}
+		if !strings.Contains(rest, "steps.reeve-dispatch.outputs.run == 'true'") {
+			t.Errorf("action step %q is not guarded by early dispatch", name)
+		}
+	}
+}
+
 func TestActionPreviewRouting(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -125,6 +301,7 @@ func TestActionPreviewRouting(t *testing.T) {
 			name:      "plan comment marks explicit request",
 			eventName: "issue_comment",
 			eventJSON: `{
+				"action":"created",
 				"issue":{"number":42,"pull_request":{}},
 				"comment":{"body":"/reeve plan","author_association":"OWNER","user":{"type":"User","login":"operator"}}
 			}`,
@@ -174,6 +351,10 @@ func TestPlanRequestedFlagIsPreviewOnly(t *testing.T) {
 
 func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
 	t.Helper()
+	dispatch := classifyActionEvent(t, eventName, eventJSON, "", "false")
+	if !dispatch.Run {
+		t.Fatal("preview event was skipped by classifier")
+	}
 	script := extractRunReeveScript(t, readRepoFile(t, "action.yml"))
 	dir := t.TempDir()
 	eventPath := filepath.Join(dir, "event.json")
@@ -199,9 +380,12 @@ func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
 		"REEVE_INPUT_ROOT":           dir,
 		"REEVE_INPUT_COMMAND":        "",
 		"REEVE_INPUT_EXTRA_ARGS":     "",
-		"REEVE_RUN_ON_APPROVAL":      "false",
 		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER",
 		"REEVE_COMMAND_PREFIXES":     "/reeve",
+		"REEVE_DISPATCH_COMMAND":     dispatch.Command,
+		"REEVE_DISPATCH_AUTO_ARGS":   mustJSON(t, dispatch.Args),
+		"REEVE_DISPATCH_UNLOCK_REF":  dispatch.UnlockRef,
+		"REEVE_DISPATCH_BREAK_GLASS": "false",
 		"ARGS_OUT":                   argsPath,
 	} {
 		t.Setenv(key, value)
@@ -215,6 +399,75 @@ func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
 		t.Fatal(err)
 	}
 	return strings.Fields(string(args))
+}
+
+type actionDispatch struct {
+	Run       bool
+	Command   string
+	Args      []string
+	UnlockRef string
+}
+
+func classifyActionEvent(t *testing.T, eventName, eventJSON, command, runOnApproval string) actionDispatch {
+	t.Helper()
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	outputPath := filepath.Join(dir, "output")
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runOnApproval == "" {
+		runOnApproval = "false"
+	}
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script and fixtures travel through environment variables.
+	cmd := exec.Command(script)
+	for key, value := range map[string]string{
+		"GITHUB_OUTPUT":              outputPath,
+		"GITHUB_EVENT_NAME":          eventName,
+		"GITHUB_EVENT_PATH":          eventPath,
+		"REEVE_INPUT_COMMAND":        command,
+		"REEVE_RUN_ON_APPROVAL":      runOnApproval,
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("classifier failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(values["auto_args"]), &args); err != nil {
+		t.Fatalf("parse classifier args %q: %v", values["auto_args"], err)
+	}
+	return actionDispatch{
+		Run:       values["run"] == "true",
+		Command:   values["command"],
+		Args:      args,
+		UnlockRef: values["unlock_ref"],
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestBinaryFetchRejectsMissingSignatureVerifier(t *testing.T) {

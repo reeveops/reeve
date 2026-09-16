@@ -195,6 +195,9 @@ That's it. The action auto-detects the command from the event:
 | `/reeve help` comment                              | posts available commands |
 | Any other comment, or any bot-authored comment     | silent no-op             |
 
+Event classification runs before binary setup, checkout, authentication, and engine installation.
+Skipped events do not run those setup steps.
+
 **`reeve run preview` exit behavior**:
 
 - A preview exits `0` only when every targeted stack plans successfully or is a no-op.
