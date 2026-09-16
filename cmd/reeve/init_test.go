@@ -68,7 +68,7 @@ func TestInitNonInteractiveScaffolds(t *testing.T) {
 		"wrote   .reeve/shared.yaml",
 		"wrote   .reeve/pulumi.yaml",
 		"reeve lint",
-		"reeveops/reeve@master", // GitHub Action snippet
+		"reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

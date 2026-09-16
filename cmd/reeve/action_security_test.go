@@ -61,7 +61,8 @@ func TestWorkflowActionsArePinned(t *testing.T) {
 				continue
 			}
 			ref := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "uses:")))[0]
-			if strings.HasPrefix(ref, "./") || strings.HasPrefix(ref, "docker://") {
+			// Self-repository refs resolve to the workflow's exact commit.
+			if strings.HasPrefix(ref, "./") || strings.HasPrefix(ref, "$/") || strings.HasPrefix(ref, "docker://") {
 				continue
 			}
 			at := strings.LastIndexByte(ref, '@')
@@ -69,6 +70,30 @@ func TestWorkflowActionsArePinned(t *testing.T) {
 				t.Errorf("%s has mutable action ref %q", path, ref)
 			}
 		}
+	}
+}
+
+func TestReusableWorkflowContract(t *testing.T) {
+	t.Parallel()
+	workflow := readRepoFile(t, ".github", "workflows", "reeve.yml")
+	for _, want := range []string{
+		"workflow_call:",
+		"inputs.mode == 'gitops'",
+		"inputs.mode == 'drift'",
+		"uses: $/.",
+		"github.event.action == 'created'",
+		"contains(github.event.comment.body, '/reeve')",
+		"cancel-in-progress:",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Errorf("reusable workflow is missing %q", want)
+		}
+	}
+	if strings.Contains(workflow, "secrets: inherit") {
+		t.Fatal("reusable workflow must map named secrets")
+	}
+	if !strings.Contains(readRepoFile(t, "action.yml"), "persist-credentials: false") {
+		t.Fatal("composite action checkout must not persist credentials")
 	}
 }
 
@@ -269,7 +294,7 @@ func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
 		"Set up Go (from reeve's go.mod)",
 		"Build reeve",
 		"Add reeve to PATH",
-		"Checkout PR HEAD",
+		"Checkout workload",
 		"Authenticate to GCP",
 		"Install Pulumi CLI",
 		"Run reeve",

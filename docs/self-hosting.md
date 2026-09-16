@@ -209,9 +209,37 @@ runners start empty, so locks don't persist across runs.
 ```yaml
 permissions:
   contents: read
+  checks: read            # required-check preconditions
   pull-requests: write      # upsert PR comment
   issues: write             # /reeve apply via issue_comment; github_issue drift channel
   id-token: write           # only when using aws_oidc / gcp_wif / azure_federated
+```
+
+### Shared workflow modes
+
+Use the shared workflow with `mode: gitops` for pull request previews and commands.
+Use `mode: drift` from a scheduled or manual workflow for drift detection.
+
+```yaml
+jobs:
+  reeve:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: gitops
+```
+
+The shared workflow uses the composite action from the same pinned Reeve commit.
+Named secrets can be passed as `github_token` and `slack_token` without `secrets: inherit`.
+
+The exact-commit self reference requires GitHub.com and runner 2.336.0 or newer.
+GHES users can keep using the composite action directly until GitHub adds self references there.
+
+```yaml
+jobs:
+  drift:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: drift
 ```
 
 ### Event triggers

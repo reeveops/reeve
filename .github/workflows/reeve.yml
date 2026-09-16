@@ -1,0 +1,158 @@
+name: Reeve
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Run PR GitOps or scheduled drift detection.
+        required: true
+        type: string
+      runner:
+        description: GitHub-hosted or self-hosted runner label.
+        required: false
+        type: string
+        default: ubuntu-latest
+      timeout_minutes:
+        description: Maximum job duration.
+        required: false
+        type: number
+        default: 60
+      root:
+        description: Path containing the consumer repository's .reeve directory.
+        required: false
+        type: string
+        default: ""
+      pulumi_version:
+        description: Pulumi CLI version, or blank to skip installation.
+        required: false
+        type: string
+        default: ""
+      command_prefix:
+        description: Comma-separated accepted PR comment prefixes.
+        required: false
+        type: string
+        default: /reeve
+      allowed_associations:
+        description: Comma-separated associations allowed to run PR commands.
+        required: false
+        type: string
+        default: OWNER,MEMBER,COLLABORATOR
+      run_on_approval:
+        description: Run approval notifications for approved reviews.
+        required: false
+        type: boolean
+        default: false
+      log_level:
+        description: Reeve log level.
+        required: false
+        type: string
+        default: ""
+      gcp_workload_identity_provider:
+        description: GCP Workload Identity Provider resource name.
+        required: false
+        type: string
+        default: ""
+      gcp_service_account:
+        description: GCP service account email to impersonate.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      github_token:
+        description: Optional GitHub token override.
+        required: false
+      slack_token:
+        description: Optional Slack bot token.
+        required: false
+
+jobs:
+  invalid-mode:
+    if: inputs.mode != 'gitops' && inputs.mode != 'drift'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Reject unsupported mode
+        env:
+          REEVE_MODE: ${{ inputs.mode }}
+        run: |
+          printf 'unsupported Reeve workflow mode: %s\n' "$REEVE_MODE" >&2
+          exit 1
+
+  gitops:
+    if: >-
+      inputs.mode == 'gitops' && (
+        (
+          github.event_name == 'pull_request' && (
+            contains(fromJSON('["opened","reopened","synchronize","ready_for_review"]'), github.event.action) ||
+            (github.event.action == 'closed' && github.event.pull_request.merged == true)
+          )
+        ) ||
+        (
+          github.event_name == 'pull_request_review' &&
+          inputs.run_on_approval &&
+          github.event.action == 'submitted' &&
+          github.event.review.state == 'approved'
+        ) ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.action == 'created' &&
+          github.event.issue.pull_request &&
+          github.event.comment.user.type != 'Bot' &&
+          !endsWith(github.event.comment.user.login, '[bot]') &&
+          (
+            inputs.command_prefix != '/reeve' ||
+            contains(github.event.comment.body, '/reeve')
+          )
+        )
+      )
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) && format('reeve-preview-{0}-{1}', github.repository_id, github.event.pull_request.number) || format('reeve-command-{0}-{1}', github.repository_id, github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) }}
+    steps:
+      - name: Run Reeve GitOps
+        uses: $/.
+        with:
+          root: ${{ inputs.root }}
+          pulumi-version: ${{ inputs.pulumi_version }}
+          github-token: ${{ secrets.github_token || github.token }}
+          slack-token: ${{ secrets.slack_token }}
+          gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
+          gcp-service-account: ${{ inputs.gcp_service_account }}
+          allowed-associations: ${{ inputs.allowed_associations }}
+          command-prefix: ${{ inputs.command_prefix }}
+          run-on-approval: ${{ inputs.run_on_approval }}
+          log-level: ${{ inputs.log_level }}
+
+  drift:
+    if: inputs.mode == 'drift' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+      id-token: write
+    concurrency:
+      group: reeve-drift-${{ github.repository_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Run Reeve drift detection
+        uses: $/.
+        with:
+          command: drift run
+          root: ${{ inputs.root }}
+          pulumi-version: ${{ inputs.pulumi_version }}
+          github-token: ${{ secrets.github_token || github.token }}
+          slack-token: ${{ secrets.slack_token }}
+          gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
+          gcp-service-account: ${{ inputs.gcp_service_account }}
+          log-level: ${{ inputs.log_level }}

@@ -142,10 +142,10 @@ name: reeve
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review, closed]
   issue_comment:
     types: [created]
-  # Only add pull_request_review if you set run-on-approval: "true" below -
+  # Only add pull_request_review if you set run_on_approval: true below -
   # otherwise the action skips review events, so subscribing to them just
   # burns runner minutes.
   # pull_request_review:
@@ -153,32 +153,21 @@ on:
 
 permissions:
   contents: read
+  checks: read
   pull-requests: write
   issues: write
   id-token: write
 
-# Coalesce runs per PR. Cancelling an in-flight preview is safe and saves CI:
-# previews never take apply locks (locks are acquired only during apply), so
-# a cancelled preview releases nothing that matters - the next push's preview
-# supersedes it. Applies are different: an apply holds per-stack locks that
-# are released by the run itself, so cancelling one mid-run is dangerous.
-# Hence two groups: pull_request runs (previews) coalesce and cancel each
-# other; comment-dispatched runs (which include /reeve apply) get their own
-# group and are never cancelled - not even by a push that lands mid-apply.
-concurrency:
-  group: reeve-${{ github.event_name == 'pull_request' && 'preview' || 'comment' }}-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   reeve:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: reeveops/reeve@master
-        with:
-          pulumi-version: latest
-          # slack-token: ${{ secrets.SLACK_BOT_TOKEN }}   # optional: enables Slack notifications
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: gitops
+      pulumi_version: latest
 ```
+
+Pin the workflow call to a reviewed full commit SHA.
+The shared workflow owns routing, checkout, caching, tool setup, timeout, and safe preview concurrency.
 
 That's it. The action auto-detects the command from the event:
 

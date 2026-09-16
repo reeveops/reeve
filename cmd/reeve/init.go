@@ -276,25 +276,21 @@ Next steps:
        name: reeve
        on:
          pull_request:
-           types: [opened, synchronize, reopened, ready_for_review]
+           types: [opened, synchronize, reopened, ready_for_review, closed]
          issue_comment:
            types: [created]
        permissions:
          contents: read
+         checks: read
          pull-requests: write
          issues: write
          id-token: write
-       concurrency:
-         group: reeve-${{ github.event.pull_request.number || github.event.issue.number }}
-         cancel-in-progress: false
        jobs:
          reeve:
-           runs-on: ubuntu-latest
-           steps:
-             - uses: actions/checkout@v4
-             - uses: reeveops/reeve@master
-               with:
-                 pulumi-version: latest
+           uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+           with:
+             mode: gitops
+             pulumi_version: latest
 
 See docs/getting-started.md for the full walk-through.
 `)

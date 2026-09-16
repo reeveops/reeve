@@ -182,16 +182,13 @@ runs:
       shell: bash
       run: echo "$RUNNER_TEMP/reeve-bin" >> "$GITHUB_PATH"
 
-    - name: Checkout PR HEAD
-      # Only check out a PR head when the event is actually about a PR. A
-      # comment on a plain (non-PR) issue has issue.number set but no
-      # refs/pull/<n>/head, so keying on issue.number made the job fail red.
-      # issue.pull_request is present only when the issue is a PR.
-      if: ${{ steps.reeve-dispatch.outputs.run == 'true' && (github.event.pull_request.number || github.event.issue.pull_request) }}
+    - name: Checkout workload
+      if: steps.reeve-dispatch.outputs.run == 'true'
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
-        ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
+        ref: ${{ (github.event.pull_request.number || github.event.issue.pull_request) && format('refs/pull/{0}/head', github.event.pull_request.number || github.event.issue.number) || '' }}
         fetch-depth: 1
+        persist-credentials: false
 
     - name: Authenticate to GCP
       if: ${{ steps.reeve-dispatch.outputs.run == 'true' && inputs.gcp-workload-identity-provider != '' }}
