@@ -7,12 +7,15 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/reeveops/reeve/internal/auth"
 	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/approvals"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/core/summary"
 	"github.com/reeveops/reeve/internal/iac"
@@ -24,6 +27,46 @@ type fakeEngine struct {
 	enum       []discovery.Stack
 	results    map[string]iac.PreviewResult
 	enumerated *bool
+}
+
+type blockingPreviewEngine struct {
+	mu           sync.Mutex
+	active       int
+	maxActive    int
+	activeByPath map[string]int
+	pathOverlap  bool
+	started      chan discovery.Stack
+	release      chan struct{}
+}
+
+func (e *blockingPreviewEngine) Name() string                   { return "blocking" }
+func (e *blockingPreviewEngine) Capabilities() iac.Capabilities { return iac.Capabilities{} }
+func (e *blockingPreviewEngine) EnumerateStacks(context.Context, string) ([]discovery.Stack, error) {
+	return nil, nil
+}
+func (e *blockingPreviewEngine) Preview(ctx context.Context, stack discovery.Stack, _ iac.PreviewOpts) (iac.PreviewResult, error) {
+	e.mu.Lock()
+	e.active++
+	if e.active > e.maxActive {
+		e.maxActive = e.active
+	}
+	e.activeByPath[stack.Path]++
+	if e.activeByPath[stack.Path] > 1 {
+		e.pathOverlap = true
+	}
+	e.mu.Unlock()
+
+	e.started <- stack
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+	}
+
+	e.mu.Lock()
+	e.active--
+	e.activeByPath[stack.Path]--
+	e.mu.Unlock()
+	return iac.PreviewResult{Counts: summary.Counts{Add: 1}}, nil
 }
 
 func (f *fakeEngine) Name() string                   { return "fake" }
@@ -123,6 +166,100 @@ func TestPreviewEndToEnd(t *testing.T) {
 	}
 	if storeOpens != 1 {
 		t.Fatalf("blob store opened %d times, want once", storeOpens)
+	}
+}
+
+func TestPreviewConcurrencyBoundAndProjectIsolation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	engine := &blockingPreviewEngine{
+		activeByPath: map[string]int{},
+		started:      make(chan discovery.Stack, 4),
+		release:      make(chan struct{}),
+	}
+	t.Cleanup(func() { close(engine.release) })
+	targets := []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"},
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+		{Project: "worker", Path: "projects/worker", Name: "prod", Env: "prod"},
+		{Project: "web", Path: "projects/web", Name: "prod", Env: "prod"},
+	}
+	in := PreviewInput{
+		Engine: engine,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Execution: schemas.Execution{MaxParallelStacks: 2},
+		}},
+	}
+	done := make(chan []summary.StackSummary, 1)
+	go func() {
+		done <- runPreviewTargets(ctx, in, nil, targets, "run-1", nil, approvals.Config{})
+	}()
+
+	nextStarted := func() discovery.Stack {
+		t.Helper()
+		select {
+		case stack := <-engine.started:
+			return stack
+		case <-ctx.Done():
+			t.Fatalf("preview did not start before deadline: %v", ctx.Err())
+			return discovery.Stack{}
+		}
+	}
+	first := nextStarted()
+	second := nextStarted()
+	if first.Path == second.Path {
+		t.Fatalf("first concurrent previews share path %q", first.Path)
+	}
+	select {
+	case third := <-engine.started:
+		t.Fatalf("third preview started above limit: %s", third.Ref())
+	default:
+	}
+
+	engine.release <- struct{}{}
+	engine.release <- struct{}{}
+	nextStarted()
+	nextStarted()
+	engine.release <- struct{}{}
+	engine.release <- struct{}{}
+	summaries := <-done
+
+	engine.mu.Lock()
+	maxActive, pathOverlap := engine.maxActive, engine.pathOverlap
+	engine.mu.Unlock()
+	if maxActive != 2 {
+		t.Fatalf("maximum concurrent previews = %d, want 2", maxActive)
+	}
+	if pathOverlap {
+		t.Fatal("stacks sharing one project directory overlapped")
+	}
+	for i, stack := range targets {
+		if summaries[i].Ref() != stack.Ref() {
+			t.Fatalf("summary %d = %q, want %q", i, summaries[i].Ref(), stack.Ref())
+		}
+	}
+}
+
+func TestPreviewParallelismResolution(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  int
+		config int
+		want   int
+	}{
+		{name: "default", want: 1},
+		{name: "config", config: 3, want: 3},
+		{name: "override", input: 2, config: 3, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := PreviewInput{MaxParallelStacks: tt.input, Config: &schemas.Engine{Engine: schemas.EngineBody{
+				Execution: schemas.Execution{MaxParallelStacks: tt.config},
+			}}}
+			if got := previewParallelism(in); got != tt.want {
+				t.Fatalf("previewParallelism = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

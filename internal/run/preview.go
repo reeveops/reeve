@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/reeveops/reeve/internal/auth"
@@ -108,6 +110,9 @@ type PreviewInput struct {
 	// that clickops may have invalidated. Off by default: a refresh costs a
 	// full provider read per stack on every push.
 	Refresh bool
+	// MaxParallelStacks overrides engine.execution.max_parallel_stacks when
+	// positive. Zero uses the config value, which defaults to one.
+	MaxParallelStacks int
 }
 
 // PreviewOutput bundles the artifacts from a preview run.
@@ -314,20 +319,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}
 
 	appCfg := toApprovalsConfig(in.Shared)
-	summaries := make([]summary.StackSummary, 0, len(target))
-	for i, s := range target {
-		// Stacks preview sequentially and an engine call can take minutes, so
-		// each one brackets itself: without this a multi-stack preview is a
-		// single silent block with no way to tell which stack is slow.
-		slog.Info("preview stack starting", "stack", s.Ref(), "n", i+1, "of", len(target))
-		stackStart := time.Now()
-		ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv)
-		rules := approvals.Resolve(appCfg, s.Ref())
-		ss.RequiredApprovers = rules.Approvers
-		summaries = append(summaries, ss)
-		slog.Info("preview stack finished", "stack", s.Ref(), "status", string(ss.Status),
-			"sec", int(time.Since(stackStart).Seconds()))
-	}
+	summaries := runPreviewTargets(ctx, in, otelProvider, target, runID, stateEnv, appCfg)
 
 	sort := "status_grouped"
 	if in.Shared != nil && in.Shared.Comments.Sort != "" {
@@ -448,6 +440,78 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 			len(failedRefs), len(summaries), strings.Join(failedRefs, ", "))
 	}
 	return out, nil
+}
+
+type previewTarget struct {
+	index int
+	stack discovery.Stack
+}
+
+// runPreviewTargets previews independent project directories concurrently.
+// Stacks sharing a directory stay serial because engine working data and
+// workspace selection are scoped to that directory.
+func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, target []discovery.Stack, runID string, stateEnv map[string]string, appCfg approvals.Config) []summary.StackSummary {
+	if len(target) == 0 {
+		return nil
+	}
+	groups := make([][]previewTarget, 0, len(target))
+	groupByPath := make(map[string]int, len(target))
+	for i, stack := range target {
+		path := filepath.Clean(absJoin(in.RepoRoot, stack.Path))
+		group, ok := groupByPath[path]
+		if !ok {
+			group = len(groups)
+			groupByPath[path] = group
+			groups = append(groups, nil)
+		}
+		groups[group] = append(groups[group], previewTarget{index: i, stack: stack})
+	}
+
+	parallel := previewParallelism(in)
+	if parallel > len(groups) {
+		parallel = len(groups)
+	}
+	slog.Info("preview execution starting", "stacks", len(target), "project_groups", len(groups), "parallel", parallel)
+
+	summaries := make([]summary.StackSummary, len(target))
+	work := make(chan []previewTarget)
+	var workers sync.WaitGroup
+	for range parallel {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for group := range work {
+				for _, item := range group {
+					s := item.stack
+					slog.Info("preview stack starting", "stack", s.Ref(), "n", item.index+1, "of", len(target))
+					stackStart := time.Now()
+					ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv)
+					rules := approvals.Resolve(appCfg, s.Ref())
+					ss.RequiredApprovers = rules.Approvers
+					summaries[item.index] = ss
+					slog.Info("preview stack finished", "stack", s.Ref(), "status", string(ss.Status),
+						"sec", int(time.Since(stackStart).Seconds()))
+				}
+			}
+		}()
+	}
+	for _, group := range groups {
+		work <- group
+	}
+	close(work)
+	workers.Wait()
+	return summaries
+}
+
+func previewParallelism(in PreviewInput) int {
+	parallel := in.MaxParallelStacks
+	if parallel == 0 && in.Config != nil {
+		parallel = in.Config.Engine.Execution.MaxParallelStacks
+	}
+	if parallel < 1 {
+		return 1
+	}
+	return parallel
 }
 
 func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string) summary.StackSummary {

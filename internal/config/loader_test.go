@@ -191,6 +191,27 @@ apply:
 	}
 }
 
+func TestNegativePreviewParallelismRejected(t *testing.T) {
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": minimalShared(),
+		"pulumi.yaml": `version: 1
+config_type: engine
+engine:
+  type: pulumi
+  execution:
+    max_parallel_stacks: -1
+`,
+	})
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "max_parallel_stacks") {
+		t.Fatalf("negative max_parallel_stacks must be rejected, got %v", err)
+	}
+}
+
 func TestDuplicateEngineTypeRejected(t *testing.T) {
 	root := writeReeve(t, map[string]string{
 		"shared.yaml":  minimalShared(),

@@ -74,6 +74,7 @@ func addPreviewFlags(cmd *cobra.Command) {
 	cmd.Flags().String("repo", "", "owner/repo (default: $GITHUB_REPOSITORY)")
 	cmd.Flags().String("token", "", "GitHub token (default: $GITHUB_TOKEN)")
 	cmd.Flags().String("root", "", "Repo root (default: cwd)")
+	cmd.Flags().Int("max-parallel-stacks", 0, "Maximum independent project previews to run at once (default: engine config, then 1)")
 	cmd.Flags().Bool("force", false, "Re-run even if this commit was already applied (ignore the applied-state guard)")
 }
 
@@ -85,6 +86,10 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	localAuth, _ := cmd.Flags().GetStringSlice("local-auth")
 	if len(localAuth) > 0 && !local {
 		return fmt.Errorf("--local-auth only applies to --local runs")
+	}
+	maxParallel := flagInt(cmd, "max-parallel-stacks")
+	if maxParallel < 0 {
+		return fmt.Errorf("--max-parallel-stacks must be zero or positive")
 	}
 	pr := flagInt(cmd, "pr")
 	sha := flagStringOrEnv(cmd, "sha", "GITHUB_SHA")
@@ -139,6 +144,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		Force:              flagBool(cmd, "force"),
 		Refresh:            flagBool(cmd, "refresh"),
 		PlanRequested:      flagBool(cmd, "plan-requested"),
+		MaxParallelStacks:  maxParallel,
 	}
 
 	if !local {

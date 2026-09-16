@@ -25,7 +25,12 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 
 ## Requirements
 
-- Preview runs in parallel across stacks; apply serializes per-stack via locks.
+- Preview runs independent project directories concurrently up to
+  `engine.execution.max_parallel_stacks`; zero or omission defaults to one.
+- A positive `--max-parallel-stacks` value overrides the config for one run.
+- Stacks sharing one project directory run serially because their engine
+  working data and workspace selection share that directory.
+- Preview results, failure lists, and manifests retain discovery order.
 - Preview artifacts persist under `runs/pr-{n}/{run-id}/` for the PR lifetime.
 - Apply does **not** replay a plan saved by the earlier preview. Preview
   freshness is a gate, not plan reuse: apply requires a successful preview on
@@ -43,6 +48,20 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   the CI runner checked out.
 - Preview MUST reuse one PR metadata snapshot for head-SHA resolution and
   notification title and author fields within an invocation.
+
+#### Scenario: Independent projects overlap
+
+- **GIVEN** at least two affected stacks in different project directories
+- **AND** the preview parallelism limit is at least two
+- **WHEN** preview executes
+- **THEN** up to the configured number of engine previews run concurrently
+
+#### Scenario: Workspaces sharing a directory stay serial
+
+- **GIVEN** affected stacks share one project directory
+- **WHEN** preview executes with a parallelism limit greater than one
+- **THEN** engine previews for those stacks do not overlap
+- **AND** their results remain in discovery order
 
 #### Scenario: Preview publishes completion metadata
 

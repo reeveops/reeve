@@ -526,7 +526,7 @@ engine:
         paths: ["shared/types/**", "protos/**"]
 
   execution:
-    max_parallel_stacks: 4
+    max_parallel_stacks: 4           # default 1; same-directory stacks stay serial
     preview_timeout: 10m
     apply_timeout: 30m
 
@@ -536,6 +536,11 @@ engine:
       on_fail: block               # block | warn
       required: true
 ```
+
+`max_parallel_stacks` bounds concurrent preview processes. Reeve preserves
+result order and serializes stacks that share one project directory.
+
+`reeve run preview --max-parallel-stacks N` overrides the config for one run.
 
 `engine.type` selects a registered engine adapter — the binary compiles in a
 default set (`pulumi`, `terraform`, `tofu`), and `reeve lint` fails when the
