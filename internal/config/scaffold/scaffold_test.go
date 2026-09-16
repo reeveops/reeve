@@ -106,6 +106,8 @@ func TestRenderGitHubWorkflow(t *testing.T) {
 			}
 			for _, want := range []string{
 				"uses: reeveops/reeve/.github/workflows/reeve.yml@" + ref,
+				"merge_group:",
+				"types: [checks_requested]",
 				"mode: gitops",
 				tc.want,
 				"checks: read",

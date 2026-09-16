@@ -46,6 +46,12 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 - WHEN a comment does not begin with that prefix and a following space
 - THEN the reusable workflow job MUST skip before a runner is assigned.
 
+#### Scenario: Merge queue required check
+
+- GIVEN a consumer configures `reeve / Reeve` as a required check
+- WHEN GitHub requests checks for a merge group
+- THEN the generated caller MUST publish the stable skipped result without credentialed workload execution.
+
 #### Scenario: Quoted command
 
 - GIVEN an ordinary comment contains `/reeve` after prose or quote markup

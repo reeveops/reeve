@@ -149,6 +149,8 @@ name: reeve
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  merge_group:
+    types: [checks_requested]
   issue_comment:
     types: [created]
   # Only add pull_request_review if you set run_on_approval: true below -

@@ -370,6 +370,8 @@ Next steps:
        on:
          pull_request:
            types: [opened, synchronize, reopened, ready_for_review]
+         merge_group:
+           types: [checks_requested]
          issue_comment:
            types: [created]
        permissions:

@@ -99,6 +99,8 @@ func RenderGitHubWorkflow(engine, ref string) ([]byte, error) {
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  merge_group:
+    types: [checks_requested]
   issue_comment:
     types: [created]
 

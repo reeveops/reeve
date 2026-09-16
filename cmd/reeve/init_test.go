@@ -111,6 +111,8 @@ func TestInitWritesPinnedWorkflowForReleaseBuild(t *testing.T) {
 	}
 	for _, want := range []string{
 		"reeve.yml@0123456789abcdef0123456789abcdef01234567",
+		"merge_group:",
+		"types: [checks_requested]",
 		"mode: gitops",
 		"pulumi_version: latest",
 	} {
