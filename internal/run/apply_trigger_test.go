@@ -191,6 +191,23 @@ func TestApplyTriggerMergeStillEnforcesApprovals(t *testing.T) {
 	}
 }
 
+func TestApplyRunIdentityUsesAuthoritativeHeadAndAttempt(t *testing.T) {
+	engine, fv := trigFixture()
+	store, _ := filesystem.New(t.TempDir())
+	in := trigApplyInput(t, engine, fv, "comment", "comment", store)
+	in.CommitSHA = strings.Repeat("f", 40)
+	in.RunAttempt = 2
+
+	out, err := Apply(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "apply-3-2-" + bgSHA[:7]
+	if out.RunID != want {
+		t.Fatalf("run ID = %q, want %q", out.RunID, want)
+	}
+}
+
 func TestApplyBlockedGateDoesNotRunPolicyHook(t *testing.T) {
 	engine, fv := trigFixture()
 	fv.approvalsList = nil

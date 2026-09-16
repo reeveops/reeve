@@ -40,6 +40,7 @@ type RefreshInput struct {
 	PRNumber     int
 	CommitSHA    string
 	RunNumber    int
+	RunAttempt   int
 	CIRunURL     string
 	RepoRoot     string
 	RepoPath     string // RepoRoot relative to the VCS repository root.
@@ -94,7 +95,7 @@ type RefreshOutput struct {
 // lock and the run is audited.
 func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	start := time.Now()
-	runID := fmt.Sprintf("refresh-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	runID := runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
 
 	if !in.Engine.Capabilities().SupportsRefresh {
 		return nil, fmt.Errorf("engine %s does not support refresh", in.Engine.Name())
@@ -108,7 +109,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		}
 		if pr.HeadSHA != "" {
 			in.CommitSHA = pr.HeadSHA
-			runID = fmt.Sprintf("refresh-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+			runID = runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
 		}
 	}
 	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)

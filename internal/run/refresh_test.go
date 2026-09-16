@@ -96,7 +96,7 @@ func TestRefreshUsesOneAuthoritativePRSnapshot(t *testing.T) {
 		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
 	}}
 	out, err := Refresh(t.Context(), RefreshInput{
-		PRNumber: 7, CommitSHA: strings.Repeat("f", 40), RunNumber: 12,
+		PRNumber: 7, CommitSHA: strings.Repeat("f", 40), RunNumber: 12, RunAttempt: 2,
 		RepoRoot: "/repo", Engine: engine, VCS: vcsClient, All: true, DryRun: true,
 		Config: &schemas.Engine{Engine: schemas.EngineBody{
 			Type: "tofu", Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"prod"}}},
@@ -109,7 +109,8 @@ func TestRefreshUsesOneAuthoritativePRSnapshot(t *testing.T) {
 	if vcsClient.getPRCalls != 1 {
 		t.Fatalf("PR metadata reads = %d, want 1", vcsClient.getPRCalls)
 	}
-	if !strings.HasSuffix(out.RunID, headSHA[:7]) {
-		t.Fatalf("run ID %q does not use authoritative PR head %s", out.RunID, headSHA)
+	want := "refresh-12-2-" + headSHA[:7]
+	if out.RunID != want {
+		t.Fatalf("run ID = %q, want %q", out.RunID, want)
 	}
 }
