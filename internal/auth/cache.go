@@ -161,6 +161,23 @@ func cloneCredential(credential *Credential) *Credential {
 	}
 }
 
+// InvalidateAll forces later requests to acquire new provider generations.
+// Existing consumers retain their isolated environment maps until they stop.
+func (c *CredentialCache) InvalidateAll() error {
+	if c == nil {
+		return errors.New("credential cache is nil")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return ErrCredentialCacheClosed
+	}
+	for _, entry := range c.entries {
+		entry.credential = nil
+	}
+	return nil
+}
+
 // Close cleans every credential generation acquired by the cache exactly once.
 func (c *CredentialCache) Close() error {
 	c.closeOnce.Do(func() {

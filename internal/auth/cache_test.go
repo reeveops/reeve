@@ -221,3 +221,29 @@ func TestCredentialCacheRequiresRegistry(t *testing.T) {
 		t.Fatal("acquire without registry returned nil error")
 	}
 }
+
+func TestCredentialCacheInvalidationAcquiresNewGeneration(t *testing.T) {
+	provider := &cacheProvider{name: "shared"}
+	cache := cacheWithProvider(t, provider)
+	t.Cleanup(func() { _ = cache.Close() })
+	first, _, err := cache.AcquireAll(t.Context(), []string{"shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.InvalidateAll(); err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := cache.AcquireAll(t.Context(), []string{"shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first["GENERATION"] != "1" || second["GENERATION"] != "2" {
+		t.Fatalf("credential generations = %q then %q, want 1 then 2", first["GENERATION"], second["GENERATION"])
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if provider.cleanups.Load() != 2 {
+		t.Fatalf("credential generation cleanups = %d, want 2", provider.cleanups.Load())
+	}
+}

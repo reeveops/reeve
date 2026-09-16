@@ -23,9 +23,12 @@ type LocalAuth struct {
 	Providers []string
 }
 
-type credentialAcquirer interface {
+// CredentialAcquirer resolves one or more named providers.
+type CredentialAcquirer interface {
 	AcquireAll(ctx context.Context, names []string) (map[string]string, []*auth.Credential, error)
 }
+
+type credentialAcquirer = CredentialAcquirer
 
 // ResolveAuthEnv returns the merged env var map for a single stack + mode
 // plus a cleanup func the caller defers. If cfg is nil or has no bindings,
@@ -37,6 +40,11 @@ type credentialAcquirer interface {
 // already shipped.
 func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Registry, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
 	return resolveAuthEnv(ctx, cfg, registry, stackRef, mode, local)
+}
+
+// ResolveAuthEnvWith resolves stack auth through an invocation-scoped source.
+func ResolveAuthEnvWith(ctx context.Context, cfg *schemas.Auth, acquirer CredentialAcquirer, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
+	return resolveAuthEnv(ctx, cfg, acquirer, stackRef, mode, local)
 }
 
 func resolveAuthEnv(ctx context.Context, cfg *schemas.Auth, acquirer credentialAcquirer, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
@@ -78,6 +86,11 @@ func resolveAuthEnv(ctx context.Context, cfg *schemas.Auth, acquirer credentialA
 // ResolveStateAuthEnv acquires the provider selected by engine.state.
 func ResolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, registry *auth.Registry) (map[string]string, CleanupFunc, error) {
 	return resolveStateAuthEnv(ctx, engine, registry)
+}
+
+// ResolveStateAuthEnvWith resolves state auth through an invocation-scoped source.
+func ResolveStateAuthEnvWith(ctx context.Context, engine *schemas.Engine, acquirer CredentialAcquirer) (map[string]string, CleanupFunc, error) {
+	return resolveStateAuthEnv(ctx, engine, acquirer)
 }
 
 func resolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, acquirer credentialAcquirer) (map[string]string, CleanupFunc, error) {

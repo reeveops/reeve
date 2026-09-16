@@ -42,8 +42,8 @@ Rules:
 
 ## Invocation reuse
 
-Preview, apply, and refresh MUST reuse a credential by provider name within one
-command invocation. Provider configuration fixes account, role, audience, and scope.
+Preview, apply, refresh, and drift MUST reuse a credential by provider name
+within one command. Provider configuration fixes account, role, audience, and scope.
 
 Concurrent requests for one provider MUST collapse into one acquisition. Failed
 acquisitions are not cached, and later requests may retry.
@@ -72,6 +72,20 @@ Every acquired generation remains owned until command cleanup runs exactly once.
 - **WHEN** refresh resolves credentials for each stack
 - **THEN** the provider is acquired once during the command
 - **AND** the provider cleanup runs once after every refresh finishes
+
+#### Scenario: Concurrent drift checks share one federation exchange
+
+- **GIVEN** state auth and concurrent drift stacks resolve the same provider
+- **WHEN** drift resolves credentials for each stack
+- **THEN** the provider is acquired once during the command
+- **AND** the provider cleanup runs once after every drift check finishes
+
+#### Scenario: Drift rejects an expired cached generation
+
+- **GIVEN** a drift engine rejects its current credential as expired
+- **WHEN** the configured retry policy permits a rebind
+- **THEN** the cached generations are invalidated before auth resolves again
+- **AND** the replacement generation is owned until command cleanup
 
 #### Scenario: A near-expiry generation is replaced
 
