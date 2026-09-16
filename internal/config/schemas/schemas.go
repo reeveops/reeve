@@ -298,7 +298,7 @@ type EngineState struct {
 type EngineSecretsProvider struct {
 	Type       string `yaml:"type"` // awskms | gcpkms | azurekeyvault | hashivault | passphrase
 	Key        string `yaml:"key,omitempty"`
-	Passphrase string `yaml:"passphrase,omitempty" expand:"env"`
+	Passphrase string `yaml:"passphrase,omitempty"`
 }
 
 // PolicyHookYAML is one entry in engine.policy_hooks.

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -115,6 +116,7 @@ func TestCredentialCacheCollapsesConcurrentAcquisition(t *testing.T) {
 	if provider.acquires.Load() != 1 {
 		t.Fatalf("provider acquired %d times before release", provider.acquires.Load())
 	}
+	waitForCredentialWaiters(t, cache, "shared", callers-1)
 	close(provider.release)
 	wg.Wait()
 	close(errs)
@@ -125,6 +127,72 @@ func TestCredentialCacheCollapsesConcurrentAcquisition(t *testing.T) {
 	}
 	if provider.acquires.Load() != 1 {
 		t.Fatalf("concurrent provider acquisitions = %d, want 1", provider.acquires.Load())
+	}
+}
+
+func TestCredentialCacheSharesConcurrentFailure(t *testing.T) {
+	providerErr := errors.New("temporary outage")
+	provider := &cacheProvider{
+		name: "shared", started: make(chan struct{}, 1), release: make(chan struct{}), err: providerErr,
+	}
+	cache := cacheWithProvider(t, provider)
+	t.Cleanup(func() { _ = cache.Close() })
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := cache.AcquireAll(t.Context(), []string{"shared"})
+			errs <- err
+		}()
+	}
+	<-provider.started
+	if provider.acquires.Load() != 1 {
+		t.Fatalf("provider acquired %d times before release", provider.acquires.Load())
+	}
+	waitForCredentialWaiters(t, cache, "shared", callers-1)
+	close(provider.release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if !errors.Is(err, providerErr) {
+			t.Fatalf("concurrent acquisition error = %v, want %v", err, providerErr)
+		}
+	}
+	if provider.acquires.Load() != 1 {
+		t.Fatalf("failed concurrent provider acquisitions = %d, want 1", provider.acquires.Load())
+	}
+
+	provider.err = nil
+	if _, _, err := cache.AcquireAll(t.Context(), []string{"shared"}); err != nil {
+		t.Fatalf("later retry after shared failure: %v", err)
+	}
+	if provider.acquires.Load() != 2 {
+		t.Fatalf("provider acquisitions after retry = %d, want 2", provider.acquires.Load())
+	}
+}
+
+func waitForCredentialWaiters(t *testing.T, cache *CredentialCache, name string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		cache.mu.Lock()
+		entry := cache.entries[name]
+		joined := 0
+		if entry != nil && entry.attempt != nil {
+			joined = entry.attempt.joined
+		}
+		cache.mu.Unlock()
+		if joined == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("concurrent waiters joined = %d, want %d", joined, want)
+		}
+		runtime.Gosched()
 	}
 }
 

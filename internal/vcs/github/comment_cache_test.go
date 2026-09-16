@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	gh "github.com/google/go-github/v66/github"
 )
 
 func TestUpsertCommentReusesOneSnapshotAcrossMarkers(t *testing.T) {
@@ -57,12 +59,111 @@ func TestUpsertCommentReusesOneSnapshotAcrossMarkers(t *testing.T) {
 			t.Fatalf("UpsertComment(%s): %v", tc.marker, err)
 		}
 	}
-	comments, err := c.listIssueComments(context.Background(), 12)
+	c.commentMu.Lock()
+	comments, err := c.issueCommentsLocked(context.Background(), 12, false)
+	c.commentMu.Unlock()
 	if err != nil || len(comments) != 2 {
 		t.Fatalf("listIssueComments = (%d comments, %v), want (2, nil)", len(comments), err)
 	}
 	if lists != 1 || edits != 3 {
 		t.Fatalf("list requests = %d, edits = %d; want 1 and 3", lists, edits)
+	}
+}
+
+func TestCommentApprovalReadRefreshesSnapshot(t *testing.T) {
+	var lists int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		lists++
+		fmt.Fprintf(w, `[{"id":%d,"body":"version-%d"}]`, lists, lists)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newFakeClient(t, srv)
+
+	c.commentMu.Lock()
+	first, err := c.issueCommentsLocked(context.Background(), 12, false)
+	c.commentMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := c.listIssueComments(context.Background(), 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lists != 2 || first[0].GetBody() != "version-1" || second[0].GetBody() != "version-2" {
+		t.Fatalf("lists=%d first=%q second=%q, want fresh second snapshot", lists, first[0].GetBody(), second[0].GetBody())
+	}
+}
+
+func TestPostCommentUpdatesExistingSnapshot(t *testing.T) {
+	var lists, creates, edits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			lists++
+			fmt.Fprint(w, `[]`)
+		case http.MethodPost:
+			creates++
+			fmt.Fprint(w, `{"id":9,"body":"<!-- marker:posted --> created"}`)
+		default:
+			t.Fatalf("method = %s, want GET or POST", r.Method)
+		}
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/9", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Fatalf("method = %s, want PATCH", r.Method)
+		}
+		edits++
+		fmt.Fprint(w, `{"id":9,"body":"<!-- marker:posted --> updated"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newFakeClient(t, srv)
+
+	c.commentMu.Lock()
+	_, err := c.issueCommentsLocked(context.Background(), 12, false)
+	c.commentMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PostComment(context.Background(), 12, "<!-- marker:posted --> created"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UpsertComment(context.Background(), 12, "<!-- marker:posted --> updated", "<!-- marker:posted -->"); err != nil {
+		t.Fatal(err)
+	}
+	if lists != 1 || creates != 1 || edits != 1 {
+		t.Fatalf("list requests = %d, creates = %d, edits = %d; want 1, 1, 1", lists, creates, edits)
+	}
+}
+
+func TestIssueCommentSnapshotDoesNotAliasCacheMutations(t *testing.T) {
+	c := &Client{commentCache: map[int][]*gh.IssueComment{
+		12: {
+			{ID: gh.Int64(1), Body: gh.String("old")},
+			{ID: gh.Int64(2), Body: gh.String("keep")},
+		},
+	}}
+	c.commentMu.Lock()
+	snapshot, err := c.issueCommentsLocked(context.Background(), 12, false)
+	if err != nil {
+		c.commentMu.Unlock()
+		t.Fatal(err)
+	}
+	c.updateCachedCommentLocked(12, 1, "new", nil)
+	c.removeCachedCommentLocked(12, 1)
+	c.commentMu.Unlock()
+
+	if len(snapshot) != 2 || snapshot[0].GetID() != 1 || snapshot[0].GetBody() != "old" || snapshot[1].GetID() != 2 {
+		t.Fatalf("retained snapshot changed with cache: %#v", snapshot)
+	}
+	if got := c.commentCache[12]; len(got) != 1 || got[0].GetID() != 2 {
+		t.Fatalf("cache mutation did not apply independently: %#v", got)
 	}
 }
 

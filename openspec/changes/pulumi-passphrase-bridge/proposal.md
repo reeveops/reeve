@@ -2,15 +2,15 @@
 
 ## Why
 
-The shared workflow accepts a Pulumi passphrase, but the child environment
-boundary currently removes it before Pulumi reads stack state.
+Pulumi passphrase configuration does not reach the isolated child environment.
+State auth providers also need a defined path for this value.
 
 ## What
 
 - Pass the standard Pulumi passphrase variable only when engine config selects
   the passphrase secrets provider.
-- Allow the configured passphrase field to use the designated environment
-  reference syntax.
+- Accept the value from a configured literal or selected state auth provider.
+- Keep ambient host values behind the acknowledged auth-provider boundary.
 - Keep the passphrase inside existing redaction and child environment handling.
 
 ## Scope

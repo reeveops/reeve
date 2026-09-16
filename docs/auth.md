@@ -89,8 +89,9 @@ The constructed environment contains:
 - `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` from an isolated CI home or the existing local environment.
 - Credentials selected by auth bindings for the current stack and mode.
 - Credentials selected by `engine.state.auth_provider` for backend access.
-- `PULUMI_CONFIG_PASSPHRASE` when `engine.state.secrets_provider.type` is `passphrase` and a value exists.
-- The value comes from `engine.state.secrets_provider.passphrase`, or from the controller `PULUMI_CONFIG_PASSPHRASE` when that key is empty.
+- `PULUMI_CONFIG_PASSPHRASE` when `engine.state.secrets_provider.type` is `passphrase` and a configured value exists.
+- A state auth provider may supply the variable through a secret manager or acknowledged `env_passthrough` mapping.
+- Reeve never copies the controller's ambient passphrase or expands an environment reference from engine config.
 - `TF_IN_AUTOMATION=1` for Terraform and OpenTofu commands.
 - `PULUMI_EXPERIMENTAL=true` for Pulumi saved-plan commands.
 
@@ -104,6 +105,7 @@ Stack credentials override state credentials when both explicitly provide the sa
 
 - One command reuses each provider credential across state access and every matching stack.
 - Concurrent requests for one provider share one acquisition.
+- Concurrent waiters share one acquisition failure; a later request may retry.
 - A credential expiring within 30 seconds is replaced before a new consumer receives it.
 - Drift invalidates the cached generation before rebinding after an expired-credential failure.
 - Every acquired generation is cleaned once when the command ends, including replaced and invalidated generations.

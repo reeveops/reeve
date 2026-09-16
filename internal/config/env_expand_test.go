@@ -12,7 +12,6 @@ func TestExpandEnvDesignatedFields(t *testing.T) {
 	t.Setenv("TEST_TOKEN", "resolved-token")
 	t.Setenv("TEST_TENANT", "resolved-tenant")
 	t.Setenv("TEST_APP_ID", "12345")
-	t.Setenv("TEST_PULUMI_PASSPHRASE", "resolved-passphrase")
 
 	c := &Config{
 		Shared: &schemas.Shared{},
@@ -40,13 +39,6 @@ func TestExpandEnvDesignatedFields(t *testing.T) {
 	c.Shared.Bucket.Name = "${env:TEST_BUCKET}" // designated
 	c.Shared.Bucket.Type = "gcs"                // literal, must not change
 	c.Shared.Locking.AdminOverride.Allowed = []string{"${env:TEST_TENANT}", "@literal"}
-	c.Engines = []*schemas.Engine{{Engine: schemas.EngineBody{State: schemas.EngineState{
-		SecretsProvider: schemas.EngineSecretsProvider{
-			Type:       "passphrase",
-			Passphrase: "${env:TEST_PULUMI_PASSPHRASE}",
-		},
-	}}}}
-
 	warnings := c.ExpandEnv()
 	if len(warnings) != 0 {
 		t.Fatalf("designated-only references must not warn: %v", warnings)
@@ -69,9 +61,6 @@ func TestExpandEnvDesignatedFields(t *testing.T) {
 	}
 	if got := c.Auth.Providers["gh"].AppID; got != "12345" {
 		t.Errorf("auth app_id (any-typed) not expanded: %v", got)
-	}
-	if got := c.Engines[0].Engine.State.SecretsProvider.Passphrase; got != "resolved-passphrase" {
-		t.Errorf("Pulumi state passphrase not expanded: %q", got)
 	}
 	wh := c.Notifications.Channels[0]
 	if wh.URL != "https://api.example.com/hook/resolved-token" {
@@ -107,7 +96,13 @@ func TestExpandEnvNonDesignatedStaysLiteral(t *testing.T) {
 	c := &Config{
 		Shared: &schemas.Shared{},
 		Engines: []*schemas.Engine{{Engine: schemas.EngineBody{
-			State: schemas.EngineState{URL: "${env:SUPER_SECRET}"},
+			State: schemas.EngineState{
+				URL: "${env:SUPER_SECRET}",
+				SecretsProvider: schemas.EngineSecretsProvider{
+					Type:       "passphrase",
+					Passphrase: "${env:SUPER_SECRET}",
+				},
+			},
 		}}},
 	}
 	c.Shared.Approvals.Stacks = map[string]schemas.ApprovalRuleYAML{
@@ -123,14 +118,17 @@ func TestExpandEnvNonDesignatedStaysLiteral(t *testing.T) {
 	if got := c.Engines[0].Engine.State.URL; got != "${env:SUPER_SECRET}" {
 		t.Errorf("non-designated engine state url expanded: %q", got)
 	}
+	if got := c.Engines[0].Engine.State.SecretsProvider.Passphrase; got != "${env:SUPER_SECRET}" {
+		t.Errorf("non-designated passphrase expanded: %q", got)
+	}
 	if c.Shared.LogLevel != "${env:SUPER_SECRET}" {
 		t.Errorf("non-designated log_level expanded: %q", c.Shared.LogLevel)
 	}
-	if len(warnings) != 3 {
-		t.Fatalf("want 3 warnings (one per literal ref), got %d: %v", len(warnings), warnings)
+	if len(warnings) != 4 {
+		t.Fatalf("want 4 warnings (one per literal ref), got %d: %v", len(warnings), warnings)
 	}
 	joined := strings.Join(warnings, "\n")
-	for _, path := range []string{"approvals.stacks[prod/*].approvers[0]", "engines[0].engine.state.url", "log_level"} {
+	for _, path := range []string{"approvals.stacks[prod/*].approvers[0]", "engines[0].engine.state.url", "engines[0].engine.state.secrets_provider.passphrase", "log_level"} {
 		if !strings.Contains(joined, path) {
 			t.Errorf("warnings missing field path %q: %v", path, warnings)
 		}

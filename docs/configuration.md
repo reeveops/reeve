@@ -537,8 +537,8 @@ engine:
       required: true
 ```
 
-For a Pulumi passphrase provider, set `type: passphrase` and pass
-`PULUMI_CONFIG_PASSPHRASE` to Reeve through the shared workflow secret.
+For a Pulumi passphrase provider, set `type: passphrase`. Supply the value
+through a configured literal or a state auth provider.
 
 ```yaml
 state:
@@ -549,8 +549,15 @@ state:
 ```
 
 Reeve copies that variable into the isolated engine environment only when the
-passphrase provider is selected. `passphrase: ${env:OTHER_NAME}` selects a
-different host variable explicitly.
+passphrase provider is selected. It never copies an ambient host passphrase or
+expands `${env:...}` from this PR-controlled field.
+
+Use a secret-manager provider for `engine.state.auth_provider` to emit
+`PULUMI_CONFIG_PASSPHRASE`. The flagged `env_passthrough` provider also works
+when its required acknowledgement is present.
+
+Do not commit a real passphrase. Use the state auth provider for non-fixture
+values.
 
 `max_parallel_stacks` bounds concurrent preview processes. Reeve preserves
 result order and serializes stacks that share one project directory.

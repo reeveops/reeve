@@ -75,8 +75,7 @@ engine:
 	}
 }
 
-func TestLoadPulumiPassphraseReference(t *testing.T) {
-	t.Setenv("REEVE_TEST_PULUMI_PASSPHRASE", "resolved-passphrase")
+func TestLoadPulumiPassphraseLiteral(t *testing.T) {
 	root := writeReeve(t, map[string]string{
 		"shared.yaml": `version: 1
 config_type: shared
@@ -90,7 +89,7 @@ engine:
     url: file://./pulumi-state
     secrets_provider:
       type: passphrase
-      passphrase: ${env:REEVE_TEST_PULUMI_PASSPHRASE}
+      passphrase: configured-passphrase
   stacks:
     - project: api
       path: projects/api
@@ -102,8 +101,8 @@ engine:
 		t.Fatalf("Load: %v", err)
 	}
 	provider := cfg.Engines[0].Engine.State.SecretsProvider
-	if provider.Type != "passphrase" || provider.Passphrase != "resolved-passphrase" {
-		t.Fatalf("Pulumi passphrase provider was not resolved: %#v", provider)
+	if provider.Type != "passphrase" || provider.Passphrase != "configured-passphrase" {
+		t.Fatalf("Pulumi passphrase provider was not loaded: %#v", provider)
 	}
 }
 
