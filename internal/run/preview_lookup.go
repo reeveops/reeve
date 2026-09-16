@@ -29,6 +29,81 @@ type PreviewStatus struct {
 	Plan *summary.StackSummary
 }
 
+// PreviewSnapshot is the authoritative preview manifest for one PR and
+// commit, indexed once for all stack-level gates in an invocation.
+type PreviewSnapshot struct {
+	statuses     map[string]PreviewStatus
+	stackCount   int
+	allSucceeded bool
+}
+
+// LoadPreviewSnapshot scans the PR's manifests once and indexes the newest
+// preview for the requested commit.
+func LoadPreviewSnapshot(ctx context.Context, store blob.Store, prNumber int, commitSHA string) PreviewSnapshot {
+	if store == nil || prNumber == 0 {
+		return PreviewSnapshot{}
+	}
+	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
+	if best == nil {
+		slog.Debug("preview lookup: no matching preview manifest for sha", "pr", prNumber, "sha", commitSHA)
+		return PreviewSnapshot{}
+	}
+	slog.Debug("preview lookup: best manifest", "run_id", best.RunID, "created_at", best.CreatedAt, "stack_count", len(best.Stacks))
+
+	createdAt, err := time.Parse(time.RFC3339, best.CreatedAt)
+	if err != nil {
+		createdAt = time.Now()
+	}
+	age := time.Since(createdAt)
+	snapshot := PreviewSnapshot{
+		statuses:     make(map[string]PreviewStatus, len(best.Stacks)),
+		stackCount:   len(best.Stacks),
+		allSucceeded: len(best.Stacks) > 0,
+	}
+	for _, ss := range best.Stacks {
+		status := PreviewStatus{
+			Found:      true,
+			Age:        age,
+			Succeeded:  ss.Status != summary.StatusError,
+			HasChanges: ss.Counts.Total() > 0,
+			RunID:      best.RunID,
+		}
+		if !status.Succeeded {
+			status.ErrorMessage = ss.Error
+			snapshot.allSucceeded = false
+		}
+		plan := ss
+		status.Plan = &plan
+		if _, exists := snapshot.statuses[ss.Ref()]; !exists {
+			snapshot.statuses[ss.Ref()] = status
+		}
+	}
+	return snapshot
+}
+
+// StackStatus returns the selected manifest's result for one stack.
+func (s PreviewSnapshot) StackStatus(stackRef string) PreviewStatus {
+	return s.statuses[stackRef]
+}
+
+// StackRefs returns every stack covered by the selected manifest.
+func (s PreviewSnapshot) StackRefs() (map[string]bool, bool) {
+	if s.stackCount == 0 {
+		return nil, false
+	}
+	refs := make(map[string]bool, len(s.statuses))
+	for ref := range s.statuses {
+		refs[ref] = true
+	}
+	return refs, true
+}
+
+// Succeeded reports whether the selected manifest exists, covers at least one
+// stack, and contains no stack errors.
+func (s PreviewSnapshot) Succeeded() bool {
+	return s.allSucceeded
+}
+
 // PlanSucceededForPR returns true if the most recent preview manifest for the
 // given PR and commit SHA exists and has no stacks in error state.
 //
@@ -39,66 +114,15 @@ type PreviewStatus struct {
 // the scan and had already drifted - it was missing the RunID tie-break for
 // manifests written in the same second.
 func PlanSucceededForPR(ctx context.Context, store blob.Store, prNumber int, commitSHA string) bool {
-	if store == nil || prNumber == 0 {
-		return false
-	}
-	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
-	if best == nil {
-		return false
-	}
-	for _, ss := range best.Stacks {
-		if ss.Status == summary.StatusError {
-			return false
-		}
-	}
-	return len(best.Stacks) > 0
+	return LoadPreviewSnapshot(ctx, store, prNumber, commitSHA).Succeeded()
 }
 
 // FindPreviewForStack scans runs/pr-{n}/ for manifests, picks the most
 // recent one whose commit_sha + op=preview matches, and reports whether
 // the named stack was present and successful there.
 func FindPreviewForStack(ctx context.Context, store blob.Store, prNumber int, commitSHA, stackRef string) (PreviewStatus, error) {
-	if store == nil || prNumber == 0 {
-		return PreviewStatus{}, nil
-	}
-	// Same selection as PreviewedStackRefs, deliberately: if these two
-	// disagreed about which manifest is authoritative, apply could target a
-	// stack from one manifest and then gate it against another.
-	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
-	if best == nil {
-		slog.Debug("preview lookup: no matching preview manifest for sha", "pr", prNumber, "sha", commitSHA)
-		return PreviewStatus{}, nil
-	}
-	slog.Debug("preview lookup: best manifest", "run_id", best.RunID, "created_at", best.CreatedAt, "stack_count", len(best.Stacks))
-
-	createdAt, err := time.Parse(time.RFC3339, best.CreatedAt)
-	if err != nil {
-		createdAt = time.Now()
-	}
-	st := PreviewStatus{
-		Found:     true,
-		Age:       time.Since(createdAt),
-		Succeeded: true,
-		RunID:     best.RunID,
-	}
-	for _, ss := range best.Stacks {
-		if ss.Ref() != stackRef {
-			continue
-		}
-		if ss.Status == summary.StatusError {
-			st.Succeeded = false
-			st.ErrorMessage = ss.Error
-		}
-		if ss.Counts.Total() > 0 {
-			st.HasChanges = true
-		}
-		plan := ss
-		st.Plan = &plan
-		return st, nil
-	}
-	// Manifest exists for this SHA but doesn't cover this stack - treat as
-	// "no fresh preview for this stack".
-	return PreviewStatus{Found: false}, nil
+	snapshot := LoadPreviewSnapshot(ctx, store, prNumber, commitSHA)
+	return snapshot.StackStatus(stackRef), nil
 }
 
 // PreviewedStackRefs returns the set of stack refs the newest preview for
@@ -115,15 +139,7 @@ func PreviewedStackRefs(ctx context.Context, store blob.Store, prNumber int, com
 	if store == nil || prNumber == 0 || commitSHA == "" {
 		return nil, false
 	}
-	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
-	if best == nil || len(best.Stacks) == 0 {
-		return nil, false
-	}
-	refs := make(map[string]bool, len(best.Stacks))
-	for _, ss := range best.Stacks {
-		refs[ss.Ref()] = true
-	}
-	return refs, true
+	return LoadPreviewSnapshot(ctx, store, prNumber, commitSHA).StackRefs()
 }
 
 // newestPreviewManifest returns the most recent preview manifest for the

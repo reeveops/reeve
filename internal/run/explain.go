@@ -173,6 +173,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	preCfg := toPreconditionsConfig(in.Shared)
 	hooksConfigured := len(HooksFromEngine(in.Config)) > 0
 	now := time.Now()
+	previewSnapshot := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, commitSHA)
 
 	// 3. Per stack: rules + lock read + report-only gates.
 	out := render.ExplainInput{CommitSHA: commitSHA, RunURL: in.CIRunURL}
@@ -195,11 +196,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 			freezeName = name
 		}
 
-		prev, lookupErr := FindPreviewForStack(ctx, in.Blob, in.PRNumber, commitSHA, s.Ref())
-		if lookupErr != nil {
-			slog.Warn("explain: preview lookup failed", "stack", s.Ref(), "err", lookupErr)
-			prev = PreviewStatus{}
-		}
+		prev := previewSnapshot.StackStatus(s.Ref())
 
 		// Lock: a plain read. Acquirable means free/expired, or already
 		// held by this PR (a re-run would be refused, but the lock is not

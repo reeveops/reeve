@@ -148,3 +148,37 @@ func TestPlanSucceededAgreesWithNewestManifest(t *testing.T) {
 		t.Fatal("PlanSucceededForPR reported success from a manifest other than the authoritative one")
 	}
 }
+
+type previewListCounter struct {
+	blob.Store
+	lists map[string]int
+}
+
+func (s *previewListCounter) List(ctx context.Context, prefix string) ([]string, error) {
+	s.lists[prefix]++
+	return s.Store.List(ctx, prefix)
+}
+
+func TestPreviewSnapshotScansManifestsOnce(t *testing.T) {
+	ctx := context.Background()
+	base, _ := filesystem.New(t.TempDir())
+	const sha = "abc1234xyz"
+	putManifest(t, base, 42, "run-1", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+		{Project: "worker", Stack: "prod", Status: summary.StatusPlanned},
+	})
+	store := &previewListCounter{Store: base, lists: map[string]int{}}
+
+	snapshot := LoadPreviewSnapshot(ctx, store, 42, sha)
+	if refs, ok := snapshot.StackRefs(); !ok || len(refs) != 2 {
+		t.Fatalf("StackRefs() = (%v, %t), want two refs", refs, ok)
+	}
+	for _, ref := range []string{"api/prod", "worker/prod", "api/prod"} {
+		if got := snapshot.StackStatus(ref); !got.Found {
+			t.Fatalf("StackStatus(%q) = %+v, want found", ref, got)
+		}
+	}
+	if got := store.lists["runs/pr-42/"]; got != 1 {
+		t.Fatalf("manifest list calls = %d, want 1", got)
+	}
+}
