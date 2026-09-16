@@ -91,6 +91,8 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"terraform-version:",
 		"pulumi_access_token:",
 		"reeve_token:",
+		"drift_schedule:",
+		"drift-schedule: ${{ inputs.drift_schedule }}",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("reusable workflow is missing %q", want)
@@ -132,7 +134,8 @@ func TestPublicActionForwardsInputs(t *testing.T) {
 	for _, input := range []string{
 		"command", "root", "pulumi-version", "opentofu-version", "terraform-version",
 		"github-token", "slack-token", "gcp-workload-identity-provider", "gcp-service-account",
-		"extra-args", "allowed-associations", "command-prefix", "run-on-approval", "log-level",
+		"extra-args", "drift-schedule", "drift-pattern", "drift-if-stale",
+		"allowed-associations", "command-prefix", "run-on-approval", "log-level",
 	} {
 		if !strings.Contains(implementation, "  "+input+":") {
 			t.Errorf("internal action is missing input %q", input)
@@ -187,6 +190,126 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 	if !strings.Contains(string(args), "$(touch") {
 		t.Fatalf("hostile text was not passed as inert argv: %q", args)
 	}
+}
+
+func TestActionDriftScopeInputs(t *testing.T) {
+	tests := []struct {
+		name      string
+		command   string
+		schedule  string
+		pattern   string
+		ifStale   string
+		want      []string
+		wantError bool
+	}{
+		{
+			name:     "named schedule and freshness",
+			command:  "drift run",
+			schedule: "critical fleet",
+			ifStale:  "true",
+			want:     []string{"drift", "run", "--schedule", "critical fleet", "--if-stale"},
+		},
+		{
+			name:    "pattern shard",
+			command: "drift run",
+			pattern: "prod/*",
+			ifStale: "false",
+			want:    []string{"drift", "run", "--pattern", "prod/*"},
+		},
+		{
+			name:      "mutually exclusive scope",
+			command:   "drift run",
+			schedule:  "critical",
+			pattern:   "prod/*",
+			ifStale:   "false",
+			wantError: true,
+		},
+		{
+			name:      "invalid boolean",
+			command:   "drift run",
+			ifStale:   "sometimes",
+			wantError: true,
+		},
+		{
+			name:      "scope on non-drift command",
+			command:   "lint",
+			schedule:  "critical",
+			ifStale:   "false",
+			wantError: true,
+		},
+		{
+			name:      "multiline schedule",
+			command:   "drift run",
+			schedule:  "critical\nother",
+			ifStale:   "false",
+			wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, output, err := runActionDrift(t, tt.command, tt.schedule, tt.pattern, tt.ifStale)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("want error, got args %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("run action: %v\n%s", err, output)
+			}
+			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
+				t.Fatalf("args = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func runActionDrift(t *testing.T, command, schedule, pattern, ifStale string) ([]string, string, error) {
+	t.Helper()
+	script := extractRunReeveScript(t, readRepoFile(t, ".github", "actions", "reeve", "action.yml"))
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	argsPath := filepath.Join(dir, "args")
+	fake := filepath.Join(dir, "reeve")
+	if err := os.WriteFile(eventPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGS_OUT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// #nosec G204 -- bash executes the repository-owned action script with fixed test inputs.
+	cmd := exec.Command("bash", "-c", script)
+	for key, value := range map[string]string{
+		"GITHUB_WORKSPACE":           dir,
+		"GITHUB_EVENT_NAME":          "workflow_dispatch",
+		"GITHUB_EVENT_PATH":          eventPath,
+		"REEVE_BIN":                  fake,
+		"REEVE_INPUT_ROOT":           dir,
+		"REEVE_INPUT_EXTRA_ARGS":     "",
+		"REEVE_DRIFT_SCHEDULE":       schedule,
+		"REEVE_DRIFT_PATTERN":        pattern,
+		"REEVE_DRIFT_IF_STALE":       ifStale,
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+		"REEVE_DISPATCH_COMMAND":     command,
+		"REEVE_DISPATCH_AUTO_ARGS":   "[]",
+		"REEVE_DISPATCH_UNLOCK_REF":  "",
+		"REEVE_DISPATCH_BREAK_GLASS": "false",
+		"ARGS_OUT":                   argsPath,
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, string(output), err
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		return nil, string(output), err
+	}
+	return strings.Split(strings.TrimSuffix(string(args), "\n"), "\n"), string(output), nil
 }
 
 func TestActionClassifier(t *testing.T) {

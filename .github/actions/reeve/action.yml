@@ -61,6 +61,18 @@ inputs:
       Shell quoting and metacharacters are not evaluated.
     required: false
     default: ""
+  drift-schedule:
+    description: Named drift.yaml schedule passed to drift run.
+    required: false
+    default: ""
+  drift-pattern:
+    description: Stack pattern passed to drift run.
+    required: false
+    default: ""
+  drift-if-stale:
+    description: Skip stacks within the configured freshness window.
+    required: false
+    default: "false"
   allowed-associations:
     description: >-
       Comma-separated author_association values allowed to trigger comment
@@ -235,6 +247,9 @@ runs:
         REEVE_LOG_LEVEL: ${{ inputs.log-level }}
         REEVE_INPUT_ROOT: ${{ inputs.root }}
         REEVE_INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
+        REEVE_DRIFT_SCHEDULE: ${{ inputs.drift-schedule }}
+        REEVE_DRIFT_PATTERN: ${{ inputs.drift-pattern }}
+        REEVE_DRIFT_IF_STALE: ${{ inputs.drift-if-stale }}
         # The CLI re-enforces these values when it reads historical approval
         # comments, so action dispatch and approval evaluation stay aligned.
         REEVE_ALLOWED_ASSOCIATIONS: ${{ inputs.allowed-associations }}
@@ -257,6 +272,34 @@ runs:
         while IFS= read -r ARG; do
           EXTRA_ARGS+=("$ARG")
         done < <(jq -r '.[]' <<< "$REEVE_DISPATCH_AUTO_ARGS")
+        DRIFT_SCHEDULE=${REEVE_DRIFT_SCHEDULE:-}
+        DRIFT_PATTERN=${REEVE_DRIFT_PATTERN:-}
+        DRIFT_IF_STALE=${REEVE_DRIFT_IF_STALE:-false}
+        if [[ "$CMD" == "drift run" ]]; then
+          if [[ "$DRIFT_SCHEDULE" == *$'\n'* || "$DRIFT_SCHEDULE" == *$'\r'* ||
+                "$DRIFT_PATTERN" == *$'\n'* || "$DRIFT_PATTERN" == *$'\r'* ]]; then
+            printf 'drift schedule and pattern inputs must be single-line values\n' >&2
+            exit 1
+          fi
+          if [[ -n "$DRIFT_SCHEDULE" && -n "$DRIFT_PATTERN" ]]; then
+            printf 'drift-schedule and drift-pattern are mutually exclusive\n' >&2
+            exit 1
+          fi
+          if [[ -n "$DRIFT_SCHEDULE" ]]; then
+            EXTRA_ARGS+=(--schedule "$DRIFT_SCHEDULE")
+          fi
+          if [[ -n "$DRIFT_PATTERN" ]]; then
+            EXTRA_ARGS+=(--pattern "$DRIFT_PATTERN")
+          fi
+          case "$DRIFT_IF_STALE" in
+            true) EXTRA_ARGS+=(--if-stale) ;;
+            false|"") ;;
+            *) printf 'drift-if-stale must be true or false\n' >&2; exit 1 ;;
+          esac
+        elif [[ -n "$DRIFT_SCHEDULE" || -n "$DRIFT_PATTERN" || "$DRIFT_IF_STALE" != "false" ]]; then
+          printf 'drift scope inputs require command "drift run"\n' >&2
+          exit 1
+        fi
         UNLOCK_REF="$REEVE_DISPATCH_UNLOCK_REF"
         if [[ "$REEVE_DISPATCH_BREAK_GLASS" == "true" ]]; then
           REEVE_BREAK_GLASS_COMMENT=$(jq -r '.comment.body // ""' < "$GITHUB_EVENT_PATH")

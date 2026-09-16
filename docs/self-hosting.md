@@ -252,7 +252,11 @@ jobs:
     uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
     with:
       mode: drift
+      drift_schedule: prod
 ```
+
+Drift callers may set `drift_schedule`, `drift_pattern`, or `drift_if_stale`.
+Schedule and pattern are mutually exclusive; stale-only filtering composes with either.
 
 ### Event triggers
 

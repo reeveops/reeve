@@ -46,6 +46,18 @@ inputs:
     description: Additional whitespace-delimited arguments for the Reeve command.
     required: false
     default: ""
+  drift-schedule:
+    description: Named drift.yaml schedule passed to drift run.
+    required: false
+    default: ""
+  drift-pattern:
+    description: Stack pattern passed to drift run.
+    required: false
+    default: ""
+  drift-if-stale:
+    description: Skip stacks within the configured freshness window.
+    required: false
+    default: "false"
   allowed-associations:
     description: Comma-separated author associations allowed to trigger commands.
     required: false
@@ -79,6 +91,9 @@ runs:
         gcp-workload-identity-provider: ${{ inputs.gcp-workload-identity-provider }}
         gcp-service-account: ${{ inputs.gcp-service-account }}
         extra-args: ${{ inputs.extra-args }}
+        drift-schedule: ${{ inputs.drift-schedule }}
+        drift-pattern: ${{ inputs.drift-pattern }}
+        drift-if-stale: ${{ inputs.drift-if-stale }}
         allowed-associations: ${{ inputs.allowed-associations }}
         command-prefix: ${{ inputs.command-prefix }}
         run-on-approval: ${{ inputs.run-on-approval }}

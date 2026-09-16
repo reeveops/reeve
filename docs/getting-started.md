@@ -356,25 +356,15 @@ permissions:
 
 jobs:
   drift:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with: { repository: reeveops/reeve, path: _reeve }
-      - uses: actions/checkout@v6
-        with: { path: _src }
-      - uses: actions/setup-go@v6
-        with: { go-version-file: _reeve/go.mod }
-      - run: go build -o /usr/local/bin/reeve ./cmd/reeve
-        working-directory: _reeve
-      - uses: pulumi/actions@v6
-        with: { pulumi-version: "3.231.0" }
-      - run: reeve drift run --schedule prod
-        working-directory: _src
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: drift
+      pulumi_version: "3.231.0"
+      drift_schedule: prod
 ```
 
 Configure schedules + channels in `.reeve/drift.yaml` - see [drift.md](drift.md).
+Use `drift_pattern` for a shard or `drift_if_stale: true` to skip fresh stacks.
 
 ## Troubleshooting
 

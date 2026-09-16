@@ -57,6 +57,21 @@ on:
         required: false
         type: string
         default: ""
+      drift_schedule:
+        description: Named drift.yaml schedule.
+        required: false
+        type: string
+        default: ""
+      drift_pattern:
+        description: Stack pattern for this drift shard.
+        required: false
+        type: string
+        default: ""
+      drift_if_stale:
+        description: Skip stacks within the configured freshness window.
+        required: false
+        type: boolean
+        default: false
       gcp_workload_identity_provider:
         description: GCP Workload Identity Provider resource name.
         required: false
@@ -175,4 +190,7 @@ jobs:
           slack-token: ${{ secrets.slack_token }}
           gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
           gcp-service-account: ${{ inputs.gcp_service_account }}
+          drift-schedule: ${{ inputs.drift_schedule }}
+          drift-pattern: ${{ inputs.drift_pattern }}
+          drift-if-stale: ${{ inputs.drift_if_stale }}
           log-level: ${{ inputs.log_level }}

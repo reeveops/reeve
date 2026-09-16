@@ -52,6 +52,18 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 - WHEN the called workflow starts
 - THEN it MUST run `reeve drift run` without requesting PR write permission.
 
+#### Scenario: Scoped drift mode
+
+- GIVEN a drift caller selects a named schedule or stack pattern and optional stale-only filtering
+- WHEN the called workflow starts
+- THEN it MUST pass each value as a distinct CLI argument without shell evaluation.
+
+#### Scenario: Conflicting drift scope
+
+- GIVEN a caller selects both a named schedule and a stack pattern
+- WHEN the action validates its typed drift inputs
+- THEN it MUST stop before Reeve execution with a clear error.
+
 #### Scenario: Named secrets
 
 - GIVEN the caller needs a Reeve token override, notification token, or engine credential
