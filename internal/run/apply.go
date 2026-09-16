@@ -469,6 +469,16 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
 	}
 	defer executionCleanup()
+	var credentialSource credentialAcquirer
+	if in.AuthRegistry != nil {
+		credentialCache := auth.NewCredentialCache(in.AuthRegistry)
+		credentialSource = credentialCache
+		defer func() {
+			if err := credentialCache.Close(); err != nil {
+				slog.Warn("credential cache cleanup failed", "err", err)
+			}
+		}()
+	}
 	stateEnv := executionEnv
 
 	// Plan locking is on when config asks for it AND the engine can execute
@@ -660,7 +670,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 
 		if !stateAuthAcquired {
-			resolvedStateEnv, stateCleanup, stateErr := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+			resolvedStateEnv, stateCleanup, stateErr := resolveStateAuthEnv(ctx, in.Config, credentialSource)
 			if stateErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(stateErr.Error())
@@ -683,10 +693,9 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			pulumiLoginDone = true
 		}
 
-		// Gates green - acquire auth creds and run apply. authCleanup must
-		// run before the loop iteration ends so on-disk credential
-		// artefacts (e.g. GCP WIF token files) do not outlive their use.
-		authEnv, authCleanup, aerr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModeApply, LocalAuth{})
+		// Gates green: resolve the stack credentials and run apply. The
+		// invocation cache retains provider ownership until every stack exits.
+		authEnv, authCleanup, aerr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModeApply, LocalAuth{})
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())

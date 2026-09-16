@@ -223,6 +223,66 @@ func TestApplyBlockedGateDoesNotRunPolicyHook(t *testing.T) {
 	}
 }
 
+func TestApplyReusesCredentialAcrossStateAndStacks(t *testing.T) {
+	provider := &countingCredentialProvider{}
+	registry := auth.NewRegistry()
+	if err := registry.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	stacks := []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+		{Project: "worker", Path: "projects/worker", Name: "prod", Env: "prod"},
+	}
+	engine := &bgEngine{enum: stacks}
+	fv := &bgVCS{
+		changed: []string{"projects/api/main.ts", "projects/worker/main.ts"}, headSHA: bgSHA, repoPrivate: true,
+		approvalsList: []approvals.Approval{{Source: "pr_review", Approver: "reviewer", CommitSHA: bgSHA, Pinned: true}},
+	}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifest(t.Context(), store, 21, "preview-1", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Env: "prod", Status: summary.StatusPlanned},
+		{Project: "worker", Stack: "prod", Env: "prod", Status: summary.StatusPlanned},
+	}, bgSHA); err != nil {
+		t.Fatal(err)
+	}
+	in := ApplyInput{
+		PRNumber: 21, TriggerSource: "comment", CommitSHA: bgSHA, RunNumber: 3,
+		CIRunURL: "https://ci.example/run/3", RepoRoot: "/nope", RepoFull: "org/repo", Actor: "alice",
+		Engine: engine,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Type: "pulumi", State: schemas.EngineState{AuthProvider: "shared"},
+			Stacks: []schemas.StackDecl{
+				{Project: "api", Path: "projects/api", Stacks: []string{"prod"}},
+				{Project: "worker", Path: "projects/worker", Stacks: []string{"prod"}},
+			},
+		}},
+		Shared: &schemas.Shared{Bucket: schemas.BucketConfig{Type: "filesystem"}},
+		AuthConfig: &schemas.Auth{
+			Providers: map[string]schemas.ProviderYAML{"shared": {Type: "test"}},
+			Bindings: []schemas.BindingYAML{{
+				Match: schemas.BindingMatch{Stack: "*/*", Mode: "apply"}, Providers: []string{"shared"},
+			}},
+		},
+		AuthRegistry: registry, Blob: store, Locks: blocks.New(store), VCS: fv, AuditWriter: audit.NewWriter(store),
+	}
+	out, err := Apply(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Failed || out.Blocked || len(engine.applied) != 2 {
+		t.Fatalf("apply result = %+v, applied = %v", out, engine.applied)
+	}
+	if provider.acquires.Load() != 1 {
+		t.Fatalf("credential acquisitions = %d, want 1", provider.acquires.Load())
+	}
+	if provider.cleanups.Load() != 1 {
+		t.Fatalf("credential cleanups = %d, want 1", provider.cleanups.Load())
+	}
+}
+
 // TestApplyTriggerMergeStillEnforcesLocks proves a lock held by another PR
 // blocks a merge-mode apply.
 func TestApplyTriggerMergeStillEnforcesLocks(t *testing.T) {

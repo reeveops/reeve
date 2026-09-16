@@ -42,8 +42,8 @@ Rules:
 
 ## Invocation reuse
 
-Preview MUST reuse a credential by provider name within one command invocation.
-Provider configuration fixes account, role, audience, and scope for that name.
+Preview and apply MUST reuse a credential by provider name within one command
+invocation. Provider configuration fixes account, role, audience, and scope.
 
 Concurrent requests for one provider MUST collapse into one acquisition. Failed
 acquisitions are not cached, and later requests may retry.
@@ -58,6 +58,13 @@ Every acquired generation remains owned until command cleanup runs exactly once.
 - **THEN** the provider is acquired once
 - **AND** each consumer receives an independent environment map
 - **AND** the provider cleanup runs once after every preview finishes
+
+#### Scenario: Apply stacks share one federation exchange
+
+- **GIVEN** state auth and multiple apply stacks resolve the same provider
+- **WHEN** every independent gate passes and apply resolves credentials
+- **THEN** the provider is acquired once during the command
+- **AND** the provider cleanup runs once after every apply finishes
 
 #### Scenario: A near-expiry generation is replaced
 
