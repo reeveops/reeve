@@ -54,7 +54,7 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 
 #### Scenario: Named secrets
 
-- GIVEN the caller needs a GitHub token override, notification token, or engine credential
+- GIVEN the caller needs a Reeve token override, notification token, or engine credential
 - WHEN it invokes the reusable workflow
 - THEN it MUST map only the named secret and MUST NOT require `secrets: inherit`.
 

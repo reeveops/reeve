@@ -68,7 +68,7 @@ on:
         type: string
         default: ""
     secrets:
-      github_token:
+      reeve_token:
         description: Optional GitHub token override.
         required: false
       slack_token:
@@ -148,7 +148,7 @@ jobs:
           pulumi-version: ${{ inputs.pulumi_version }}
           opentofu-version: ${{ inputs.opentofu_version }}
           terraform-version: ${{ inputs.terraform_version }}
-          github-token: ${{ secrets.github_token || github.token }}
+          github-token: ${{ secrets.reeve_token || github.token }}
           slack-token: ${{ secrets.slack_token }}
           gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
           gcp-service-account: ${{ inputs.gcp_service_account }}
@@ -182,7 +182,7 @@ jobs:
           pulumi-version: ${{ inputs.pulumi_version }}
           opentofu-version: ${{ inputs.opentofu_version }}
           terraform-version: ${{ inputs.terraform_version }}
-          github-token: ${{ secrets.github_token || github.token }}
+          github-token: ${{ secrets.reeve_token || github.token }}
           slack-token: ${{ secrets.slack_token }}
           gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
           gcp-service-account: ${{ inputs.gcp_service_account }}

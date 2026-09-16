@@ -87,6 +87,7 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"opentofu-version:",
 		"terraform-version:",
 		"pulumi_access_token:",
+		"reeve_token:",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("reusable workflow is missing %q", want)
