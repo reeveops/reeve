@@ -88,6 +88,50 @@ func TestRenderBaselineNonInteractive(t *testing.T) {
 	}
 }
 
+func TestRenderGitHubWorkflow(t *testing.T) {
+	const ref = "0123456789abcdef0123456789abcdef01234567"
+	for _, tc := range []struct {
+		engine string
+		want   string
+	}{
+		{engine: "pulumi", want: "pulumi_version: latest"},
+		{engine: "terraform", want: "terraform_version: latest"},
+		{engine: "tofu", want: "opentofu_version: latest"},
+	} {
+		t.Run(tc.engine, func(t *testing.T) {
+			t.Parallel()
+			got, err := RenderGitHubWorkflow(tc.engine, ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"uses: reeveops/reeve/.github/workflows/reeve.yml@" + ref,
+				"mode: gitops",
+				tc.want,
+				"checks: read",
+			} {
+				if !strings.Contains(string(got), want) {
+					t.Errorf("workflow missing %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(string(got), "id-token: write") {
+				t.Error("filesystem baseline must not request an OIDC token")
+			}
+			if strings.Contains(string(got), "ready_for_review, closed") {
+				t.Error("comment-trigger baseline must not subscribe to merged PR events")
+			}
+		})
+	}
+}
+
+func TestRenderGitHubWorkflowRejectsUnpinnedRef(t *testing.T) {
+	for _, ref := range []string{"master", "v1.0.0", "0123456", ""} {
+		if _, err := RenderGitHubWorkflow("pulumi", ref); err == nil {
+			t.Errorf("ref %q: want error", ref)
+		}
+	}
+}
+
 func TestRenderWithStacks(t *testing.T) {
 	cfg := loadRendered(t, Options{Stacks: []discovery.Declaration{
 		{Pattern: "projects/*", Stacks: []string{"dev", "prod"}},

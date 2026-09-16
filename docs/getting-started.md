@@ -55,6 +55,12 @@ pre-filled, every optional gate off. Existing `.reeve/` files are never
 overwritten - `init` only fills in missing config types unless you pass
 `--force` (which keeps `*.bak` backups).
 
+Release binaries also write `.github/workflows/reeve.yml` with the detected
+engine and pin the shared workflow to the release's exact source commit.
+Development builds accept the same pin through `--workflow-ref <full-commit-sha>`.
+
+An existing workflow is preserved.
+
 Then check the result:
 
 ```bash
@@ -63,8 +69,8 @@ reeve lint
 
 ### What it wrote
 
-Two files (plus `notifications.yaml` if you configured Slack). You can also
-write these by hand - `reeve init` is just a shortcut.
+Two config files, the GitHub Actions caller, and `notifications.yaml` when you
+configure Slack. You can also write these by hand.
 
 **`.reeve/shared.yaml`** - bucket, approvals, preconditions:
 
@@ -142,7 +148,7 @@ name: reeve
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, closed]
+    types: [opened, reopened, synchronize, ready_for_review]
   issue_comment:
     types: [created]
   # Only add pull_request_review if you set run_on_approval: true below -
@@ -156,7 +162,6 @@ permissions:
   checks: read
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
   reeve:
@@ -171,7 +176,11 @@ jobs:
 
 Pin the workflow call to a reviewed full commit SHA.
 The shared workflow owns routing, checkout, caching, tool setup, timeout, and safe preview concurrency.
+
 Use `opentofu_version` or `terraform_version` instead of `pulumi_version` for an HCL engine.
+Add `id-token: write` only when an AWS OIDC, GCP WIF, or Azure federated provider needs it.
+
+Add the `closed` pull request type only when `apply.trigger` is `merge`.
 
 Keep the caller job ID `reeve` and require the `reeve / Reeve` check in branch protection.
 If the caller job ID changes, pass its full check name through `self_check_names` so apply does not wait on an earlier Reeve run.
@@ -182,6 +191,7 @@ That's it. The action auto-detects the command from the event:
 | -------------------------------------------------- | ------------------------ |
 | `pull_request` (opened / reopened / synchronize)   | `reeve run preview`      |
 | `pull_request` (ready_for_review)                  | `reeve run ready`        |
+| `pull_request` (closed and merged, when enabled)   | `reeve run apply`        |
 | `pull_request` (any other action: labeled, ...)    | silent no-op             |
 | `/reeve ready` comment                             | `reeve run ready`        |
 | `/reeve apply` comment                             | `reeve run apply`        |

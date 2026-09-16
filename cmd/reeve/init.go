@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,8 @@ import (
 	"github.com/reeveops/reeve/internal/iac/hcl"
 	"github.com/reeveops/reeve/internal/iac/pulumi"
 )
+
+var fullWorkflowRefRE = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
 // stdinIsTTY reports whether stdin is an interactive terminal. Package var so
 // tests can inject either answer without a real TTY.
@@ -60,8 +63,10 @@ Idempotency: an existing .reeve/ is never clobbered - init fills in only
 the missing config types and leaves existing files untouched. Use --force
 to regenerate everything (originals are kept as *.bak).
 
-After init: review the files, run ` + "`reeve lint`" + `, commit .reeve/, and add
-the GitHub Actions workflow printed at the end of the run.`,
+After init: review the files, run ` + "`reeve lint`" + `, and commit .reeve/
+plus the generated GitHub Actions workflow. Release binaries pin the workflow
+to their source commit; development builds print a copy-ready fallback unless
+--workflow-ref supplies a full commit SHA.`,
 		Args: cobra.NoArgs,
 		RunE: runInit,
 	}
@@ -69,6 +74,8 @@ the GitHub Actions workflow printed at the end of the run.`,
 		"No prompts: detect the engine, scan stacks, write safe baseline defaults")
 	cmd.Flags().Bool("force", false,
 		"Overwrite existing .reeve/ config files (originals are kept as *.bak)")
+	cmd.Flags().String("workflow-ref", "",
+		"Full Reeve commit SHA for the generated GitHub Actions workflow")
 	return cmd
 }
 
@@ -78,6 +85,14 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	force := flagBool(cmd, "force")
 	nonInteractive := flagBool(cmd, "non-interactive")
 	interactive := !nonInteractive && stdinIsTTY()
+	explicitWorkflowRef, err := cmd.Flags().GetString("workflow-ref")
+	if err != nil {
+		return err
+	}
+	workflowRef, err := resolveWorkflowRef(explicitWorkflowRef)
+	if err != nil {
+		return err
+	}
 
 	dir := filepath.Join(root, ".reeve")
 	existing, err := scaffold.ExistingTypes(dir)
@@ -135,21 +150,77 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	for _, name := range written {
 		fmt.Fprintf(w, "wrote   %s\n", filepath.Join(".reeve", name))
 	}
-	if len(written) == 0 {
-		fmt.Fprintln(w, "\nNothing to do - every config type already exists. Use --force to regenerate.")
-		return nil
-	}
-
 	// Sanity: everything on disk (ours + pre-existing) must pass the strict
 	// loader. A failure here can only come from pre-existing files.
+	engine := opts.EngineType
 	if cfg, err := config.Load(root); err != nil {
 		fmt.Fprintf(w, "\nwarning: .reeve/ does not pass the strict loader: %v\n", err)
 	} else if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(w, "\nwarning: .reeve/ does not validate: %v\n", err)
+	} else if len(cfg.Engines) == 1 {
+		engine = cfg.Engines[0].Engine.Type
 	}
 
-	printNextSteps(w, opts.EngineType)
+	workflowChanged := false
+	if workflowRef != "" {
+		workflow, err := scaffold.RenderGitHubWorkflow(engine, workflowRef)
+		if err != nil {
+			return err
+		}
+		workflowChanged, err = writeGitHubWorkflow(root, workflow)
+		if err != nil {
+			return err
+		}
+		if workflowChanged {
+			fmt.Fprintln(w, "wrote   .github/workflows/reeve.yml")
+		} else {
+			fmt.Fprintln(w, "kept    .github/workflows/reeve.yml (existing workflow is never overwritten)")
+		}
+	}
+	if len(written) == 0 && !workflowChanged {
+		fmt.Fprintln(w, "\nNothing to do - every generated file already exists. Use --force to regenerate .reeve/ config.")
+	}
+
+	printNextSteps(w, engine, workflowRef)
 	return nil
+}
+
+func resolveWorkflowRef(explicit string) (string, error) {
+	if explicit != "" {
+		if !fullWorkflowRefRE.MatchString(explicit) {
+			return "", fmt.Errorf("--workflow-ref must be a full 40-character commit SHA")
+		}
+		return strings.ToLower(explicit), nil
+	}
+	if fullWorkflowRefRE.MatchString(commit) {
+		return strings.ToLower(commit), nil
+	}
+	return "", nil
+}
+
+func writeGitHubWorkflow(repoRoot string, content []byte) (bool, error) {
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return false, err
+	}
+	defer root.Close()
+	if err := root.MkdirAll(".github/workflows", 0o750); err != nil {
+		return false, err
+	}
+	workflowRoot, err := root.OpenRoot(".github/workflows")
+	if err != nil {
+		return false, err
+	}
+	defer workflowRoot.Close()
+	if _, err := workflowRoot.Stat("reeve.yml"); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := workflowRoot.WriteFile("reeve.yml", content, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // detectEngine picks the engine for non-interactive mode from repo files:
@@ -263,13 +334,27 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-func printNextSteps(w io.Writer, engine string) {
+func printNextSteps(w io.Writer, engine, workflowRef string) {
 	versionInput := "pulumi_version: latest"
 	switch engine {
 	case "tofu":
 		versionInput = "opentofu_version: latest"
 	case "terraform":
 		versionInput = "terraform_version: latest"
+	}
+	if workflowRef != "" {
+		fmt.Fprint(w, `
+Next steps:
+  1. Review the generated files under .reeve/ and .github/workflows/reeve.yml,
+     then commit them.
+  2. Validate:            reeve lint
+  3. Inspect stacks:      reeve stacks
+  4. Dry-run the comment: reeve plan-run --sha $(git rev-parse HEAD) --run-number 1
+
+The workflow is pinned to the exact Reeve source commit used to build this binary.
+See docs/getting-started.md for the full walk-through.
+`)
+		return
 	}
 	fmt.Fprintf(w, `
 Next steps:
@@ -278,12 +363,13 @@ Next steps:
   2. Validate:            reeve lint
   3. Inspect stacks:      reeve stacks
   4. Dry-run the comment: reeve plan-run --sha $(git rev-parse HEAD) --run-number 1
-  5. Add the GitHub Actions workflow (.github/workflows/reeve.yml):
+  5. This development build has no full source commit. Re-run with
+     --workflow-ref <full-commit-sha>, or add this workflow manually:
 
        name: reeve
        on:
          pull_request:
-           types: [opened, synchronize, reopened, ready_for_review, closed]
+           types: [opened, synchronize, reopened, ready_for_review]
          issue_comment:
            types: [created]
        permissions:
@@ -291,7 +377,6 @@ Next steps:
          checks: read
          pull-requests: write
          issues: write
-         id-token: write
        jobs:
          reeve:
            uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
