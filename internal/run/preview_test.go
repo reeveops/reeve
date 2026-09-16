@@ -41,15 +41,17 @@ func (f *fakeEngine) Preview(ctx context.Context, s discovery.Stack, opts iac.Pr
 }
 
 type fakeVCS struct {
-	changed []string
-	posted  string
-	headSHA string
+	changed   []string
+	posted    string
+	headSHA   string
+	getPRCall int
 }
 
 func (f *fakeVCS) ListChangedFiles(ctx context.Context, _ int) ([]string, error) {
 	return f.changed, nil
 }
 func (f *fakeVCS) GetPR(ctx context.Context, _ int) (*vcs.PR, error) {
+	f.getPRCall++
 	return &vcs.PR{HeadSHA: f.headSHA}, nil
 }
 func (f *fakeVCS) UpsertComment(ctx context.Context, _ int, body, _ string) error {
@@ -266,6 +268,9 @@ func TestPreviewSHAOverriddenFromPRHead(t *testing.T) {
 	// RunID embeds the short SHA -- must be from headSHA, not envSHA.
 	if !strings.HasSuffix(out.RunID, shortSHA(headSHA)) {
 		t.Errorf("RunID %q should end with shortSHA(%q)=%q", out.RunID, headSHA, shortSHA(headSHA))
+	}
+	if fvcs.getPRCall != 1 {
+		t.Fatalf("GetPR calls = %d, want one coherent preview snapshot", fvcs.getPRCall)
 	}
 
 	// Manifest stored in bucket must be keyed to headSHA so apply can find it.

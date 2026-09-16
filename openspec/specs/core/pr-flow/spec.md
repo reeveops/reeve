@@ -41,6 +41,13 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   SHA from the PR HEAD via the VCS API (`GetPR`), not from `GITHUB_SHA`. This
   ensures manifests and plan lookups use the branch tip SHA regardless of what
   the CI runner checked out.
+- Preview MUST reuse one PR metadata snapshot for head-SHA resolution and
+  notification title and author fields within an invocation.
+
+#### Scenario: Preview publishes completion metadata
+
+- **WHEN** preview needs the PR head SHA, title, and author
+- **THEN** it reads the PR once and uses that coherent snapshot for the run
 - Stacks declared with `path: .` (repo root) are triggered by any changed file
   that survives `ignore_changes` filtering.
 - Docs/asset-only changes (skip globs) run nothing; preview/apply report

@@ -136,7 +136,8 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		return nil, fmt.Errorf("--local previews must not carry a PR number (got %d): local artifacts must stay outside PR context; drop --pr or run without --local", in.PRNumber)
 	}
 
-	in.CommitSHA = resolvePRHeadSHA(ctx, in.VCS, in.PRNumber, in.CommitSHA)
+	var prMeta *vcs.PR
+	in.CommitSHA, prMeta = resolvePR(ctx, in.VCS, in.PRNumber, in.CommitSHA)
 	slog.Debug("preview starting", "pr", in.PRNumber, "sha", in.CommitSHA, "local", in.Local)
 
 	runID := fmt.Sprintf("run-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
@@ -396,15 +397,10 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 	}
 
-	// Fetch PR metadata once for author + title (used by Slack).
 	var prAuthor, prTitle string
-	if in.PRNumber > 0 && !in.Local {
-		if pr, err := in.VCS.GetPR(ctx, in.PRNumber); err == nil {
-			prAuthor = pr.Author
-			prTitle = pr.Title
-		} else {
-			slog.Warn("fetch pr metadata for slack failed", "err", err, "pr", in.PRNumber)
-		}
+	if prMeta != nil {
+		prAuthor = prMeta.Author
+		prTitle = prMeta.Title
 	}
 	if prTitle == "" {
 		prTitle = in.PRTitle
