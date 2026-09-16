@@ -73,6 +73,14 @@ Every acquired generation remains owned until command cleanup runs exactly once.
 - **THEN** the provider is acquired once during the command
 - **AND** the provider cleanup runs once after every refresh finishes
 
+#### Scenario: Concurrent acquisition fails
+
+- **GIVEN** multiple workers wait for the same in-flight provider acquisition
+- **WHEN** that acquisition fails
+- **THEN** every waiter receives the same failure
+- **AND** the provider is called once for that attempt
+- **AND** a later request may start a new attempt
+
 #### Scenario: Concurrent drift checks share one federation exchange
 
 - **GIVEN** state auth and concurrent drift stacks resolve the same provider

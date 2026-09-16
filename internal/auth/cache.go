@@ -19,8 +19,15 @@ var ErrCredentialExpiresSoon = errors.New("credential expires inside the safety 
 
 type credentialCacheEntry struct {
 	credential *Credential
-	acquiring  bool
+	attempt    *credentialCacheAttempt
+}
+
+type credentialCacheAttempt struct {
 	ready      chan struct{}
+	credential *Credential
+	err        error
+	retry      bool
+	joined     int
 }
 
 // CredentialCache reuses provider credentials within one command invocation.
@@ -91,18 +98,25 @@ func (c *CredentialCache) acquireOne(ctx context.Context, name string) (*Credent
 			c.mu.Unlock()
 			return credential, nil
 		}
-		if entry.acquiring {
-			ready := entry.ready
+		if entry.attempt != nil {
+			attempt := entry.attempt
+			attempt.joined++
 			c.mu.Unlock()
 			select {
-			case <-ready:
-				continue
+			case <-attempt.ready:
+				if attempt.err != nil {
+					return nil, attempt.err
+				}
+				if attempt.retry {
+					continue
+				}
+				return cloneCredential(attempt.credential), nil
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
 		}
-		entry.acquiring = true
-		entry.ready = make(chan struct{})
+		attempt := &credentialCacheAttempt{ready: make(chan struct{})}
+		entry.attempt = attempt
 		startGeneration := c.generation
 		c.mu.Unlock()
 
@@ -113,35 +127,50 @@ func (c *CredentialCache) acquireOne(ctx context.Context, name string) (*Credent
 		if err == nil && !credentialUsable(credential, c.now(), c.safetyMargin) {
 			err = fmt.Errorf("%w: %s", ErrCredentialExpiresSoon, c.safetyMargin)
 		}
+		var resultErr error
+		if err != nil {
+			resultErr = errors.Join(
+				fmt.Errorf("acquire %s (%s): %w", name, provider.Type(), err),
+				cleanupCredential(credential),
+			)
+			credential = nil
+		}
 
 		c.mu.Lock()
-		entry.acquiring = false
 		stale := c.generation != startGeneration
-		if err == nil && !c.closed {
+		closed := c.closed
+		if resultErr == nil && !closed {
 			// The cache owns every successful acquisition even when an
 			// invalidation raced it. Close releases discarded generations.
 			c.owned = append(c.owned, credential)
 		}
-		if err == nil && !c.closed && !stale {
+		if resultErr == nil && !closed && !stale {
 			entry.credential = credential
 		}
-		close(entry.ready)
-		closed := c.closed
+		if closed {
+			c.mu.Unlock()
+			resultErr = errors.Join(ErrCredentialCacheClosed, resultErr, cleanupCredential(credential))
+			credential = nil
+			c.mu.Lock()
+		}
+		attempt.err = resultErr
+		attempt.retry = resultErr == nil && stale
+		if resultErr == nil && !stale {
+			attempt.credential = credential
+		}
+		if entry.attempt == attempt {
+			entry.attempt = nil
+		}
+		close(attempt.ready)
 		c.mu.Unlock()
 
-		if closed {
-			return nil, errors.Join(ErrCredentialCacheClosed, cleanupCredential(credential))
+		if attempt.err != nil {
+			return nil, attempt.err
 		}
-		if err != nil {
-			return nil, errors.Join(
-				fmt.Errorf("acquire %s (%s): %w", name, provider.Type(), err),
-				cleanupCredential(credential),
-			)
-		}
-		if stale {
+		if attempt.retry {
 			continue
 		}
-		return cloneCredential(credential), nil
+		return cloneCredential(attempt.credential), nil
 	}
 }
 

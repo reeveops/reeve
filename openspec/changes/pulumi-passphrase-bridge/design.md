@@ -5,8 +5,11 @@
 `state.secrets_provider.type: passphrase` authorizes one fixed child variable,
 `PULUMI_CONFIG_PASSPHRASE`.
 
-The configured `passphrase` value wins when present. Otherwise Reeve reads the
-same fixed variable from its host environment.
+The configured `passphrase` value wins when present. Reeve does not expand an
+environment reference in this PR-controlled field.
+
+A configured state auth provider may emit the same fixed variable. Reading a
+host value requires the existing acknowledged `env_passthrough` provider.
 
 ## Isolation
 

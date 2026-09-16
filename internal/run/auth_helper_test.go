@@ -64,7 +64,7 @@ func TestResolveStateAuthEnvPulumiPassphraseSelection(t *testing.T) {
 		want       string
 		wantSet    bool
 	}{
-		{name: "selected controller value", typ: "passphrase", controller: "workflow-passphrase", want: "workflow-passphrase", wantSet: true},
+		{name: "selected ignores controller value", typ: "passphrase", controller: "workflow-passphrase"},
 		{name: "configured value wins", typ: "passphrase", configured: "configured-passphrase", controller: "workflow-passphrase", want: "configured-passphrase", wantSet: true},
 		{name: "selected without value", typ: "passphrase"},
 		{name: "unselected provider", typ: "awskms", controller: "must-stay-in-controller"},
@@ -85,6 +85,31 @@ func TestResolveStateAuthEnvPulumiPassphraseSelection(t *testing.T) {
 				t.Fatalf("PULUMI_CONFIG_PASSPHRASE = %q, present=%t; want %q, present=%t", got, ok, tt.want, tt.wantSet)
 			}
 		})
+	}
+}
+
+func TestResolveStateAuthEnvPulumiPassphraseProvider(t *testing.T) {
+	reg := auth.NewRegistry()
+	if err := reg.Register(&fakeProvider{
+		name: "pulumi-passphrase", typ: "gcp_secret_manager",
+		env: map[string]string{"PULUMI_CONFIG_PASSPHRASE": "provider-passphrase"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
+		AuthProvider: "pulumi-passphrase",
+		SecretsProvider: schemas.EngineSecretsProvider{
+			Type:       "passphrase",
+			Passphrase: "configured-passphrase",
+		},
+	}}}
+	env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if got := env["PULUMI_CONFIG_PASSPHRASE"]; got != "provider-passphrase" {
+		t.Fatalf("PULUMI_CONFIG_PASSPHRASE = %q, want provider value", got)
 	}
 }
 

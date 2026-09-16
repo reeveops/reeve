@@ -119,7 +119,7 @@ func resolveApprovedCommit(arg, headSHA string) (sha string, pinned bool) {
 func (c *Client) listIssueComments(ctx context.Context, number int) ([]*gh.IssueComment, error) {
 	c.commentMu.Lock()
 	defer c.commentMu.Unlock()
-	return c.issueCommentsLocked(ctx, number, false)
+	return c.issueCommentsLocked(ctx, number, true)
 }
 
 // parseCommentTrigger derives the accepted command prefixes and the verb from

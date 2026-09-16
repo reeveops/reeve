@@ -50,9 +50,11 @@ before processing; any other non-2xx surfaces unchanged.
 ## Comment lookup reuse
 
 The GitHub adapter MUST reuse one paginated issue-comment snapshot per PR for
-marker lookup, comment approval evaluation, and stale-part cleanup within an
-invocation. Successful creates, edits, and stale-part deletes MUST update that
-snapshot.
+marker lookup and stale-part cleanup within an invocation. Successful creates,
+edits, and stale-part deletes MUST update that snapshot without mutating slices
+or comment values already returned to callers.
+
+Comment approval evaluation MUST fetch a fresh paginated snapshot at the gate.
 
 #### Scenario: Repeated marker updates
 
@@ -64,6 +66,13 @@ snapshot.
 - **WHEN** an edit by cached comment ID returns HTTP 404
 - **THEN** the adapter discards the snapshot, rediscovers the marker, and
   performs one edit or create attempt against the current state
+
+#### Scenario: A comment approval changes during apply
+
+- **GIVEN** an earlier status update populated the issue-comment cache
+- **WHEN** the apply gate evaluates comment approvals
+- **THEN** the adapter fetches current comments from GitHub
+- **AND** an edited or deleted approval does not survive through the cache
 
 ## Immutable PR workload identity
 
