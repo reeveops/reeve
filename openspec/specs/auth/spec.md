@@ -87,6 +87,14 @@ Every acquired generation remains owned until command cleanup runs exactly once.
 - **THEN** the cached generations are invalidated before auth resolves again
 - **AND** the replacement generation is owned until command cleanup
 
+#### Scenario: Invalidation races credential acquisition
+
+- **GIVEN** a provider acquisition is still in flight
+- **WHEN** another worker invalidates cached generations
+- **THEN** the in-flight generation is not returned or cached
+- **AND** the requester acquires a post-invalidation generation
+- **AND** both generations remain owned until command cleanup
+
 #### Scenario: A near-expiry generation is replaced
 
 - **GIVEN** a cached credential expires within the safety margin

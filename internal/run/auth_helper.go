@@ -40,6 +40,9 @@ type credentialAcquirer = CredentialAcquirer
 // logged but never propagated - they happen at end-of-run so the work has
 // already shipped.
 func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Registry, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
+	if registry == nil {
+		return resolveAuthEnv(ctx, cfg, nil, stackRef, mode, local)
+	}
 	return resolveAuthEnv(ctx, cfg, registry, stackRef, mode, local)
 }
 
@@ -86,6 +89,9 @@ func resolveAuthEnv(ctx context.Context, cfg *schemas.Auth, acquirer credentialA
 
 // ResolveStateAuthEnv acquires the provider selected by engine.state.
 func ResolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, registry *auth.Registry) (map[string]string, CleanupFunc, error) {
+	if registry == nil {
+		return resolveStateAuthEnv(ctx, engine, nil)
+	}
 	return resolveStateAuthEnv(ctx, engine, registry)
 }
 

@@ -227,6 +227,8 @@ func TestPruneDisabled(t *testing.T) {
 }
 
 func TestPruneConfiguredRunArtifacts(t *testing.T) {
+	t.Parallel()
+
 	ctx := context.Background()
 	store, _ := filesystem.New(t.TempDir())
 	now := time.Now()

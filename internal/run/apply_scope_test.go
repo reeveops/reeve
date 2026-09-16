@@ -86,6 +86,21 @@ func TestApplyAppliesEveryPreviewedStack(t *testing.T) {
 	}
 }
 
+func TestApplyUsesPreviewWhenLiveFilesMoveOutsideRoot(t *testing.T) {
+	engine := &bgEngine{}
+	store, _ := filesystem.New(t.TempDir())
+	in := twoStackInput(t, engine, store)
+	in.RepoPath = "infra"
+	in.VCS.(*bgVCS).changed = []string{"docs/readme.md"}
+
+	if _, err := Apply(context.Background(), in); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(engine.applied) != 1 || engine.applied[0] != "api/prod" {
+		t.Fatalf("apply must retain the previewed stack when the live diff moves outside the root, got %v", engine.applied)
+	}
+}
+
 // With no plan for the commit at all, apply must not fall back to "every
 // stack". It stops and says to preview first.
 func TestApplyWithNoPlanForCommitDoesNotWiden(t *testing.T) {

@@ -55,43 +55,66 @@ func TestResolveStateAuthEnv(t *testing.T) {
 	}
 }
 
-func TestResolveStateAuthEnvPulumiPassphrase(t *testing.T) {
-	t.Setenv("PULUMI_CONFIG_PASSPHRASE", "workflow-passphrase")
-	engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
-		SecretsProvider: schemas.EngineSecretsProvider{Type: "passphrase"},
-	}}}
-	env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, nil)
-	if err != nil {
-		t.Fatal(err)
+func TestResolveStateAuthEnvPulumiPassphraseSelection(t *testing.T) {
+	tests := []struct {
+		name       string
+		typ        string
+		configured string
+		controller string
+		want       string
+		wantSet    bool
+	}{
+		{name: "selected controller value", typ: "passphrase", controller: "workflow-passphrase", want: "workflow-passphrase", wantSet: true},
+		{name: "configured value wins", typ: "passphrase", configured: "configured-passphrase", controller: "workflow-passphrase", want: "configured-passphrase", wantSet: true},
+		{name: "selected without value", typ: "passphrase"},
+		{name: "unselected provider", typ: "awskms", controller: "must-stay-in-controller"},
 	}
-	defer cleanup()
-	if env["PULUMI_CONFIG_PASSPHRASE"] != "workflow-passphrase" {
-		t.Fatalf("Pulumi passphrase missing: %#v", env)
-	}
-
-	engine.Engine.State.SecretsProvider.Passphrase = "configured-passphrase"
-	env, cleanup, err = ResolveStateAuthEnv(context.Background(), engine, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	if env["PULUMI_CONFIG_PASSPHRASE"] != "configured-passphrase" {
-		t.Fatalf("configured passphrase did not override the workflow value: %#v", env)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PULUMI_CONFIG_PASSPHRASE", tt.controller)
+			engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
+				SecretsProvider: schemas.EngineSecretsProvider{Type: tt.typ, Passphrase: tt.configured},
+			}}}
+			env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			got, ok := env["PULUMI_CONFIG_PASSPHRASE"]
+			if ok != tt.wantSet || got != tt.want {
+				t.Fatalf("PULUMI_CONFIG_PASSPHRASE = %q, present=%t; want %q, present=%t", got, ok, tt.want, tt.wantSet)
+			}
+		})
 	}
 }
 
-func TestResolveStateAuthEnvDoesNotPassUnselectedPulumiPassphrase(t *testing.T) {
-	t.Setenv("PULUMI_CONFIG_PASSPHRASE", "must-stay-in-controller")
+func TestResolveAuthEnvHandlesNilRegistry(t *testing.T) {
+	t.Parallel()
+
+	env, cleanup, err := ResolveAuthEnv(context.Background(), localAuthCfg(), nil,
+		"prod/api", auth.ModePreview, LocalAuth{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if len(env) != 0 {
+		t.Fatalf("nil registry returned credentials: %#v", env)
+	}
+}
+
+func TestResolveStateAuthEnvHandlesNilRegistry(t *testing.T) {
+	t.Parallel()
+
 	engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
-		SecretsProvider: schemas.EngineSecretsProvider{Type: "awskms"},
+		AuthProvider: "missing",
 	}}}
 	env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	if _, ok := env["PULUMI_CONFIG_PASSPHRASE"]; ok {
-		t.Fatalf("unselected Pulumi passphrase escaped into the engine: %#v", env)
+	if len(env) != 0 {
+		t.Fatalf("nil registry returned state credentials: %#v", env)
 	}
 }
 

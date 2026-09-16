@@ -58,6 +58,15 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   fork and draft policy, approvals, and gate evaluation reuse that snapshot.
 - Preview MUST reuse one PR metadata snapshot for head-SHA resolution and
   notification title and author fields within an invocation.
+- Apply MUST bind its target stacks to the preview manifest for the resolved
+  HEAD before a live changed-file result can classify the run as empty.
+
+#### Scenario: Base movement changes the live file list
+
+- **GIVEN** the preview manifest for the resolved HEAD contains a stack
+- **AND** the live PR file list now reports every change outside the configured root
+- **WHEN** apply resolves its target scope
+- **THEN** it keeps the stack recorded by the preview manifest
 
 #### Scenario: Independent projects overlap
 

@@ -13,6 +13,10 @@ const defaultCredentialSafetyMargin = 30 * time.Second
 // ErrCredentialCacheClosed is returned when acquisition starts after Close.
 var ErrCredentialCacheClosed = errors.New("credential cache is closed")
 
+// ErrCredentialExpiresSoon is returned when a newly acquired credential does
+// not remain valid beyond the cache safety margin.
+var ErrCredentialExpiresSoon = errors.New("credential expires inside the safety margin")
+
 type credentialCacheEntry struct {
 	credential *Credential
 	acquiring  bool
@@ -26,6 +30,7 @@ type CredentialCache struct {
 
 	mu           sync.Mutex
 	entries      map[string]*credentialCacheEntry
+	generation   uint64
 	owned        []*Credential
 	closed       bool
 	now          func() time.Time
@@ -98,6 +103,7 @@ func (c *CredentialCache) acquireOne(ctx context.Context, name string) (*Credent
 		}
 		entry.acquiring = true
 		entry.ready = make(chan struct{})
+		startGeneration := c.generation
 		c.mu.Unlock()
 
 		credential, err := provider.Acquire(ctx)
@@ -105,14 +111,19 @@ func (c *CredentialCache) acquireOne(ctx context.Context, name string) (*Credent
 			err = fmt.Errorf("provider returned nil credential")
 		}
 		if err == nil && !credentialUsable(credential, c.now(), c.safetyMargin) {
-			err = fmt.Errorf("credential expires within the %s safety margin", c.safetyMargin)
+			err = fmt.Errorf("%w: %s", ErrCredentialExpiresSoon, c.safetyMargin)
 		}
 
 		c.mu.Lock()
 		entry.acquiring = false
+		stale := c.generation != startGeneration
 		if err == nil && !c.closed {
-			entry.credential = credential
+			// The cache owns every successful acquisition even when an
+			// invalidation raced it. Close releases discarded generations.
 			c.owned = append(c.owned, credential)
+		}
+		if err == nil && !c.closed && !stale {
+			entry.credential = credential
 		}
 		close(entry.ready)
 		closed := c.closed
@@ -126,6 +137,9 @@ func (c *CredentialCache) acquireOne(ctx context.Context, name string) (*Credent
 				fmt.Errorf("acquire %s (%s): %w", name, provider.Type(), err),
 				cleanupCredential(credential),
 			)
+		}
+		if stale {
+			continue
 		}
 		return cloneCredential(credential), nil
 	}
@@ -175,6 +189,7 @@ func (c *CredentialCache) InvalidateAll() error {
 	for _, entry := range c.entries {
 		entry.credential = nil
 	}
+	c.generation++
 	return nil
 }
 
