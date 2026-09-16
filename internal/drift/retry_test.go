@@ -153,6 +153,32 @@ func TestRetryAuthExpiredRebindsOnce(t *testing.T) {
 	}
 }
 
+func TestRetryAuthExpiredUsesRebinder(t *testing.T) {
+	t.Parallel()
+
+	resolved, rebound := 0, 0
+	resolver := func(context.Context, string) (map[string]string, func(), error) {
+		resolved++
+		return map[string]string{"TOKEN": "old"}, func() {}, nil
+	}
+	rebinder := func(context.Context, string) (map[string]string, func(), error) {
+		rebound++
+		return map[string]string{"TOKEN": "new"}, func() {}, nil
+	}
+	eng := &scriptEngine{results: []scriptResult{
+		{res: iac.PreviewResult{Error: "ExpiredToken: the security token included in the request is expired"}},
+		{res: iac.PreviewResult{}},
+	}}
+	opts := Options{
+		Engine: eng, Redactor: redact.New(), RetryOnTransientError: 1,
+		AuthResolver: resolver, AuthRebinder: rebinder,
+	}
+	item, _, _, _ := runOne(t.Context(), opts, discovery.Stack{Project: "p", Name: "s", Path: "p/s"}, time.Now())
+	if item.Outcome != OutcomeNoDrift || resolved != 1 || rebound != 1 {
+		t.Fatalf("outcome=%s resolves=%d rebinds=%d", item.Outcome, resolved, rebound)
+	}
+}
+
 func TestRetryCleansCredentialAfterSuccessfulCheck(t *testing.T) {
 	t.Parallel()
 

@@ -7,11 +7,16 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/reeveops/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/approvals"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/core/summary"
 	"github.com/reeveops/reeve/internal/iac"
@@ -20,32 +25,140 @@ import (
 )
 
 type fakeEngine struct {
-	enum    []discovery.Stack
-	results map[string]iac.PreviewResult
+	enum       []discovery.Stack
+	results    map[string]iac.PreviewResult
+	enumerated *bool
+	captureEnv chan<- map[string]string
+}
+
+type blockingPreviewEngine struct {
+	mu           sync.Mutex
+	active       int
+	maxActive    int
+	activeByPath map[string]int
+	pathOverlap  bool
+	started      chan discovery.Stack
+	release      chan struct{}
+}
+
+type countingCredentialProvider struct {
+	acquires atomic.Int32
+	cleanups atomic.Int32
+}
+
+func (*countingCredentialProvider) Name() string { return "shared" }
+func (*countingCredentialProvider) Type() string { return "test" }
+func (p *countingCredentialProvider) Acquire(context.Context) (*auth.Credential, error) {
+	p.acquires.Add(1)
+	return &auth.Credential{
+		Env: map[string]string{"REEVE_TEST_CREDENTIAL": "short-lived"}, Kind: "test", Source: "shared",
+		Cleanup: func() error { p.cleanups.Add(1); return nil },
+	}, nil
+}
+
+func (e *blockingPreviewEngine) Name() string                   { return "blocking" }
+func (e *blockingPreviewEngine) Capabilities() iac.Capabilities { return iac.Capabilities{} }
+func (e *blockingPreviewEngine) EnumerateStacks(context.Context, string) ([]discovery.Stack, error) {
+	return nil, nil
+}
+func (e *blockingPreviewEngine) Preview(ctx context.Context, stack discovery.Stack, _ iac.PreviewOpts) (iac.PreviewResult, error) {
+	e.mu.Lock()
+	e.active++
+	if e.active > e.maxActive {
+		e.maxActive = e.active
+	}
+	e.activeByPath[stack.Path]++
+	if e.activeByPath[stack.Path] > 1 {
+		e.pathOverlap = true
+	}
+	e.mu.Unlock()
+
+	e.started <- stack
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+	}
+
+	e.mu.Lock()
+	e.active--
+	e.activeByPath[stack.Path]--
+	e.mu.Unlock()
+	return iac.PreviewResult{Counts: summary.Counts{Add: 1}}, nil
 }
 
 func (f *fakeEngine) Name() string                   { return "fake" }
 func (f *fakeEngine) Capabilities() iac.Capabilities { return iac.Capabilities{} }
 func (f *fakeEngine) EnumerateStacks(ctx context.Context, root string) ([]discovery.Stack, error) {
+	if f.enumerated != nil {
+		*f.enumerated = true
+	}
 	return f.enum, nil
 }
 func (f *fakeEngine) Preview(ctx context.Context, s discovery.Stack, opts iac.PreviewOpts) (iac.PreviewResult, error) {
+	if f.captureEnv != nil {
+		env := make(map[string]string, len(opts.Env))
+		for key, value := range opts.Env {
+			env[key] = value
+		}
+		f.captureEnv <- env
+	}
 	if r, ok := f.results[s.Ref()]; ok {
 		return r, nil
 	}
 	return iac.PreviewResult{}, nil
 }
 
+func TestPreviewPassesStateEnvironmentToEngine(t *testing.T) {
+	registry := auth.NewRegistry()
+	if err := registry.Register(&fakeProvider{
+		name: "state-auth", typ: "test", env: map[string]string{"STATE_TOKEN": "short-lived"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	captured := make(chan map[string]string, 1)
+	engine := &fakeEngine{
+		enum:       []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
+		captureEnv: captured,
+	}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Preview(t.Context(), PreviewInput{
+		Local: true, RepoRoot: "/repo", Engine: engine, Blob: store,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Type: "pulumi",
+			State: schemas.EngineState{
+				AuthProvider: "state-auth",
+				SecretsProvider: schemas.EngineSecretsProvider{
+					Type: "passphrase", Passphrase: "state-passphrase",
+				},
+			},
+			Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"dev"}}},
+		}},
+		Shared: &schemas.Shared{}, AuthRegistry: registry,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := <-captured
+	if env["STATE_TOKEN"] != "short-lived" || env["PULUMI_CONFIG_PASSPHRASE"] != "state-passphrase" {
+		t.Fatalf("preview engine state environment = %#v", env)
+	}
+}
+
 type fakeVCS struct {
-	changed []string
-	posted  string
-	headSHA string
+	changed   []string
+	posted    string
+	headSHA   string
+	getPRCall int
 }
 
 func (f *fakeVCS) ListChangedFiles(ctx context.Context, _ int) ([]string, error) {
 	return f.changed, nil
 }
 func (f *fakeVCS) GetPR(ctx context.Context, _ int) (*vcs.PR, error) {
+	f.getPRCall++
 	return &vcs.PR{HeadSHA: f.headSHA}, nil
 }
 func (f *fakeVCS) UpsertComment(ctx context.Context, _ int, body, _ string) error {
@@ -74,6 +187,7 @@ func TestPreviewEndToEnd(t *testing.T) {
 	}
 	vcs := &fakeVCS{changed: []string{"projects/api/index.ts", "services/worker/go.mod"}}
 	store, _ := filesystem.New(t.TempDir())
+	storeOpens := 0
 
 	out, err := Preview(ctx, PreviewInput{
 		PRNumber:  42,
@@ -88,8 +202,11 @@ func TestPreviewEndToEnd(t *testing.T) {
 				{Pattern: "services/*", Stacks: []string{"prod"}},
 			},
 		}},
-		Shared:   &schemas.Shared{},
-		Blob:     store,
+		Shared: &schemas.Shared{},
+		OpenBlob: func(context.Context) (blob.Store, error) {
+			storeOpens++
+			return store, nil
+		},
 		VCS:      vcs,
 		Comments: vcs,
 	})
@@ -109,6 +226,152 @@ func TestPreviewEndToEnd(t *testing.T) {
 	}
 	if !out.CommentPosted {
 		t.Fatal("preview did not report the posted comment")
+	}
+	if storeOpens != 1 {
+		t.Fatalf("blob store opened %d times, want once", storeOpens)
+	}
+}
+
+func TestPreviewConcurrencyBoundAndProjectIsolation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	engine := &blockingPreviewEngine{
+		activeByPath: map[string]int{},
+		started:      make(chan discovery.Stack, 4),
+		release:      make(chan struct{}),
+	}
+	t.Cleanup(func() { close(engine.release) })
+	targets := []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"},
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+		{Project: "worker", Path: "projects/worker", Name: "prod", Env: "prod"},
+		{Project: "web", Path: "projects/web", Name: "prod", Env: "prod"},
+	}
+	in := PreviewInput{
+		Engine: engine,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Execution: schemas.Execution{MaxParallelStacks: 2},
+		}},
+	}
+	done := make(chan []summary.StackSummary, 1)
+	go func() {
+		done <- runPreviewTargets(ctx, in, nil, targets, "run-1", nil, approvals.Config{}, nil)
+	}()
+
+	nextStarted := func() discovery.Stack {
+		t.Helper()
+		select {
+		case stack := <-engine.started:
+			return stack
+		case <-ctx.Done():
+			t.Fatalf("preview did not start before deadline: %v", ctx.Err())
+			return discovery.Stack{}
+		}
+	}
+	first := nextStarted()
+	second := nextStarted()
+	if first.Path == second.Path {
+		t.Fatalf("first concurrent previews share path %q", first.Path)
+	}
+	select {
+	case third := <-engine.started:
+		t.Fatalf("third preview started above limit: %s", third.Ref())
+	default:
+	}
+
+	engine.release <- struct{}{}
+	engine.release <- struct{}{}
+	nextStarted()
+	nextStarted()
+	engine.release <- struct{}{}
+	engine.release <- struct{}{}
+	summaries := <-done
+
+	engine.mu.Lock()
+	maxActive, pathOverlap := engine.maxActive, engine.pathOverlap
+	engine.mu.Unlock()
+	if maxActive != 2 {
+		t.Fatalf("maximum concurrent previews = %d, want 2", maxActive)
+	}
+	if pathOverlap {
+		t.Fatal("stacks sharing one project directory overlapped")
+	}
+	for i, stack := range targets {
+		if summaries[i].Ref() != stack.Ref() {
+			t.Fatalf("summary %d = %q, want %q", i, summaries[i].Ref(), stack.Ref())
+		}
+	}
+}
+
+func TestPreviewParallelismResolution(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  int
+		config int
+		want   int
+	}{
+		{name: "default", want: 1},
+		{name: "config", config: 3, want: 3},
+		{name: "override", input: 2, config: 3, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := PreviewInput{MaxParallelStacks: tt.input, Config: &schemas.Engine{Engine: schemas.EngineBody{
+				Execution: schemas.Execution{MaxParallelStacks: tt.config},
+			}}}
+			if got := previewParallelism(in); got != tt.want {
+				t.Fatalf("previewParallelism = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPreviewReusesCredentialAcrossStateAndStacks(t *testing.T) {
+	provider := &countingCredentialProvider{}
+	registry := auth.NewRegistry()
+	if err := registry.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	stacks := []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+		{Project: "worker", Path: "projects/worker", Name: "prod", Env: "prod"},
+		{Project: "web", Path: "projects/web", Name: "prod", Env: "prod"},
+	}
+	engine := &fakeEngine{enum: stacks, results: map[string]iac.PreviewResult{}}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Preview(t.Context(), PreviewInput{
+		Local: true, RepoRoot: "/repo", Engine: engine, Blob: store,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Type: "tofu", State: schemas.EngineState{AuthProvider: "shared"},
+			Execution: schemas.Execution{MaxParallelStacks: 3},
+			Stacks: []schemas.StackDecl{
+				{Project: "api", Path: "projects/api", Stacks: []string{"prod"}},
+				{Project: "worker", Path: "projects/worker", Stacks: []string{"prod"}},
+				{Project: "web", Path: "projects/web", Stacks: []string{"prod"}},
+			},
+		}},
+		Shared: &schemas.Shared{}, AuthRegistry: registry,
+		AuthConfig: &schemas.Auth{
+			Providers: map[string]schemas.ProviderYAML{"shared": {Type: "test"}},
+			Bindings: []schemas.BindingYAML{{
+				Match: schemas.BindingMatch{Stack: "*/*", Mode: "preview"}, Providers: []string{"shared"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Stacks) != 3 {
+		t.Fatalf("preview stacks = %d, want 3", len(out.Stacks))
+	}
+	if provider.acquires.Load() != 1 {
+		t.Fatalf("credential acquisitions = %d, want 1", provider.acquires.Load())
+	}
+	if provider.cleanups.Load() != 1 {
+		t.Fatalf("credential cleanups = %d, want 1", provider.cleanups.Load())
 	}
 }
 
@@ -211,7 +474,7 @@ func TestRunPreviewOneRedactsAuthFailureLog(t *testing.T) {
 
 	got := runPreviewOne(context.Background(), PreviewInput{
 		Shared: &schemas.Shared{}, AuthConfig: cfg, AuthRegistry: reg,
-	}, nil, stack, "run-1", nil)
+	}, nil, stack, "run-1", nil, reg)
 	if got.Status != summary.StatusError {
 		t.Fatalf("status = %s, want error", got.Status)
 	}
@@ -262,6 +525,9 @@ func TestPreviewSHAOverriddenFromPRHead(t *testing.T) {
 	// RunID embeds the short SHA -- must be from headSHA, not envSHA.
 	if !strings.HasSuffix(out.RunID, shortSHA(headSHA)) {
 		t.Errorf("RunID %q should end with shortSHA(%q)=%q", out.RunID, headSHA, shortSHA(headSHA))
+	}
+	if fvcs.getPRCall != 1 {
+		t.Fatalf("GetPR calls = %d, want one coherent preview snapshot", fvcs.getPRCall)
 	}
 
 	// Manifest stored in bucket must be keyed to headSHA so apply can find it.
@@ -478,6 +744,57 @@ func TestPreviewLocalIgnoresChangedFiles(t *testing.T) {
 	}
 }
 
+func TestPreviewScopesRepositoryPathsToConfiguredRoot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine := &fakeEngine{enum: []discovery.Stack{
+		{Project: "api", Path: "envs/api", Name: "dev", Env: "dev"},
+		{Project: "web", Path: "envs/web", Name: "dev", Env: "dev"},
+	}}
+	store, _ := filesystem.New(t.TempDir())
+	fvcs := &fakeVCS{changed: []string{"tf/envs/api/main.tf"}, headSHA: "head-sha"}
+	out, err := Preview(ctx, PreviewInput{
+		PRNumber: 1, CommitSHA: "head-sha", RunNumber: 1,
+		RepoRoot: "/workspace/tf", RepoPath: "tf",
+		Engine: engine,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{Stacks: []schemas.StackDecl{
+			{Project: "api", Path: "envs/api", Stacks: []string{"dev"}},
+			{Project: "web", Path: "envs/web", Stacks: []string{"dev"}},
+		}}},
+		Shared: &schemas.Shared{}, Blob: store, VCS: fvcs, Comments: fvcs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Stacks) != 1 || out.Stacks[0].Project != "api" {
+		t.Fatalf("nested root must preview only api, got %+v", out.Stacks)
+	}
+}
+
+func TestPreviewIgnoresChangesOutsideConfiguredRoot(t *testing.T) {
+	t.Parallel()
+	store, _ := filesystem.New(t.TempDir())
+	fvcs := &fakeVCS{changed: []string{"app/main.go"}, headSHA: "head-sha"}
+	out, err := Preview(context.Background(), PreviewInput{
+		PRNumber: 1, CommitSHA: "head-sha", RunNumber: 1,
+		RepoRoot: "/workspace/tf", RepoPath: "tf",
+		Engine: &fakeEngine{enum: []discovery.Stack{{Project: "api", Path: "envs/api", Name: "dev"}}},
+		Config: &schemas.Engine{Engine: schemas.EngineBody{Stacks: []schemas.StackDecl{
+			{Project: "api", Path: "envs/api", Stacks: []string{"dev"}},
+		}}},
+		Shared: &schemas.Shared{}, Blob: store, VCS: fvcs, Comments: fvcs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Stacks) != 0 {
+		t.Fatalf("outside change must not preview stacks, got %+v", out.Stacks)
+	}
+	if !strings.Contains(out.CommentBody, "No changed files are under the configured root `tf`") {
+		t.Fatalf("missing nested-root scope notice:\n%s", out.CommentBody)
+	}
+}
+
 func TestPreviewLocalRejectsPRNumber(t *testing.T) {
 	// A local run keyed to a real PR could write a preview manifest that
 	// apply's freshness gate trusts. Refused before any work happens.
@@ -529,17 +846,27 @@ func TestPreviewLocalSkipsSHAOverride(t *testing.T) {
 }
 
 // TestPreviewNoAffectedStacks verifies that when no changed files match any
-// stack, an empty manifest is written and no stacks are returned.
+// stack, the result is posted without opening storage or running the engine.
 func TestPreviewNoAffectedStacks(t *testing.T) {
 	ctx := context.Background()
+	stateAuthAcquired := false
+	engineEnumerated := false
+	registry := auth.NewRegistry()
+	if err := registry.Register(&fakeProvider{
+		name: "state-auth", typ: "test", acquired: &stateAuthAcquired,
+		env: map[string]string{"STATE_TOKEN": "must-not-be-acquired"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	engine := &fakeEngine{
-		enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
+		enum:       []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
+		enumerated: &engineEnumerated,
 	}
 	fvcs := &fakeVCS{
 		changed: []string{"docs/README.md"}, // matches no stack path
 		headSHA: "head-sha",
 	}
-	store, _ := filesystem.New(t.TempDir())
+	storeOpened := false
 	out, err := Preview(ctx, PreviewInput{
 		PRNumber:  1,
 		CommitSHA: "head-sha",
@@ -548,9 +875,14 @@ func TestPreviewNoAffectedStacks(t *testing.T) {
 		Engine:    engine,
 		Config: &schemas.Engine{Engine: schemas.EngineBody{
 			Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"dev"}}},
+			State:  schemas.EngineState{AuthProvider: "state-auth"},
 		}},
-		Shared:   &schemas.Shared{},
-		Blob:     store,
+		Shared:       &schemas.Shared{},
+		AuthRegistry: registry,
+		OpenBlob: func(context.Context) (blob.Store, error) {
+			storeOpened = true
+			return nil, fmt.Errorf("must not open storage")
+		},
 		VCS:      fvcs,
 		Comments: fvcs,
 	})
@@ -560,12 +892,16 @@ func TestPreviewNoAffectedStacks(t *testing.T) {
 	if len(out.Stacks) != 0 {
 		t.Fatalf("expected 0 affected stacks, got %d", len(out.Stacks))
 	}
-	// FindPreviewForStack must return Found=false when stack not in manifest.
-	status, err := FindPreviewForStack(ctx, store, 1, "head-sha", "api/dev")
-	if err != nil {
-		t.Fatalf("FindPreviewForStack: %v", err)
+	if stateAuthAcquired {
+		t.Fatal("no-op preview acquired state credentials")
 	}
-	if status.Found {
-		t.Error("stack should not be found in manifest when not affected")
+	if engineEnumerated {
+		t.Fatal("docs-only preview initialized the engine enumerator")
+	}
+	if storeOpened {
+		t.Fatal("docs-only preview opened the blob store")
+	}
+	if !out.CommentPosted {
+		t.Fatal("docs-only preview did not post its result")
 	}
 }

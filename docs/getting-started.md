@@ -208,6 +208,16 @@ That's it. The action auto-detects the command from the event:
 Event classification runs before binary setup, checkout, authentication, and engine installation.
 Skipped events do not run those setup steps.
 
+### Repository roots and change scope
+
+`--root` may point at a nested infrastructure directory in the checkout.
+Reeve converts repository-relative changed files to paths under that root before preview, apply, refresh, explain, and notification-policy checks.
+
+- Changes outside the configured root select no stacks.
+- Documentation-only or outside-root previews do not open blob storage, acquire engine credentials, initialize an engine session, or dispatch lifecycle notifications.
+- Apply stays bound to the stack set in the preview manifest for the PR head, even if GitHub's live changed-file list moves while the PR is open.
+- The maintained action checks out one immutable PR head and fails if the PR moves before gates, artifacts, apply, or refresh use it.
+
 **`reeve run preview` exit behavior**:
 
 - A preview exits `0` only when every targeted stack plans successfully or is a no-op.
@@ -329,7 +339,7 @@ approvals:
       require_all_groups: true    # one from each group, not 2-of-any
 
 locking:
-  ttl: 4h                         # opportunistic reaper cleans up expired locks
+  ttl: 4h                         # maintenance reaps expired locks
   queue: fifo
 ```
 

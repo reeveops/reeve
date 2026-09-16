@@ -6,6 +6,32 @@ import (
 	"testing"
 )
 
+func TestScopeChangedFiles(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		root  string
+		files []string
+		want  []string
+	}{
+		{name: "repository root", root: ".", files: []string{"envs/dev/main.tf"}, want: []string{"envs/dev/main.tf"}},
+		{name: "nested root", root: "tf", files: []string{"tf/envs/dev/main.tf"}, want: []string{"envs/dev/main.tf"}},
+		{name: "outside root", root: "tf", files: []string{"README.md", "docs/guide.md"}, want: []string{}},
+		{name: "path boundary", root: "tf", files: []string{"tf-other/main.tf"}, want: []string{}},
+		{name: "mixed", root: "tf", files: []string{"tf/envs/dev/main.tf", "app/main.go"}, want: []string{"envs/dev/main.tf"}},
+		{name: "normalizes separators", root: `tf\\infra`, files: []string{`tf\\infra\\main.tf`}, want: []string{"main.tf"}},
+		{name: "rejects traversal", root: "tf", files: []string{"../tf/main.tf", "/tf/main.tf"}, want: []string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ScopeChangedFiles(tc.files, tc.root); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ScopeChangedFiles() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolveLiteralAndPattern(t *testing.T) {
 	enum := []Stack{
 		{Project: "api", Path: "projects/api", Name: "dev"},

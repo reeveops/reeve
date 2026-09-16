@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,6 +35,17 @@ func TestActionRunBlocksContainNoExpressions(t *testing.T) {
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPreviewRejectsNegativeParallelism(t *testing.T) {
+	t.Parallel()
+
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"preview", "--max-parallel-stacks=-1"})
+	err := cmd.Execute()
+	if !errors.Is(err, errInvalidMaxParallelStacks) {
+		t.Fatalf("negative preview parallelism must be rejected, got %v", err)
 	}
 }
 

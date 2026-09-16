@@ -79,3 +79,20 @@ func TestPruneDisabled(t *testing.T) {
 		t.Fatalf("disabled prune should be no-op: n=%d err=%v", n, err)
 	}
 }
+
+func TestPruneConfiguredRunArtifacts(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, _ := filesystem.New(t.TempDir())
+	now := time.Now()
+	if _, err := store.Put(ctx, "runs/pr-1/old/manifest.json", bytes.NewReader([]byte("{}"))); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, enabled, err := PruneConfiguredRunArtifacts(ctx, store,
+		&schemas.Shared{Retention: schemas.RetentionConfig{MaxAge: "0"}}, now)
+	if err != nil || enabled || pruned != 0 {
+		t.Fatalf("disabled retention = (%d, %t, %v), want (0, false, nil)", pruned, enabled, err)
+	}
+}

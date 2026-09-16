@@ -57,6 +57,9 @@ type Options struct {
 	PerStackTimeout time.Duration
 	// AuthResolver acquires creds per stack.
 	AuthResolver AuthResolver
+	// AuthRebinder invalidates a rejected generation before resolving again.
+	// Nil preserves AuthResolver as the retry source.
+	AuthRebinder AuthResolver
 	// Parallel caps concurrent checks. Default 1.
 	Parallel int
 	// StateStore + SuppressionStore persist outcomes.
@@ -386,11 +389,12 @@ func runOne(ctx context.Context, opts Options, s discovery.Stack, now time.Time)
 	}
 	defer cleanupAuth()
 	retriesUsed, rebindUsed := 0, false
+	authResolver := opts.AuthResolver
 	start := time.Now()
 	for {
 		timedOut = false
-		if opts.AuthResolver != nil && !haveAuth {
-			e, cleanup, err := opts.AuthResolver(ctx, ref)
+		if authResolver != nil && !haveAuth {
+			e, cleanup, err := authResolver(ctx, ref)
 			if err != nil {
 				authCleanup = cleanup
 				cleanupAuth()
@@ -461,6 +465,9 @@ func runOne(ctx context.Context, opts Options, s discovery.Stack, now time.Time)
 				break // already rebound once; expiry persists
 			}
 			cleanupAuth()
+			if opts.AuthRebinder != nil {
+				authResolver = opts.AuthRebinder
+			}
 			rebindUsed, haveAuth = true, false
 			retriesUsed++
 			slog.Warn("drift: rebinding and retrying after expired credentials",

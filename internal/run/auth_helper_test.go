@@ -55,6 +55,94 @@ func TestResolveStateAuthEnv(t *testing.T) {
 	}
 }
 
+func TestResolveStateAuthEnvPulumiPassphraseSelection(t *testing.T) {
+	tests := []struct {
+		name       string
+		typ        string
+		configured string
+		controller string
+		want       string
+		wantSet    bool
+	}{
+		{name: "selected ignores controller value", typ: "passphrase", controller: "workflow-passphrase"},
+		{name: "configured value wins", typ: "passphrase", configured: "configured-passphrase", controller: "workflow-passphrase", want: "configured-passphrase", wantSet: true},
+		{name: "selected without value", typ: "passphrase"},
+		{name: "unselected provider", typ: "awskms", controller: "must-stay-in-controller"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PULUMI_CONFIG_PASSPHRASE", tt.controller)
+			engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
+				SecretsProvider: schemas.EngineSecretsProvider{Type: tt.typ, Passphrase: tt.configured},
+			}}}
+			env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			got, ok := env["PULUMI_CONFIG_PASSPHRASE"]
+			if ok != tt.wantSet || got != tt.want {
+				t.Fatalf("PULUMI_CONFIG_PASSPHRASE = %q, present=%t; want %q, present=%t", got, ok, tt.want, tt.wantSet)
+			}
+		})
+	}
+}
+
+func TestResolveStateAuthEnvPulumiPassphraseProvider(t *testing.T) {
+	reg := auth.NewRegistry()
+	if err := reg.Register(&fakeProvider{
+		name: "pulumi-passphrase", typ: "gcp_secret_manager",
+		env: map[string]string{"PULUMI_CONFIG_PASSPHRASE": "provider-passphrase"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
+		AuthProvider: "pulumi-passphrase",
+		SecretsProvider: schemas.EngineSecretsProvider{
+			Type:       "passphrase",
+			Passphrase: "configured-passphrase",
+		},
+	}}}
+	env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if got := env["PULUMI_CONFIG_PASSPHRASE"]; got != "provider-passphrase" {
+		t.Fatalf("PULUMI_CONFIG_PASSPHRASE = %q, want provider value", got)
+	}
+}
+
+func TestResolveAuthEnvHandlesNilRegistry(t *testing.T) {
+	t.Parallel()
+
+	env, cleanup, err := ResolveAuthEnv(context.Background(), localAuthCfg(), nil,
+		"prod/api", auth.ModePreview, LocalAuth{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if len(env) != 0 {
+		t.Fatalf("nil registry returned credentials: %#v", env)
+	}
+}
+
+func TestResolveStateAuthEnvHandlesNilRegistry(t *testing.T) {
+	t.Parallel()
+
+	engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
+		AuthProvider: "missing",
+	}}}
+	env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if len(env) != 0 {
+		t.Fatalf("nil registry returned state credentials: %#v", env)
+	}
+}
+
 func localAuthCfg() *schemas.Auth {
 	return &schemas.Auth{
 		Providers: map[string]schemas.ProviderYAML{

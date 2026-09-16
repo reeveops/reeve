@@ -33,7 +33,7 @@ func newLocksCmd() *cobra.Command {
 
 	reap := &cobra.Command{
 		Use:   "reap",
-		Short: "Evict expired locks across the bucket (opportunistic - also runs on every invocation)",
+		Short: "Evict expired locks across the bucket",
 		RunE:  locksReap,
 	}
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -103,35 +104,17 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 		return fmt.Errorf("prepare engine execution environment: %w", err)
 	}
 	defer executionCleanup()
-	stateEnv, stateCleanup, err := run.ResolveStateAuthEnv(ctx, engineCfg, authReg)
+	stateEnv, resolver, rebinder, authCleanup, err := buildDriftAuth(ctx, cfg.Auth, engineCfg, authReg, executionEnv)
 	if err != nil {
 		return err
 	}
-	defer stateCleanup()
-	mergedStateEnv := make(map[string]string, len(executionEnv)+len(stateEnv))
-	for key, value := range executionEnv {
-		mergedStateEnv[key] = value
-	}
-	for key, value := range stateEnv {
-		mergedStateEnv[key] = value
-	}
-	stateEnv = mergedStateEnv
+	defer func() {
+		if err := authCleanup(); err != nil {
+			slog.Warn("credential cache cleanup failed", "err", err)
+		}
+	}()
 	if err := run.PulumiLogin(ctx, engineCfg, stateEnv); err != nil {
 		return err
-	}
-	resolver := func(ctx context.Context, ref string) (map[string]string, func(), error) {
-		env, cleanup, err := run.ResolveAuthEnv(ctx, cfg.Auth, authReg, ref, auth.ModeDrift, run.LocalAuth{})
-		if err != nil {
-			return nil, cleanup, err
-		}
-		merged := make(map[string]string, len(stateEnv)+len(env))
-		for key, value := range stateEnv {
-			merged[key] = value
-		}
-		for key, value := range env {
-			merged[key] = value
-		}
-		return merged, cleanup, nil
 	}
 
 	decls := make([]discovery.Declaration, 0, len(engineCfg.Engine.Stacks))
@@ -186,6 +169,7 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 		IncludePatterns:  include,
 		ExcludePatterns:  exclude,
 		AuthResolver:     resolver,
+		AuthRebinder:     rebinder,
 		StateStore:       &drift.StateStore{Blob: store},
 		SuppressionStore: &drift.SuppressionStore{Blob: store},
 		Redactor:         run.BuildRedactor(cfg.Shared),
@@ -315,6 +299,70 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 
 	fmt.Fprintln(cmd.OutOrStdout(), report)
 	return driftExitError(cfg, out)
+}
+
+func buildDriftAuth(ctx context.Context, authCfg *schemas.Auth, engineCfg *schemas.Engine, registry *auth.Registry, executionEnv map[string]string) (map[string]string, drift.AuthResolver, drift.AuthResolver, func() error, error) {
+	var source run.CredentialAcquirer
+	var cache *auth.CredentialCache
+	if registry != nil {
+		cache = auth.NewCredentialCache(registry)
+		source = cache
+	}
+	stateAuthEnv, stateCleanup, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, source)
+	if err != nil {
+		if cache != nil {
+			return nil, nil, nil, nil, errors.Join(err, cache.Close())
+		}
+		return nil, nil, nil, nil, err
+	}
+	stateEnv := mergeDriftEnv(executionEnv, stateAuthEnv)
+	var stateMu sync.RWMutex
+	resolver := func(ctx context.Context, ref string) (map[string]string, func(), error) {
+		env, cleanup, err := run.ResolveAuthEnvWith(ctx, authCfg, source, ref, auth.ModeDrift, run.LocalAuth{})
+		if err != nil {
+			return nil, cleanup, err
+		}
+		stateMu.RLock()
+		merged := mergeDriftEnv(stateEnv, env)
+		stateMu.RUnlock()
+		return merged, cleanup, nil
+	}
+	rebinder := resolver
+	if cache != nil {
+		rebinder = func(ctx context.Context, ref string) (map[string]string, func(), error) {
+			if err := cache.InvalidateAll(); err != nil {
+				return nil, func() {}, err
+			}
+			refreshedStateAuth, releaseState, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, cache)
+			if err != nil {
+				return nil, releaseState, err
+			}
+			releaseState()
+			stateMu.Lock()
+			stateEnv = mergeDriftEnv(executionEnv, refreshedStateAuth)
+			stateMu.Unlock()
+			return resolver(ctx, ref)
+		}
+	}
+	cleanup := func() error {
+		stateCleanup()
+		if cache != nil {
+			return cache.Close()
+		}
+		return nil
+	}
+	return stateEnv, resolver, rebinder, cleanup, nil
+}
+
+func mergeDriftEnv(base, override map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		merged[key] = value
+	}
+	return merged
 }
 
 // driftExitError maps drift.yaml behavior.exit_on onto the process exit
