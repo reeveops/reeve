@@ -99,6 +99,9 @@ func TestReusableWorkflowContract(t *testing.T) {
 	if strings.Contains(workflow, "secrets: inherit") {
 		t.Fatal("reusable workflow must map named secrets")
 	}
+	if strings.Contains(workflow, "pull-requests: write") {
+		t.Fatal("reusable workflow must inherit mode-specific caller permissions")
+	}
 	implementation := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
 	if !strings.Contains(implementation, "persist-credentials: false") {
 		t.Fatal("composite action checkout must not persist credentials")

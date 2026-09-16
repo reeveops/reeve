@@ -50,7 +50,7 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 
 - GIVEN a scheduled or manual caller selects `drift` mode
 - WHEN the called workflow starts
-- THEN it MUST run `reeve drift run` without PR write permission.
+- THEN it MUST run `reeve drift run` without requesting PR write permission.
 
 #### Scenario: Named secrets
 

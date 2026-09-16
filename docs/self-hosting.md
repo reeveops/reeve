@@ -231,6 +231,9 @@ jobs:
 The shared workflow uses the composite action from the same pinned Reeve commit.
 Set `pulumi_version`, `opentofu_version`, or `terraform_version` to install the workload CLI after event classification.
 
+The shared workflow inherits the caller's permissions so GitOps and drift callers can grant different minimum sets.
+Use the permissions shown above for GitOps and omit PR write access from drift callers.
+
 Named secrets include `reeve_token`, `slack_token`, `pulumi_access_token`, `pulumi_config_passphrase`, and `terraform_cloud_token`.
 Map only the credentials the workload needs instead of using `secrets: inherit`.
 
@@ -238,6 +241,12 @@ The exact-commit self reference requires GitHub.com and runner 2.336.0 or newer.
 GHES users can keep using the composite action directly until GitHub adds self references there.
 
 ```yaml
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  id-token: write
+
 jobs:
   drift:
     uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
