@@ -144,7 +144,17 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
 	}
 	defer executionCleanup()
-	stateEnv, stateCleanup, err := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+	var credentialSource credentialAcquirer
+	if in.AuthRegistry != nil {
+		credentialCache := auth.NewCredentialCache(in.AuthRegistry)
+		credentialSource = credentialCache
+		defer func() {
+			if err := credentialCache.Close(); err != nil {
+				slog.Warn("credential cache cleanup failed", "err", err)
+			}
+		}()
+	}
+	stateEnv, stateCleanup, err := resolveStateAuthEnv(ctx, in.Config, credentialSource)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +249,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		}
 		// ModeApply: a refresh writes state, so it needs write credentials,
 		// not the read-only preview role.
-		authEnv, authCleanup, aerr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModeApply, LocalAuth{})
+		authEnv, authCleanup, aerr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModeApply, LocalAuth{})
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())
