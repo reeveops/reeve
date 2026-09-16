@@ -118,6 +118,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	in := run.PreviewInput{
 		PRNumber:                 pr,
 		CommitSHA:                sha,
+		ExpectedHeadSHA:          os.Getenv("REEVE_EXPECTED_HEAD_SHA"),
 		RunNumber:                runNum,
 		CIRunID:                  os.Getenv("GITHUB_RUN_ID"),
 		CIRunURL:                 runURL,

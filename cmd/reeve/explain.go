@@ -86,20 +86,21 @@ func runExplain(cmd *cobra.Command, _ []string) error {
 	}
 
 	out, err := run.Explain(ctx, run.ExplainInput{
-		PRNumber:       pr,
-		CommitSHA:      sha,
-		CIRunID:        ciRunID,
-		CIRunURL:       runURL,
-		SelfCheckNames: selfCheckNames(),
-		RepoRoot:       root,
-		RepoPath:       repoPathForRoot(root),
-		Engine:         engine,
-		Config:         engineCfg,
-		Shared:         cfg.Shared,
-		Blob:           store,
-		Locks:          blocks.New(store),
-		VCS:            client,
-		StackFilter:    flagStringOrDefault(cmd, "stack", ""),
+		PRNumber:        pr,
+		CommitSHA:       sha,
+		ExpectedHeadSHA: os.Getenv("REEVE_EXPECTED_HEAD_SHA"),
+		CIRunID:         ciRunID,
+		CIRunURL:        runURL,
+		SelfCheckNames:  selfCheckNames(),
+		RepoRoot:        root,
+		RepoPath:        repoPathForRoot(root),
+		Engine:          engine,
+		Config:          engineCfg,
+		Shared:          cfg.Shared,
+		Blob:            store,
+		Locks:           blocks.New(store),
+		VCS:             client,
+		StackFilter:     flagStringOrDefault(cmd, "stack", ""),
 	})
 	if err != nil {
 		return err

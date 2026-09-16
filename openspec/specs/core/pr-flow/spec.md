@@ -42,16 +42,29 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   risk; fork PRs otherwise get dry-run-only credentials.
 - Notifications run last in the pipeline so upstream failures are captured
   accurately in the authoritative "what happened" surface.
-- SHA resolution: `apply`, `ready`, and `approved` commands resolve the commit
-  SHA from the PR HEAD via the VCS API (`GetPR`), not from `GITHUB_SHA`. This
-  ensures manifests and plan lookups use the branch tip SHA regardless of what
-  the CI runner checked out.
-- Apply and refresh MUST fetch PR metadata once per invocation. Head identity,
-  fork and draft policy, approvals, and gate evaluation reuse that snapshot.
+- SHA resolution: the maintained action MUST check out one immutable PR HEAD
+  SHA and supply it to the CLI. PR commands MUST fail when the live PR snapshot
+  disagrees with that checkout identity.
+- Apply and refresh MUST reuse one PR metadata snapshot for head identity, fork
+  and draft policy, approvals, and gate evaluation. When the action supplies an
+  immutable checkout identity, each command MUST revalidate the live head once
+  after read-only gates and before lock, credential, or engine operations.
 - Preview MUST reuse one PR metadata snapshot for head-SHA resolution and
   notification title and author fields within an invocation.
 - Apply MUST bind its target stacks to the preview manifest for the resolved
   HEAD before a live changed-file result can classify the run as empty.
+
+#### Scenario: PR head moves after checkout
+
+- **GIVEN** the maintained action checked out an immutable PR head
+- **WHEN** the PR head changes before a command binds its artifacts and gates
+- **THEN** the command fails without using the newer head with the older tree
+
+#### Scenario: PR head moves during gate evaluation
+
+- **GIVEN** apply or refresh passed its initial checkout comparison
+- **WHEN** the PR head changes before state-changing work begins
+- **THEN** the command fails before acquiring a lock, workload credential, or invoking the engine
 
 #### Scenario: Base movement changes the live file list
 

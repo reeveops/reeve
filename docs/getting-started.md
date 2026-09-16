@@ -203,6 +203,7 @@ Reeve converts repository-relative changed files to paths under that root before
 - Changes outside the configured root select no stacks.
 - Documentation-only or outside-root previews do not open blob storage, acquire engine credentials, initialize an engine session, or dispatch lifecycle notifications.
 - Apply stays bound to the stack set in the preview manifest for the PR head, even if GitHub's live changed-file list moves while the PR is open.
+- The maintained action checks out one immutable PR head and fails if the PR moves before gates, artifacts, apply, or refresh use it.
 
 **`reeve run preview` exit behavior**:
 

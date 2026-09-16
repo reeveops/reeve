@@ -2,11 +2,13 @@ package run
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	"github.com/reeveops/reeve/internal/config/schemas"
+	"github.com/reeveops/reeve/internal/core/approvals"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/core/summary"
 )
@@ -98,6 +100,35 @@ func TestApplyUsesPreviewWhenLiveFilesMoveOutsideRoot(t *testing.T) {
 	}
 	if len(engine.applied) != 1 || engine.applied[0] != "api/prod" {
 		t.Fatalf("apply must retain the previewed stack when the live diff moves outside the root, got %v", engine.applied)
+	}
+}
+
+func TestApplyRevalidatesExpectedHeadBeforeStateChange(t *testing.T) {
+	expected := strings.Repeat("a", 40)
+	moved := strings.Repeat("b", 40)
+	engine := &bgEngine{}
+	store, _ := filesystem.New(t.TempDir())
+	in := twoStackInput(t, engine, store)
+	fv := in.VCS.(*bgVCS)
+	fv.headSHAs = []string{expected, moved}
+	in.CommitSHA = expected
+	in.ExpectedHeadSHA = expected
+	fv.approvalsList = []approvals.Approval{{Source: "pr_review", Approver: "reviewer", CommitSHA: expected, Pinned: true}}
+	if err := writeManifest(context.Background(), store, in.PRNumber, "expected-preview", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Env: "prod", Status: summary.StatusPlanned},
+	}, expected); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Apply(context.Background(), in)
+	if !errors.Is(err, ErrPRHeadMismatch) {
+		t.Fatalf("Apply error = %v, want %v", err, ErrPRHeadMismatch)
+	}
+	if fv.getPRCalls != 2 {
+		t.Fatalf("PR metadata reads = %d, want initial snapshot plus boundary revalidation", fv.getPRCalls)
+	}
+	if len(engine.applied) != 0 {
+		t.Fatalf("engine applied after PR head moved: %v", engine.applied)
 	}
 }
 
