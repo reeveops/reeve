@@ -12,7 +12,21 @@ import (
 	"testing"
 
 	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob/blobtest"
 )
+
+func TestContract(t *testing.T) {
+	blobtest.RunContract(t, blobtest.Subject{
+		NewStore: func(t *testing.T) blob.Store {
+			t.Helper()
+			store, err := New(t.TempDir())
+			if err != nil {
+				t.Fatalf("new filesystem store: %v", err)
+			}
+			return store
+		},
+	})
+}
 
 func TestPutGet(t *testing.T) {
 	ctx := context.Background()
