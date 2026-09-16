@@ -37,11 +37,18 @@ step_line() {
 
 restore_step=$(step_block "Restore reeve binary cache")
 save_step=$(step_block "Save reeve binary cache")
+setup_step=$(step_block "Set up Go (from reeve's go.mod)")
 assert_contains "$restore_step" "uses: actions/cache/restore@$CACHE_SHA"
 assert_contains "$save_step" "uses: actions/cache/save@$CACHE_SHA"
 assert_contains "$restore_step" "key: $CACHE_KEY"
 assert_contains "$save_step" "key: $CACHE_KEY"
 assert_contains "$save_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
+assert_contains "$setup_step" 'go-version-file: ${{ steps.reeve-hash.outputs.root }}/go.mod'
+assert_contains "$setup_step" 'cache-dependency-path: ${{ steps.reeve-hash.outputs.root }}/go.sum'
+
+if [[ "$setup_step" == *".."* ]]; then
+  fail "setup-go paths must use the canonical action root"
+fi
 
 if grep -q 'uses: actions/cache@' "$ACTION_FILE"; then
   fail "monolithic actions/cache would save in a post-job hook"

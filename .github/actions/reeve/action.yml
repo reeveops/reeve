@@ -144,11 +144,13 @@ runs:
         ACTION_PATH: ${{ github.action_path }}/../../..
       run: |
         set -euo pipefail
+        action_root=$(cd "$ACTION_PATH" && pwd -P)
         # Canonical source hash (see .github/scripts/source-hash.sh): keyed on
         # content AND repo-relative path, so the same tree hashes identically
         # wherever it is checked out. It keys the cache and binds any edge
         # binary download to this exact action source.
-        echo "hash=$("$ACTION_PATH/.github/scripts/source-hash.sh" "$ACTION_PATH")" >> "$GITHUB_OUTPUT"
+        echo "root=$action_root" >> "$GITHUB_OUTPUT"
+        echo "hash=$("$action_root/.github/scripts/source-hash.sh" "$action_root")" >> "$GITHUB_OUTPUT"
 
     - name: Restore reeve binary cache
       id: reeve-cache
@@ -169,7 +171,7 @@ runs:
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
-        ACTION_PATH: ${{ github.action_path }}/../../..
+        ACTION_PATH: ${{ steps.reeve-hash.outputs.root }}
         REEVE_REF: ${{ inputs.source-ref || github.action_ref }}
         REEVE_REPO: ${{ inputs.source-repository || github.action_repository }}
         REEVE_SOURCE_HASH: ${{ steps.reeve-hash.outputs.hash }}
@@ -189,7 +191,7 @@ runs:
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-binary.outputs.eligible == 'true'
       shell: bash
       env:
-        ACTION_PATH: ${{ github.action_path }}/../../..
+        ACTION_PATH: ${{ steps.reeve-hash.outputs.root }}
         REEVE_REF: ${{ inputs.source-ref || github.action_ref }}
         REEVE_REPO: ${{ inputs.source-repository || github.action_repository }}
         REEVE_SOURCE_HASH: ${{ steps.reeve-hash.outputs.hash }}
@@ -205,8 +207,8 @@ runs:
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
       with:
-        go-version-file: ${{ github.action_path }}/../../../go.mod
-        cache-dependency-path: ${{ github.action_path }}/../../../go.sum
+        go-version-file: ${{ steps.reeve-hash.outputs.root }}/go.mod
+        cache-dependency-path: ${{ steps.reeve-hash.outputs.root }}/go.sum
 
     - name: Build reeve
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
@@ -218,7 +220,7 @@ runs:
         mkdir -p "$RUNNER_TEMP/reeve-bin"
         go build -trimpath -ldflags="-s -w -X main.version=source-${SRCHASH:0:12}" \
           -o "$RUNNER_TEMP/reeve-bin/reeve" ./cmd/reeve
-      working-directory: ${{ github.action_path }}/../../..
+      working-directory: ${{ steps.reeve-hash.outputs.root }}
 
     - name: Save reeve binary cache
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
