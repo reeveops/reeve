@@ -48,11 +48,13 @@ if grep -q 'uses: actions/cache@' "$ACTION_FILE"; then
 fi
 
 restore_line=$(step_line "Restore reeve binary cache")
+classify_line=$(step_line "Classify prebuilt binary eligibility")
+cosign_line=$(step_line "Install cosign for binary verification")
 build_line=$(step_line "Build reeve")
 save_line=$(step_line "Save reeve binary cache")
 checkout_line=$(step_line "Checkout workload")
-if ! (( restore_line < build_line && build_line < save_line && save_line < checkout_line )); then
-  fail "cache restore/build/save must complete before workload checkout"
+if ! (( restore_line < classify_line && classify_line < cosign_line && cosign_line < build_line && build_line < save_line && save_line < checkout_line )); then
+  fail "cache restore/classification/build/save must complete before workload checkout"
 fi
 
 echo "action cache tests passed"

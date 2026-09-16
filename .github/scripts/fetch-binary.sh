@@ -5,7 +5,7 @@
 # building from source.
 #
 # Ref semantics (the wrapper's action ref or reusable workflow SHA):
-#   vX.Y.Z        -> that release's goreleaser tarball, verified against the
+#   vX.Y.Z[-pre]  -> that release's goreleaser tarball, verified against the
 #                    release's checksums.txt (signed release pipeline).
 #   master | next -> the per-push prerelease whose signed source hash matches
 #                    the action source already on disk.
@@ -27,7 +27,7 @@ set -euo pipefail
 # classify_ref <ref> -> version | edge | commit | other
 classify_ref() {
   local ref="${1:-}"
-  if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
     echo version
   elif [[ "$ref" == "master" || "$ref" == "next" ]]; then
     echo edge
@@ -35,6 +35,28 @@ classify_ref() {
     echo commit
   else
     echo other
+  fi
+}
+
+# prebuilt_eligible reports whether this invocation can possibly use a
+# published binary. It performs no network access and keeps unsupported refs
+# and platforms from installing the verifier before the source-build fallback.
+prebuilt_eligible() {
+  local ref="${REEVE_REF:-}" repo="${REEVE_REPO:-}" kind
+  [[ -n "$ref" && -n "$repo" ]] || return 1
+  [[ "${REEVE_OS:-}" == "Linux" ]] || return 1
+  [[ -n "$(map_arch "${REEVE_ARCH:-}")" ]] || return 1
+  kind=$(classify_ref "$ref")
+  [[ "$kind" != "other" ]] || return 1
+  [[ "$kind" == "version" || "${REEVE_SOURCE_HASH:-}" =~ ^[0-9a-f]{64}$ ]]
+}
+
+classify_main() {
+  local out="${GITHUB_OUTPUT:-/dev/stdout}"
+  if prebuilt_eligible; then
+    echo "eligible=true" >> "$out"
+  else
+    echo "eligible=false" >> "$out"
   fi
 }
 
@@ -253,5 +275,9 @@ fetch_main() {
 
 # Run only when executed, so tests can source the helper functions.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  fetch_main
+  if [[ "${1:-}" == "classify" ]]; then
+    classify_main
+  else
+    fetch_main
+  fi
 fi

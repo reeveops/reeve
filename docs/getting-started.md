@@ -171,9 +171,6 @@ jobs:
     with:
       mode: gitops
       pulumi_version: latest
-    secrets:
-      pulumi_access_token: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-      pulumi_config_passphrase: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
 ```
 
 Pin the workflow call to a reviewed full commit SHA.
@@ -183,6 +180,7 @@ Scheduled bucket cleanup uses the same workflow with `mode: maintenance` and run
 It executes `reeve maintenance run` for expired locks and configured artifact retention.
 
 Use `opentofu_version` or `terraform_version` instead of `pulumi_version` for an HCL engine.
+Configure engine and state credentials through the federated or secret-manager providers in `.reeve/auth.yaml`.
 `reeve init` adds `id-token: write` when the loaded config declares AWS OIDC, GCP WIF, or Azure federated auth.
 
 It adds the `closed` pull request type only when `apply.trigger` is `merge`.
@@ -253,7 +251,7 @@ The `uses:` ref decides where the action gets its `reeve` binary. A cache
 keyed by the action repository, build variant, platform, and source hash comes
 first. On a cache hit nothing is downloaded or built:
 
-- **`@vX.Y.Z`** - downloads that release's signed tarball and verifies it
+- **`@vX.Y.Z[-prerelease]`** - downloads that release's signed tarball and verifies it
   against the release's `checksums.txt`.
 - **`@master` / `@next`** - downloads the per-push prerelease whose signed
   source hash matches the action source already on disk.

@@ -241,8 +241,8 @@ Use the composite action directly when multiple prefixes are required.
 The shared workflow inherits the caller's permissions so GitOps and drift callers can grant different minimum sets.
 Use the permissions shown above for GitOps and omit PR write access from drift callers.
 
-Named secrets include `reeve_token`, `slack_token`, `pulumi_access_token`, `pulumi_config_passphrase`, and `terraform_cloud_token`.
-Map only the credentials the workload needs instead of using `secrets: inherit`.
+Named secrets include `reeve_token` and `slack_token`.
+Configure engine and state credentials through the federated or secret-manager providers in `.reeve/auth.yaml`.
 
 The exact-commit self reference requires GitHub.com and runner 2.336.0 or newer.
 GHES users can keep using the composite action directly until GitHub adds self references there.
@@ -377,7 +377,7 @@ overriding the workflow's default token.
 
 ## Distribution
 
-Tagged releases (`vX.Y.Z`) ship per-platform tarballs with a
+Tagged releases (`vX.Y.Z` and semantic-version prereleases) ship per-platform tarballs with a
 `checksums.txt` signed via cosign keyless, plus a container image on GHCR
 and a Homebrew cask push to `reeveops/homebrew-tap` - all produced by
 goreleaser from `.github/workflows/release.yml`. Building from source
@@ -389,7 +389,7 @@ The composite action resolves its binary in three tiers, cache first:
 
 | Pin                 | Binary source                                                                    |
 | ------------------- | -------------------------------------------------------------------------------- |
-| `@vX.Y.Z`           | Release tarball, verified against the release's cosign-signed `checksums.txt`    |
+| `@vX.Y.Z[-pre]`     | Release tarball, verified against the release's cosign-signed `checksums.txt`    |
 | `@master` / `@next` | Source-matched per-push prerelease, verified against its checksum and cosign signature |
 | full commit SHA     | That commit's retained source-matched prerelease, with source-build fallback     |
 | anything else       | Built from source on the runner (branches and forks)                             |
