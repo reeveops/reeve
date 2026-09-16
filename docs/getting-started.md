@@ -195,6 +195,15 @@ That's it. The action auto-detects the command from the event:
 | `/reeve help` comment                              | posts available commands |
 | Any other comment, or any bot-authored comment     | silent no-op             |
 
+### Repository roots and change scope
+
+`--root` may point at a nested infrastructure directory in the checkout.
+Reeve converts repository-relative changed files to paths under that root before preview, apply, refresh, explain, and notification-policy checks.
+
+- Changes outside the configured root select no stacks.
+- Documentation-only or outside-root previews do not open blob storage, acquire engine credentials, initialize an engine session, or dispatch lifecycle notifications.
+- Apply stays bound to the stack set in the preview manifest for the PR head, even if GitHub's live changed-file list moves while the PR is open.
+
 **`reeve run preview` exit behavior**:
 
 - A preview exits `0` only when every targeted stack plans successfully or is a no-op.
