@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -115,6 +116,39 @@ func TestPruneRunArtifactsUsesListingMetadata(t *testing.T) {
 	}
 	if store.conditionalIDs[0] != "old-v1" || store.conditionalIDs[1] != "replaced-v1" {
 		t.Fatalf("versions = %v", store.conditionalIDs)
+	}
+}
+
+func TestPruneRunArtifactsLargeHistoryRequestBudget(t *testing.T) {
+	const objectCount = 2_000
+	now := time.Unix(20_000, 0)
+	objects := make([]blob.ListedObject, 0, objectCount)
+	for i := range objectCount {
+		modified := now.Add(-2 * time.Hour).Unix()
+		if i%2 == 0 {
+			modified = now.Add(-30 * time.Minute).Unix()
+		}
+		objects = append(objects, blob.ListedObject{
+			Key:     fmt.Sprintf("runs/pr-1/history-%04d/manifest.json", i),
+			Version: fmt.Sprintf("version-%04d", i), LastModified: modified,
+		})
+	}
+	store := &retentionCountingStore{objects: objects, deleteErr: map[string]error{}}
+
+	deleted, err := PruneRunArtifacts(t.Context(), store, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != objectCount/2 || len(store.deleteCalls) != objectCount/2 {
+		t.Fatalf("deleted = %d with %d calls, want %d", deleted, len(store.deleteCalls), objectCount/2)
+	}
+	if store.metadataCalls != 1 || store.listCalls != 0 || store.getCalls != 0 {
+		t.Fatalf("calls: metadata=%d list=%d content-get=%d", store.metadataCalls, store.listCalls, store.getCalls)
+	}
+	for i, key := range store.deleteCalls {
+		if key == "" || store.conditionalIDs[i] == "" {
+			t.Fatalf("conditional delete %d missing key or version: key=%q version=%q", i, key, store.conditionalIDs[i])
+		}
 	}
 }
 
