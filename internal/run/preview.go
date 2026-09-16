@@ -47,7 +47,6 @@ type PreviewInput struct {
 	PRTitle       string
 	CommitSHA     string
 	RunNumber     int
-	RunAttempt    int
 	CIRunID       string
 	CIRunURL      string
 	RepoRoot      string
@@ -90,6 +89,8 @@ type PreviewInput struct {
 	// Force re-runs even when this commit is already recorded as applied,
 	// bypassing the already-applied guard.
 	Force bool
+	// RunAttempt distinguishes reruns that share a workflow run number.
+	RunAttempt int
 	// PlanRequested marks a plan an operator explicitly asked for (a
 	// `/reeve plan` comment) rather than one triggered by the PR head
 	// changing. It rides the published plan events; the timeline channel
