@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -163,7 +162,7 @@ func TestCredentialCacheRejectsNewCredentialInsideSafetyMargin(t *testing.T) {
 	cache.now = func() time.Time { return now }
 	t.Cleanup(func() { _ = cache.Close() })
 	_, _, err := cache.AcquireAll(t.Context(), []string{"too-short"})
-	if err == nil || !strings.Contains(err.Error(), "safety margin") {
+	if !errors.Is(err, ErrCredentialExpiresSoon) {
 		t.Fatalf("short credential must be rejected, got %v", err)
 	}
 	if provider.cleanups.Load() != 1 {
@@ -239,6 +238,45 @@ func TestCredentialCacheInvalidationAcquiresNewGeneration(t *testing.T) {
 	}
 	if first["GENERATION"] != "1" || second["GENERATION"] != "2" {
 		t.Fatalf("credential generations = %q then %q, want 1 then 2", first["GENERATION"], second["GENERATION"])
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if provider.cleanups.Load() != 2 {
+		t.Fatalf("credential generation cleanups = %d, want 2", provider.cleanups.Load())
+	}
+}
+
+func TestCredentialCacheInvalidationDiscardsInFlightGeneration(t *testing.T) {
+	provider := &cacheProvider{
+		name: "shared", started: make(chan struct{}, 2), release: make(chan struct{}),
+	}
+	cache := cacheWithProvider(t, provider)
+	t.Cleanup(func() { _ = cache.Close() })
+
+	result := make(chan map[string]string, 1)
+	errs := make(chan error, 1)
+	go func() {
+		env, _, err := cache.AcquireAll(t.Context(), []string{"shared"})
+		result <- env
+		errs <- err
+	}()
+
+	<-provider.started
+	if err := cache.InvalidateAll(); err != nil {
+		t.Fatal(err)
+	}
+	close(provider.release)
+
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	env := <-result
+	if env["GENERATION"] != "2" {
+		t.Fatalf("credential generation = %q, want post-invalidation generation 2", env["GENERATION"])
+	}
+	if provider.acquires.Load() != 2 {
+		t.Fatalf("provider acquisitions = %d, want 2", provider.acquires.Load())
 	}
 	if err := cache.Close(); err != nil {
 		t.Fatal(err)

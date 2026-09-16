@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,10 +37,12 @@ func TestActionRunBlocksContainNoExpressions(t *testing.T) {
 }
 
 func TestPreviewRejectsNegativeParallelism(t *testing.T) {
+	t.Parallel()
+
 	cmd := newRunCmd()
 	cmd.SetArgs([]string{"preview", "--max-parallel-stacks=-1"})
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "max-parallel-stacks") {
+	if !errors.Is(err, errInvalidMaxParallelStacks) {
 		t.Fatalf("negative preview parallelism must be rejected, got %v", err)
 	}
 }

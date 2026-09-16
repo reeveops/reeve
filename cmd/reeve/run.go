@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"github.com/reeveops/reeve/internal/run"
 	gh "github.com/reeveops/reeve/internal/vcs/github"
 )
+
+var errInvalidMaxParallelStacks = errors.New("--max-parallel-stacks must be zero or positive")
 
 func newRunCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "run", Short: "Execute preview or apply for the current PR context"}
@@ -89,7 +92,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	}
 	maxParallel := flagInt(cmd, "max-parallel-stacks")
 	if maxParallel < 0 {
-		return fmt.Errorf("--max-parallel-stacks must be zero or positive")
+		return errInvalidMaxParallelStacks
 	}
 	pr := flagInt(cmd, "pr")
 	sha := flagStringOrEnv(cmd, "sha", "GITHUB_SHA")

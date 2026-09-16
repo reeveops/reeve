@@ -234,6 +234,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 	decls, filter := declarationsFromConfig(in.Config)
 	declared := discovery.Resolve(enum, decls, filter)
+	previewed, hasPreview := PreviewedStackRefs(ctx, in.Blob, in.PRNumber, in.CommitSHA)
 
 	changed, err := in.VCS.ListChangedFiles(ctx, in.PRNumber)
 	if err != nil {
@@ -249,17 +250,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		slog.Debug("target stack", "ref", s.Ref(), "path", s.Path)
 	}
 
-	// Docs/asset-only change: nothing to apply. Record on the timeline and exit.
-	if allOutside {
-		timeline.add(ctx, "⏭️", "skipped", fmt.Sprintf("no changed files are under the configured root %s", in.RepoPath))
-		slog.Info("apply skipped: changes outside configured root", "root", in.RepoPath)
-		return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
-	}
-	if mapRes.Reason == discovery.ReasonDocsOnly {
-		timeline.add(ctx, "⏭️", "skipped", "documentation/asset-only changes — no Pulumi stacks affected")
-		slog.Info("apply skipped: docs-only changes")
-		return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
-	}
 	// Bind the apply scope to what was previewed for THIS commit.
 	//
 	// Two things make a freshly-computed mapping unsafe here. First,
@@ -274,7 +264,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	// The preview manifest is keyed by commit SHA and immutable, so it is
 	// the only honest record of what was planned and approved. Apply
 	// executes that set - never more.
-	if previewed, ok := PreviewedStackRefs(ctx, in.Blob, in.PRNumber, in.CommitSHA); ok {
+	if hasPreview {
 		bound := make([]discovery.Stack, 0, len(target))
 		for _, s := range declared {
 			if previewed[s.Ref()] {
@@ -297,6 +287,21 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			"changed files map to no specific stack (%s) and no plan exists for %s; not widening the apply to every stack",
 			strings.Join(mapRes.Unmapped, ", "), shortSHA(in.CommitSHA)))
 		target = mapRes.Matched
+	}
+
+	// A live PR file list is a diff against a moving base. It may report no
+	// files under this root even though the immutable preview for this HEAD
+	// covered stacks. Only skip after the preview binding confirms there is
+	// no planned stack to execute.
+	if allOutside && len(target) == 0 {
+		timeline.add(ctx, "⏭️", "skipped", fmt.Sprintf("no changed files are under the configured root %s", in.RepoPath))
+		slog.Info("apply skipped: changes outside configured root", "root", in.RepoPath)
+		return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
+	}
+	if mapRes.Reason == discovery.ReasonDocsOnly && len(target) == 0 {
+		timeline.add(ctx, "⏭️", "skipped", "documentation/asset-only changes — no Pulumi stacks affected")
+		slog.Info("apply skipped: docs-only changes")
+		return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
 	}
 
 	if len(target) == 0 {
