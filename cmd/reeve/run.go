@@ -130,14 +130,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		Observability:            cfg.Observability,
 		ObservabilitySourceFiles: cfg.ObservabilitySourceFiles,
 		OpenBlob: func(openCtx context.Context) (blob.Store, error) {
-			store, err := openRunStore(openCtx, cfg.Shared.Bucket, root)
-			if err != nil {
-				return nil, err
-			}
-			pruneStart := time.Now()
-			run.PruneRunArtifactsOpportunistic(openCtx, store, cfg.Shared)
-			slog.Debug("run artifact prune finished", "ms", time.Since(pruneStart).Milliseconds())
-			return store, nil
+			return openRunStore(openCtx, cfg.Shared.Bucket, root)
 		},
 		Local:              local,
 		LocalAuthProviders: localAuth,
