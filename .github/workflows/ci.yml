@@ -31,6 +31,9 @@ jobs:
       - name: go test (race)
         run: go test -race ./...
 
+      - name: Test action binary resolver
+        run: bash .github/scripts/fetch-binary_test.sh
+
       # The reeve_minimal build excludes the interactive `reeve init` wizard
       # (charmbracelet/huh + its TUI tree). Nothing else compiles it, so
       # without this step init_wizard_minimal.go rots silently and only

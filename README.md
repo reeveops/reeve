@@ -133,12 +133,14 @@ all of this only matters on a cache miss:
 | Pin                | Binary source                                                                                           |
 | ------------------ | ------------------------------------------------------------------------------------------------------- |
 | `@vX.Y.Z`          | Release tarball from that release, verified against its cosign-signed `checksums.txt`                   |
-| `@master` / `@next`| Newest per-push `<branch>-<sha>` prerelease binary, requiring a valid checksum and cosign signature |
-| anything else      | Built from source on the runner (SHA pins, feature branches, forks)                                     |
+| `@master` / `@next`| Source-matched per-push prerelease with a valid checksum and cosign signature                           |
+| full commit SHA    | That commit's retained source-matched prerelease, with source-build fallback                            |
+| anything else      | Built from source on the runner (feature branches and forks)                                            |
 
 Prebuilt paths save the ~30s+ Go toolchain setup + build on first runs. Any
-download or checksum failure falls back to the source build automatically -
-the run never breaks because a binary wasn't available.
+download, source-match, or verification failure falls back to a source build.
+
+The run never breaks because a binary was unavailable.
 
 ### PR commands
 

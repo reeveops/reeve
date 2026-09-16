@@ -238,16 +238,12 @@ cache hit nothing is downloaded or built:
 
 - **`@vX.Y.Z`** - downloads that release's signed tarball and verifies it
   against the release's `checksums.txt`.
-- **`@master` / `@next`** - downloads the newest per-push `<branch>-<sha>`
-  prerelease (one is published per commit to that branch). The action verifies
-  the binary against the prerelease's `checksums.txt` and requires its keyless
-  signature (`checksums.txt.bundle`). Because
-  it resolves the *newest* prerelease, the binary may be built from a slightly
-  newer commit than the action source you pinned - the `vX.Y.Z` releases are
-  the reproducible, version-pinned distribution.
-- **Anything else** (a SHA pin, a feature branch, a fork) - builds from
-  source on the runner, as does any download or checksum failure. Fallback
-  is automatic and logged; a missing binary never fails your run.
+- **`@master` / `@next`** - downloads the per-push prerelease whose signed
+  source hash matches the action source already on disk.
+- **A full commit SHA** - downloads that commit's retained prerelease when its
+  signed source hash matches, then falls back to a source build when unavailable.
+- **Anything else** (a feature branch or fork) - builds from source on the
+  runner. Any missing asset or verification failure also falls back safely.
 
 The prebuilt paths skip the Go toolchain setup + compile, saving ~30s+ on
 first runs and cache misses.
