@@ -47,6 +47,7 @@ type PreviewInput struct {
 	PRTitle       string
 	CommitSHA     string
 	RunNumber     int
+	RunAttempt    int
 	CIRunID       string
 	CIRunURL      string
 	RepoRoot      string
@@ -136,7 +137,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	in.CommitSHA = resolvePRHeadSHA(ctx, in.VCS, in.PRNumber, in.CommitSHA)
 	slog.Debug("preview starting", "pr", in.PRNumber, "sha", in.CommitSHA, "local", in.Local)
 
-	runID := fmt.Sprintf("run-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	runID := runIdentity("run", in.RunNumber, in.RunAttempt, in.CommitSHA)
 	ciRunID := in.CIRunID
 	if ciRunID == "" {
 		// Direct callers and local tests may not have a provider run ID. The
