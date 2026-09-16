@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	gh "github.com/google/go-github/v66/github"
 	"golang.org/x/oauth2"
@@ -23,6 +24,9 @@ type Client struct {
 	gh    *gh.Client
 	owner string
 	repo  string
+
+	commentMu    sync.Mutex
+	commentCache map[int][]*gh.IssueComment
 }
 
 // publicAPIURL is github.com's REST endpoint - the default when
@@ -140,25 +144,74 @@ func (c *Client) UpsertComment(ctx context.Context, number int, body, marker str
 	if marker == "" {
 		return errors.New("marker is required")
 	}
+	c.commentMu.Lock()
+	defer c.commentMu.Unlock()
+	return c.upsertCommentLocked(ctx, number, body, marker, true)
+}
+
+func (c *Client) upsertCommentLocked(ctx context.Context, number int, body, marker string, refreshOnNotFound bool) error {
+	comments, err := c.issueCommentsLocked(ctx, number, false)
+	if err != nil {
+		return err
+	}
+	for _, cm := range comments {
+		if !strings.Contains(cm.GetBody(), marker) {
+			continue
+		}
+		edited, resp, err := c.gh.Issues.EditComment(ctx, c.owner, c.repo, cm.GetID(), &gh.IssueComment{Body: gh.String(body)})
+		if err == nil {
+			cm.Body = gh.String(body)
+			if edited != nil && edited.User != nil {
+				cm.User = edited.User
+			}
+			return nil
+		}
+		if refreshOnNotFound && resp != nil && resp.StatusCode == http.StatusNotFound {
+			if _, err := c.issueCommentsLocked(ctx, number, true); err != nil {
+				return err
+			}
+			return c.upsertCommentLocked(ctx, number, body, marker, false)
+		}
+		return err
+	}
+	created, _, err := c.gh.Issues.CreateComment(ctx, c.owner, c.repo, number, &gh.IssueComment{Body: gh.String(body)})
+	if err != nil {
+		return err
+	}
+	if created == nil || created.GetID() == 0 {
+		delete(c.commentCache, number)
+		return nil
+	}
+	c.commentCache[number] = append(c.commentCache[number], created)
+	return nil
+}
+
+// issueCommentsLocked returns one cached, paginated comment snapshot per PR.
+// The caller must hold commentMu.
+func (c *Client) issueCommentsLocked(ctx context.Context, number int, refresh bool) ([]*gh.IssueComment, error) {
+	if !refresh && c.commentCache != nil {
+		if comments, ok := c.commentCache[number]; ok {
+			return comments, nil
+		}
+	}
+	var out []*gh.IssueComment
 	opt := &gh.IssueListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
 	for {
 		comments, resp, err := c.gh.Issues.ListComments(ctx, c.owner, c.repo, number, opt)
 		if err != nil {
-			return fmt.Errorf("list comments: %w", err)
+			return nil, fmt.Errorf("list comments: %w", err)
 		}
-		for _, cm := range comments {
-			if strings.Contains(cm.GetBody(), marker) {
-				_, _, err := c.gh.Issues.EditComment(ctx, c.owner, c.repo, cm.GetID(), &gh.IssueComment{Body: gh.String(body)})
-				return err
-			}
-		}
+		out = append(out, comments...)
 		if resp.NextPage == 0 {
 			break
 		}
 		opt.Page = resp.NextPage
 	}
-	_, _, err := c.gh.Issues.CreateComment(ctx, c.owner, c.repo, number, &gh.IssueComment{Body: gh.String(body)})
-	return err
+	if c.commentCache == nil {
+		c.commentCache = make(map[int][]*gh.IssueComment)
+	}
+	c.commentCache[number] = out
+	return out, nil
 }
 
 // DeleteCommentsByMarkerPrefix deletes the PR comments whose body carries a
@@ -176,26 +229,21 @@ func (c *Client) DeleteCommentsByMarkerPrefix(ctx context.Context, number int, p
 	if err != nil {
 		return 0, err
 	}
+	c.commentMu.Lock()
+	defer c.commentMu.Unlock()
 	var stale []int64
-	opt := &gh.IssueListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
-	for {
-		comments, resp, err := c.gh.Issues.ListComments(ctx, c.owner, c.repo, number, opt)
-		if err != nil {
-			return 0, fmt.Errorf("list comments: %w", err)
+	comments, err := c.issueCommentsLocked(ctx, number, false)
+	if err != nil {
+		return 0, err
+	}
+	for _, cm := range comments {
+		if !strings.EqualFold(cm.GetUser().GetLogin(), author) {
+			continue
 		}
-		for _, cm := range comments {
-			if !strings.EqualFold(cm.GetUser().GetLogin(), author) {
-				continue
-			}
-			part, ok := partOrdinal(cm.GetBody(), prefix)
-			if ok && part > keepThrough {
-				stale = append(stale, cm.GetID())
-			}
+		part, ok := partOrdinal(cm.GetBody(), prefix)
+		if ok && part > keepThrough {
+			stale = append(stale, cm.GetID())
 		}
-		if resp.NextPage == 0 {
-			break
-		}
-		opt.Page = resp.NextPage
 	}
 	deleted := 0
 	for _, id := range stale {
@@ -205,9 +253,20 @@ func (c *Client) DeleteCommentsByMarkerPrefix(ctx context.Context, number int, p
 			// than failing the run over it.
 			return deleted, fmt.Errorf("delete comment %d: %w", id, err)
 		}
+		c.removeCachedCommentLocked(number, id)
 		deleted++
 	}
 	return deleted, nil
+}
+
+func (c *Client) removeCachedCommentLocked(number int, id int64) {
+	comments := c.commentCache[number]
+	for i, cm := range comments {
+		if cm.GetID() == id {
+			c.commentCache[number] = append(comments[:i], comments[i+1:]...)
+			return
+		}
+	}
 }
 
 // authenticatedCommentAuthor identifies the account whose token writes reeve
