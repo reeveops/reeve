@@ -46,6 +46,8 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   SHA from the PR HEAD via the VCS API (`GetPR`), not from `GITHUB_SHA`. This
   ensures manifests and plan lookups use the branch tip SHA regardless of what
   the CI runner checked out.
+- Apply and refresh MUST fetch PR metadata once per invocation. Head identity,
+  fork and draft policy, approvals, and gate evaluation reuse that snapshot.
 - Preview MUST reuse one PR metadata snapshot for head-SHA resolution and
   notification title and author fields within an invocation.
 

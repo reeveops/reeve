@@ -181,6 +181,18 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 	}
 
+	// Resolve the authoritative PR snapshot once. The command runner does not
+	// prefetch it, so head identity and every gate use the same VCS response.
+	pr, err := in.VCS.GetPR(ctx, in.PRNumber)
+	if err != nil {
+		return nil, fmt.Errorf("get pr: %w", err)
+	}
+	if pr.HeadSHA != "" {
+		in.CommitSHA = pr.HeadSHA
+		runID = fmt.Sprintf("apply-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	}
+	slog.Debug("pr fetched", "number", in.PRNumber, "head_sha", pr.HeadSHA, "author", pr.Author, "base_ref", pr.BaseRef, "is_draft", pr.IsDraft, "is_fork", pr.IsFork)
+
 	// OTEL root span for this run. Finished at return.
 	ctx, endRun := in.OTEL.StartRunSpan(ctx, "apply", in.PRNumber, in.CommitSHA)
 	// "outcome" is filled in along the way: explicit blocked/failed paths set
@@ -294,12 +306,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 
 	// 2. Per-stack context: PR + checks + upstream-commits + approvals + CODEOWNERS.
-	pr, err := in.VCS.GetPR(ctx, in.PRNumber)
-	if err != nil {
-		return nil, fmt.Errorf("get pr: %w", err)
-	}
-	slog.Debug("pr fetched", "number", in.PRNumber, "head_sha", pr.HeadSHA, "author", pr.Author, "base_ref", pr.BaseRef, "is_draft", pr.IsDraft, "is_fork", pr.IsFork)
-
 	gi, err := gatherGateInputs(ctx, in.VCS, in.Shared, in.CommentApproval,
 		in.PRNumber, pr, in.CommitSHA, changed,
 		vcs.ChecksGreenOpts{IgnoreRunID: in.CIRunID, IgnoreNames: in.SelfCheckNames})

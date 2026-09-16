@@ -89,12 +89,6 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	if pr > 0 {
-		if prMeta, err := client.GetPR(ctx, pr); err == nil && prMeta.HeadSHA != "" {
-			sha = prMeta.HeadSHA
-		}
-	}
-
 	// Break-glass: resolve the justification, either from --justification or
 	// by strictly parsing the triggering comment ($REEVE_BREAK_GLASS_COMMENT,
 	// set by action.yml). A malformed command posts a helpful PR comment and

@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/reeveops/reeve/internal/auth"
@@ -9,6 +10,7 @@ import (
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/core/summary"
 	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/vcs"
 )
 
 type credentialRefreshEngine struct {
@@ -30,6 +32,21 @@ func (e *credentialRefreshEngine) Refresh(_ context.Context, stack discovery.Sta
 	e.refreshed = append(e.refreshed, stack.Ref())
 	return iac.RefreshResult{Counts: summary.Counts{Change: 1}}, nil
 }
+
+type countingRefreshVCS struct {
+	headSHA    string
+	getPRCalls int
+}
+
+func (*countingRefreshVCS) ListChangedFiles(context.Context, int) ([]string, error) {
+	return nil, nil
+}
+func (v *countingRefreshVCS) GetPR(context.Context, int) (*vcs.PR, error) {
+	v.getPRCalls++
+	return &vcs.PR{Number: 7, HeadSHA: v.headSHA, BaseRef: "main"}, nil
+}
+func (*countingRefreshVCS) UpsertComment(context.Context, int, string, string) error { return nil }
+func (*countingRefreshVCS) PostComment(context.Context, int, string) error           { return nil }
 
 func TestRefreshReusesCredentialAcrossStateAndStacks(t *testing.T) {
 	provider := &countingCredentialProvider{}
@@ -69,5 +86,30 @@ func TestRefreshReusesCredentialAcrossStateAndStacks(t *testing.T) {
 	}
 	if provider.cleanups.Load() != 1 {
 		t.Fatalf("credential cleanups = %d, want 1", provider.cleanups.Load())
+	}
+}
+
+func TestRefreshUsesOneAuthoritativePRSnapshot(t *testing.T) {
+	headSHA := strings.Repeat("a", 40)
+	vcsClient := &countingRefreshVCS{headSHA: headSHA}
+	engine := &credentialRefreshEngine{stacks: []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+	}}
+	out, err := Refresh(t.Context(), RefreshInput{
+		PRNumber: 7, CommitSHA: strings.Repeat("f", 40), RunNumber: 12,
+		RepoRoot: "/repo", Engine: engine, VCS: vcsClient, All: true, DryRun: true,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Type: "tofu", Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"prod"}}},
+		}},
+		Shared: &schemas.Shared{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vcsClient.getPRCalls != 1 {
+		t.Fatalf("PR metadata reads = %d, want 1", vcsClient.getPRCalls)
+	}
+	if !strings.HasSuffix(out.RunID, headSHA[:7]) {
+		t.Fatalf("run ID %q does not use authoritative PR head %s", out.RunID, headSHA)
 	}
 }

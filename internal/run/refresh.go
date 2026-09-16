@@ -99,6 +99,18 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	if !in.Engine.Capabilities().SupportsRefresh {
 		return nil, fmt.Errorf("engine %s does not support refresh", in.Engine.Name())
 	}
+	var pr *vcs.PR
+	if !in.Local && in.VCS != nil {
+		var err error
+		pr, err = in.VCS.GetPR(ctx, in.PRNumber)
+		if err != nil {
+			return nil, fmt.Errorf("get pr: %w", err)
+		}
+		if pr.HeadSHA != "" {
+			in.CommitSHA = pr.HeadSHA
+			runID = fmt.Sprintf("refresh-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+		}
+	}
 	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate stacks: %w", err)
@@ -107,11 +119,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	declared := discovery.Resolve(enum, decls, filter)
 
 	target := declared
-	if !in.Local && in.VCS != nil {
-		pr, gerr := in.VCS.GetPR(ctx, in.PRNumber)
-		if gerr != nil {
-			return nil, fmt.Errorf("get pr: %w", gerr)
-		}
+	if pr != nil {
 		forkOptIn := in.Shared != nil && in.Shared.Apply.AllowForkPRs
 		if pr.IsDraft {
 			return nil, fmt.Errorf("PR #%d is in draft - convert to ready for review before refreshing state", in.PRNumber)

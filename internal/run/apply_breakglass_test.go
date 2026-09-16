@@ -55,12 +55,14 @@ type bgVCS struct {
 	approvalsList []approvals.Approval
 	comments      map[string][]string // marker → bodies (upserts)
 	posted        []string            // plain PostComment bodies
+	getPRCalls    int
 }
 
 func (f *bgVCS) ListChangedFiles(ctx context.Context, _ int) ([]string, error) {
 	return f.changed, nil
 }
 func (f *bgVCS) GetPR(ctx context.Context, n int) (*vcs.PR, error) {
+	f.getPRCalls++
 	return &vcs.PR{Number: n, HeadSHA: f.headSHA, BaseRef: "main", Author: "author", RepoPrivate: f.repoPrivate, IsFork: f.forkPR}, nil
 }
 func (f *bgVCS) UpsertComment(ctx context.Context, _ int, body, marker string) error {

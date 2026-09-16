@@ -114,9 +114,6 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 		if cerr != nil {
 			return cerr
 		}
-		if prMeta, gerr := client.GetPR(ctx, pr); gerr == nil && prMeta.HeadSHA != "" {
-			in.CommitSHA = prMeta.HeadSHA
-		}
 		in.VCS = client
 	}
 

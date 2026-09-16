@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +79,7 @@ func TestApplyTriggerComment(t *testing.T) {
 		engine, fv := trigFixture()
 		store, _ := filesystem.New(t.TempDir())
 		in := trigApplyInput(t, engine, fv, "comment", "comment", store)
+		in.CommitSHA = strings.Repeat("f", 40)
 		out, err := Apply(context.Background(), in)
 		if err != nil {
 			t.Fatalf("Apply: %v", err)
@@ -87,6 +89,12 @@ func TestApplyTriggerComment(t *testing.T) {
 		}
 		if len(engine.applied) != 1 || engine.applied[0] != "api/prod" {
 			t.Fatalf("engine.Apply not invoked: %v", engine.applied)
+		}
+		if fv.getPRCalls != 1 {
+			t.Fatalf("PR metadata reads = %d, want 1", fv.getPRCalls)
+		}
+		if !strings.HasSuffix(out.RunID, bgSHA[:7]) {
+			t.Fatalf("run ID %q does not use authoritative PR head %s", out.RunID, bgSHA)
 		}
 	})
 
@@ -106,6 +114,9 @@ func TestApplyTriggerComment(t *testing.T) {
 		}
 		if fv.allComments() != "" {
 			t.Fatalf("no-op must not post any PR comment: %q", fv.allComments())
+		}
+		if fv.getPRCalls != 0 {
+			t.Fatalf("trigger mismatch read PR metadata %d times", fv.getPRCalls)
 		}
 	})
 
