@@ -59,7 +59,7 @@ retention:
 locking:
   ttl: 4h                          # default 4h; also bounds the lease of holders promoted from the queue
   queue: fifo                      # v1: fifo (only option)
-  reaper_interval: 15m             # informational; reaper is opportunistic
+  reaper_interval: 15m             # reserved; schedule `reeve maintenance run` in CI
   admin_override:                  # gates force-unlock (locks unlock without --pr);
     allowed: ["@org/sre-leads"]    # PR-scoped removal (--pr / "/reeve unlock") is
     requires_reason: true          # self-service and not gated here
@@ -282,11 +282,11 @@ A fully-clean apply writes `runs/pr-<n>/applied/<sha>.json`. Re-running at the s
 
 ### `retention.max_age`
 
-Run artifacts under `runs/` (manifests, applied-state pointers) are pruned at run start.
+Run `reeve maintenance run` on a schedule to prune artifacts under `runs/`.
 
 - Go duration string; default `720h` (1 month).
 - `0` or negative disables pruning.
-- Age-based only — merged-PR cleanup needs VCS wiring reeve does not have, so artifacts age out.
+- Age-based only. Merged-PR cleanup needs VCS wiring reeve does not have, so artifacts age out.
 
 ### Approval rule merging
 

@@ -31,11 +31,10 @@ type Shared struct {
 	LogFormat     string             `yaml:"log_format"`
 }
 
-// RetentionConfig controls opportunistic cleanup of reeve's blob artifacts
-// (run manifests, applied-state pointers) under the "runs/" prefix.
+// RetentionConfig controls cleanup of reeve's blob artifacts under "runs/".
 type RetentionConfig struct {
 	// MaxAge is a Go duration (e.g. "720h"). Blob items older than this are
-	// pruned at the start of a run. Empty -> default (DefaultRetentionMaxAge).
+	// pruned by explicit maintenance. Empty -> default (DefaultRetentionMaxAge).
 	// "0" / negative disables pruning entirely.
 	MaxAge string `yaml:"max_age"`
 }
@@ -47,7 +46,7 @@ const DefaultRetentionMaxAge = "720h"
 type LockingConfig struct {
 	TTL            string        `yaml:"ttl"`             // e.g. "4h"
 	Queue          string        `yaml:"queue"`           // fifo (v1)
-	ReaperInterval string        `yaml:"reaper_interval"` // unused v1 (opportunistic)
+	ReaperInterval string        `yaml:"reaper_interval"` // reserved; maintenance scheduling is external
 	AdminOverride  AdminOverride `yaml:"admin_override"`
 }
 

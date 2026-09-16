@@ -46,7 +46,7 @@ signals "someone else got there first" - lock state machine re-reads.
 
 ## Retention
 
-- `runs/` artifacts: pruned at run start, age-based. Default `720h` (1 month) via `retention.max_age`; `0`/negative disables.
+- `runs/` artifacts: pruned by `reeve maintenance run`, age-based. Default `720h` (1 month) via `retention.max_age`; `0`/negative disables.
 - Locks: reaped on TTL expiry, not by retention.
 - Age-based only - PR-close/merge cleanup needs VCS wiring reeve does not have.
 
