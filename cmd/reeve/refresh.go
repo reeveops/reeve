@@ -59,7 +59,10 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 	pr := flagInt(cmd, "pr")
 	sha := flagStringOrEnv(cmd, "sha", "GITHUB_SHA")
 	runNum := flagIntOrEnv(cmd, "run-number", "GITHUB_RUN_NUMBER")
-	runAttempt := flagIntOrEnv(cmd, "run-attempt", "GITHUB_RUN_ATTEMPT")
+	runAttempt, err := flagPositiveIntOrEnv(cmd, "run-attempt", "GITHUB_RUN_ATTEMPT")
+	if err != nil {
+		return err
+	}
 	runURL := flagStringOrEnv(cmd, "run-url", "")
 	repoFull := flagStringOrEnv(cmd, "repo", "GITHUB_REPOSITORY")
 	token := flagStringOrEnv(cmd, "token", "GITHUB_TOKEN")

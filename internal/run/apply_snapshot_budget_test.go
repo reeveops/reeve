@@ -33,6 +33,7 @@ func (s *snapshotBudgetStore) List(ctx context.Context, prefix string) ([]string
 }
 
 func TestApplyReadsLargePreviewHistoryOnce(t *testing.T) {
+	t.Parallel()
 	base, err := filesystem.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

@@ -173,7 +173,10 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	preCfg := toPreconditionsConfig(in.Shared)
 	hooksConfigured := len(HooksFromEngine(in.Config)) > 0
 	now := time.Now()
-	previewSnapshot := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, commitSHA)
+	previewSnapshot, err := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, commitSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load preview snapshot: %w", err)
+	}
 
 	// 3. Per stack: rules + lock read + report-only gates.
 	out := render.ExplainInput{CommitSHA: commitSHA, RunURL: in.CIRunURL}

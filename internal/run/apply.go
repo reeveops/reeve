@@ -255,7 +255,10 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	// The preview manifest is keyed by commit SHA and immutable, so it is
 	// the only honest record of what was planned and approved. Apply
 	// executes that set - never more.
-	previewSnapshot := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, in.CommitSHA)
+	previewSnapshot, err := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, in.CommitSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load preview snapshot: %w", err)
+	}
 	if previewed, ok := previewSnapshot.StackRefs(); ok {
 		bound := make([]discovery.Stack, 0, len(target))
 		for _, s := range declared {

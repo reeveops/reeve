@@ -106,6 +106,20 @@ func TestApplyWithNoPlanForCommitDoesNotWiden(t *testing.T) {
 	}
 }
 
+func TestApplyFailsClosedOnMalformedPreviewHistory(t *testing.T) {
+	engine := &bgEngine{}
+	store, _ := filesystem.New(t.TempDir())
+	in := twoStackInput(t, engine, store)
+	putRawManifest(t, store, in.PRNumber, "corrupt", "{not-json")
+
+	if _, err := Apply(t.Context(), in); err == nil {
+		t.Fatalf("Apply error = %v, want malformed preview failure", err)
+	}
+	if len(engine.applied) != 0 {
+		t.Fatalf("malformed preview history allowed applies: %v", engine.applied)
+	}
+}
+
 // scopeDelta names what a recomputed mapping would have added, so the drop is
 // visible on the timeline rather than silent.
 func TestScopeDeltaNamesDroppedStacks(t *testing.T) {

@@ -155,6 +155,7 @@ func TestExplainNilLockStore(t *testing.T) {
 }
 
 func TestExplainLoadsPreviewManifestOnce(t *testing.T) {
+	t.Parallel()
 	engine, _, in := explainFixture(t)
 	engine.enum = append(engine.enum,
 		discovery.Stack{Project: "api", Name: "staging", Env: "staging", Path: "projects/api"})

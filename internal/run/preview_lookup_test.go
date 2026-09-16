@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -31,6 +33,14 @@ func putManifest(t *testing.T, store blob.Store, pr int, runID, sha, createdAt s
 	}
 	key := fmt.Sprintf("runs/pr-%d/%s/manifest.json", pr, runID)
 	if _, err := store.Put(t.Context(), key, bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func putRawManifest(t *testing.T, store blob.Store, pr int, runID, body string) {
+	t.Helper()
+	key := fmt.Sprintf("runs/pr-%d/%s/manifest.json", pr, runID)
+	if _, err := store.Put(t.Context(), key, strings.NewReader(body)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -134,7 +144,10 @@ func TestPlanSucceededAgreesWithNewestManifest(t *testing.T) {
 		{Project: "api", Stack: "prod", Status: summary.StatusError, Error: "engine crashed"},
 	})
 
-	best := newestPreviewManifest(ctx, store, 42, sha)
+	best, err := newestPreviewManifest(ctx, store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if best == nil {
 		t.Fatal("expected a manifest")
 	}
@@ -144,7 +157,11 @@ func TestPlanSucceededAgreesWithNewestManifest(t *testing.T) {
 
 	// The authoritative manifest has a failed stack, so this must be false.
 	// If it reports true, the two selections disagree.
-	if PlanSucceededForPR(ctx, store, 42, sha) {
+	succeeded, err := PlanSucceededForPR(ctx, store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if succeeded {
 		t.Fatal("PlanSucceededForPR reported success from a manifest other than the authoritative one")
 	}
 }
@@ -154,12 +171,33 @@ type previewListCounter struct {
 	lists map[string]int
 }
 
+type previewFailureStore struct {
+	blob.Store
+	failList bool
+	failGet  bool
+}
+
+func (s *previewFailureStore) List(ctx context.Context, prefix string) ([]string, error) {
+	if s.failList {
+		return nil, errors.New("list unavailable")
+	}
+	return s.Store.List(ctx, prefix)
+}
+
+func (s *previewFailureStore) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metadata, error) {
+	if s.failGet && strings.HasSuffix(key, "/manifest.json") {
+		return nil, nil, errors.New("read unavailable")
+	}
+	return s.Store.Get(ctx, key)
+}
+
 func (s *previewListCounter) List(ctx context.Context, prefix string) ([]string, error) {
 	s.lists[prefix]++
 	return s.Store.List(ctx, prefix)
 }
 
 func TestPreviewSnapshotScansManifestsOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base, _ := filesystem.New(t.TempDir())
 	const sha = "abc1234xyz"
@@ -169,7 +207,10 @@ func TestPreviewSnapshotScansManifestsOnce(t *testing.T) {
 	})
 	store := &previewListCounter{Store: base, lists: map[string]int{}}
 
-	snapshot := LoadPreviewSnapshot(ctx, store, 42, sha)
+	snapshot, err := LoadPreviewSnapshot(ctx, store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if refs, ok := snapshot.StackRefs(); !ok || len(refs) != 2 {
 		t.Fatalf("StackRefs() = (%v, %t), want two refs", refs, ok)
 	}
@@ -180,5 +221,97 @@ func TestPreviewSnapshotScansManifestsOnce(t *testing.T) {
 	}
 	if got := store.lists["runs/pr-42/"]; got != 1 {
 		t.Fatalf("manifest list calls = %d, want 1", got)
+	}
+}
+
+func TestPreviewSnapshotRejectsMalformedCandidates(t *testing.T) {
+	t.Parallel()
+	const sha = "abc1234xyz"
+	tests := []struct {
+		name      string
+		createdAt string
+		stacks    []summary.StackSummary
+	}{
+		{name: "invalid timestamp", createdAt: "not-a-time", stacks: []summary.StackSummary{
+			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+		}},
+		{name: "missing project", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
+			{Stack: "prod", Status: summary.StatusPlanned},
+		}},
+		{name: "missing stack", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
+			{Project: "api", Status: summary.StatusPlanned},
+		}},
+		{name: "invalid status", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
+			{Project: "api", Stack: "prod", Status: summary.StatusBlocked},
+		}},
+		{name: "duplicate stack", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
+			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+			{Project: "api", Stack: "prod", Status: summary.StatusNoOp},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := filesystem.New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			putManifest(t, store, 42, "run-1", sha, tt.createdAt, tt.stacks)
+			if _, err := LoadPreviewSnapshot(t.Context(), store, 42, sha); err == nil {
+				t.Fatal("malformed preview manifest was accepted")
+			}
+		})
+	}
+}
+
+func TestPreviewSnapshotRejectsUnreadableHistory(t *testing.T) {
+	t.Parallel()
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	putRawManifest(t, store, 42, "corrupt", "{not-json")
+	if _, err := LoadPreviewSnapshot(t.Context(), store, 42, "abc1234xyz"); err == nil {
+		t.Fatal("corrupt preview history was ignored")
+	}
+}
+
+func TestPreviewSnapshotPropagatesStorageFailures(t *testing.T) {
+	t.Parallel()
+	base, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = "abc1234xyz"
+	putManifest(t, base, 42, "run-1", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+	})
+	for _, store := range []*previewFailureStore{
+		{Store: base, failList: true},
+		{Store: base, failGet: true},
+	} {
+		if _, err := LoadPreviewSnapshot(t.Context(), store, 42, sha); err == nil {
+			t.Fatal("preview storage failure was ignored")
+		}
+	}
+}
+
+func TestPreviewSnapshotPreservesFailedPreview(t *testing.T) {
+	t.Parallel()
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = "abc1234xyz"
+	putManifest(t, store, 42, "run-1", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusError, Error: "engine failed"},
+	})
+	snapshot, err := LoadPreviewSnapshot(t.Context(), store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := snapshot.StackStatus("api/prod")
+	if !status.Found || status.Succeeded || snapshot.Succeeded() {
+		t.Fatalf("failed preview status = %+v, snapshot success = %t", status, snapshot.Succeeded())
 	}
 }
