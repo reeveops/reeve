@@ -70,8 +70,11 @@ type PreviewInput struct {
 	// preview.
 	Observability *schemas.Observability
 	Blob          blob.Store
-	VCS           prReader      // may be nil for --local
-	Comments      commentPoster // may be nil for --local
+	// OpenBlob opens the configured store after discovery finds target stacks.
+	// A zero-target preview leaves it unopened and reports through CI/comments.
+	OpenBlob func(context.Context) (blob.Store, error)
+	VCS      prReader      // may be nil for --local
+	Comments commentPoster // may be nil for --local
 	// ChannelSourceFiles are the repo-relative config files the loader
 	// sourced notification channels from (config.Config.ChannelSourceFiles).
 	// If the PR's changed files include any of them, pre-approval events
@@ -218,23 +221,6 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 	}
 
-	// Channels are built once and reused for the preview-started and
-	// preview-finished events below.
-	var channels []notify.Channel
-	if notifyActive && !suppressChannels {
-		channels = BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.Comments)
-		// Timeline heartbeat: preview started. PR title/author are not
-		// fetched yet; the payload carries what the timeline needs (event,
-		// SHA, this run's CI URL).
-		if err := NotifyPREvent(ctx, channels, notify.EventPlanning, PRNotifyInput{
-			PlanRequested: in.PlanRequested,
-			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunID: ciRunID, RunURL: in.CIRunURL,
-			PRTitle: in.PRTitle,
-		}); err != nil {
-			slog.Warn("notify planning failed", "err", err, "pr", in.PRNumber)
-		}
-	}
-
 	decls, filter := declarationsFromConfig(in.Config)
 	cm := changeMappingFromConfig(in.Config)
 	var target []discovery.Stack
@@ -274,6 +260,32 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}
 	for _, s := range target {
 		slog.Debug("target stack", "ref", s.Ref(), "path", s.Path)
+	}
+
+	// Cloud storage is unnecessary for an authoritative zero-target result.
+	// Defer opening it until discovery proves the run needs artifacts or state.
+	if len(target) > 0 && in.Blob == nil && in.OpenBlob != nil {
+		store, err := in.OpenBlob(ctx)
+		if err != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("open blob store: %w", err)
+		}
+		in.Blob = store
+	}
+
+	// Channels are built once and reused for the preview-started and
+	// preview-finished events below. A zero-target result stays on the PR and
+	// in CI, avoiding notification side effects that may require blob state.
+	var channels []notify.Channel
+	if len(target) > 0 && notifyActive && !suppressChannels {
+		channels = BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.Comments)
+		if err := NotifyPREvent(ctx, channels, notify.EventPlanning, PRNotifyInput{
+			PlanRequested: in.PlanRequested,
+			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunID: ciRunID, RunURL: in.CIRunURL,
+			PRTitle: in.PRTitle,
+		}); err != nil {
+			slog.Warn("notify planning failed", "err", err, "pr", in.PRNumber)
+		}
 	}
 
 	// Discovery is local and needs no credentials. Keep execution-home setup,

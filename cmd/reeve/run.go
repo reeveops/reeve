@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/run"
 	gh "github.com/reeveops/reeve/internal/vcs/github"
 )
@@ -93,19 +95,12 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	if token == "" {
 		token = os.Getenv("REEVE_GITHUB_TOKEN")
 	}
-	env, err := loadRunEnv(cmd)
+	env, err := loadRunEnvWithoutStore(cmd)
 	if err != nil {
 		return err
 	}
-	cfg, root, store, engine, authReg := env.cfg, env.root, env.store, env.engine, env.authReg
+	cfg, root, engine, authReg := env.cfg, env.root, env.engine, env.authReg
 	engineCfg := env.engineCfg
-
-	// Opportunistic blob retention: prune run artifacts older than max_age.
-	// Timed: it lists and deletes against the bucket, so a slow or throttled
-	// backend shows up here rather than as an unexplained gap.
-	pruneStart := time.Now()
-	run.PruneRunArtifactsOpportunistic(ctx, store, cfg.Shared)
-	slog.Debug("run artifact prune finished", "ms", time.Since(pruneStart).Milliseconds())
 
 	// OTEL is NOT built here for preview: run.Preview constructs it after
 	// the pre-approval observability gate (a PR that modifies
@@ -129,12 +124,21 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		ChannelSourceFiles:       cfg.ChannelSourceFiles,
 		Observability:            cfg.Observability,
 		ObservabilitySourceFiles: cfg.ObservabilitySourceFiles,
-		Blob:                     store,
-		Local:                    local,
-		LocalAuthProviders:       localAuth,
-		Force:                    flagBool(cmd, "force"),
-		Refresh:                  flagBool(cmd, "refresh"),
-		PlanRequested:            flagBool(cmd, "plan-requested"),
+		OpenBlob: func(openCtx context.Context) (blob.Store, error) {
+			store, err := openRunStore(openCtx, cfg.Shared.Bucket, root)
+			if err != nil {
+				return nil, err
+			}
+			pruneStart := time.Now()
+			run.PruneRunArtifactsOpportunistic(openCtx, store, cfg.Shared)
+			slog.Debug("run artifact prune finished", "ms", time.Since(pruneStart).Milliseconds())
+			return store, nil
+		},
+		Local:              local,
+		LocalAuthProviders: localAuth,
+		Force:              flagBool(cmd, "force"),
+		Refresh:            flagBool(cmd, "refresh"),
+		PlanRequested:      flagBool(cmd, "plan-requested"),
 	}
 
 	if !local {

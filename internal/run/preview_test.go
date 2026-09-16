@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/reeveops/reeve/internal/auth"
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/discovery"
@@ -80,6 +81,7 @@ func TestPreviewEndToEnd(t *testing.T) {
 	}
 	vcs := &fakeVCS{changed: []string{"projects/api/index.ts", "services/worker/go.mod"}}
 	store, _ := filesystem.New(t.TempDir())
+	storeOpens := 0
 
 	out, err := Preview(ctx, PreviewInput{
 		PRNumber:  42,
@@ -94,8 +96,11 @@ func TestPreviewEndToEnd(t *testing.T) {
 				{Pattern: "services/*", Stacks: []string{"prod"}},
 			},
 		}},
-		Shared:   &schemas.Shared{},
-		Blob:     store,
+		Shared: &schemas.Shared{},
+		OpenBlob: func(context.Context) (blob.Store, error) {
+			storeOpens++
+			return store, nil
+		},
 		VCS:      vcs,
 		Comments: vcs,
 	})
@@ -115,6 +120,9 @@ func TestPreviewEndToEnd(t *testing.T) {
 	}
 	if !out.CommentPosted {
 		t.Fatal("preview did not report the posted comment")
+	}
+	if storeOpens != 1 {
+		t.Fatalf("blob store opened %d times, want once", storeOpens)
 	}
 }
 
@@ -589,7 +597,7 @@ func TestPreviewLocalSkipsSHAOverride(t *testing.T) {
 }
 
 // TestPreviewNoAffectedStacks verifies that when no changed files match any
-// stack, an empty manifest is written and no stacks are returned.
+// stack, the result is posted without opening storage or running the engine.
 func TestPreviewNoAffectedStacks(t *testing.T) {
 	ctx := context.Background()
 	stateAuthAcquired := false
@@ -609,7 +617,7 @@ func TestPreviewNoAffectedStacks(t *testing.T) {
 		changed: []string{"docs/README.md"}, // matches no stack path
 		headSHA: "head-sha",
 	}
-	store, _ := filesystem.New(t.TempDir())
+	storeOpened := false
 	out, err := Preview(ctx, PreviewInput{
 		PRNumber:  1,
 		CommitSHA: "head-sha",
@@ -622,9 +630,12 @@ func TestPreviewNoAffectedStacks(t *testing.T) {
 		}},
 		Shared:       &schemas.Shared{},
 		AuthRegistry: registry,
-		Blob:         store,
-		VCS:          fvcs,
-		Comments:     fvcs,
+		OpenBlob: func(context.Context) (blob.Store, error) {
+			storeOpened = true
+			return nil, fmt.Errorf("must not open storage")
+		},
+		VCS:      fvcs,
+		Comments: fvcs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -638,12 +649,10 @@ func TestPreviewNoAffectedStacks(t *testing.T) {
 	if engineEnumerated {
 		t.Fatal("docs-only preview initialized the engine enumerator")
 	}
-	// FindPreviewForStack must return Found=false when stack not in manifest.
-	status, err := FindPreviewForStack(ctx, store, 1, "head-sha", "api/dev")
-	if err != nil {
-		t.Fatalf("FindPreviewForStack: %v", err)
+	if storeOpened {
+		t.Fatal("docs-only preview opened the blob store")
 	}
-	if status.Found {
-		t.Error("stack should not be found in manifest when not affected")
+	if !out.CommentPosted {
+		t.Fatal("docs-only preview did not post its result")
 	}
 }
