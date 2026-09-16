@@ -96,8 +96,11 @@ type prNotifyClient interface {
 // case - or when the changed-file list can't be fetched - no channels are
 // returned and reason explains why; the caller simply skips its notification.
 // A PR that does not touch notification config notifies normally.
-func BuildPRNotifyChannels(ctx context.Context, cfg *schemas.Notifications, channelSourceFiles []string, store blob.Store, client prNotifyClient, pr int) (channels []notify.Channel, reason string) {
+func BuildPRNotifyChannels(ctx context.Context, cfg *schemas.Notifications, channelSourceFiles []string, store blob.Store, client prNotifyClient, pr int, repoPath string) (channels []notify.Channel, reason string) {
 	changed, changedErr := client.ListChangedFiles(ctx, pr)
+	if changedErr == nil {
+		changed, _ = scopeChangedFiles(changed, repoPath)
+	}
 	if suppress, why := SuppressPreApprovalChannels(false, true, changed, changedErr, channelSourceFiles); suppress {
 		return nil, why
 	}

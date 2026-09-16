@@ -42,6 +42,7 @@ type RefreshInput struct {
 	RunNumber    int
 	CIRunURL     string
 	RepoRoot     string
+	RepoPath     string // RepoRoot relative to the VCS repository root.
 	RepoFull     string
 	Actor        string
 	Engine       refreshEngine
@@ -123,6 +124,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			if cerr != nil {
 				return nil, fmt.Errorf("list changed files: %w", cerr)
 			}
+			changed, _ = scopeChangedFiles(changed, in.RepoPath)
 			// Same anti-broadening rule apply uses: a changed file that maps
 			// to no stack must not turn a scoped command into a global one.
 			res := discovery.AffectedDetailed(declared, changed, changeMappingFromConfig(in.Config))

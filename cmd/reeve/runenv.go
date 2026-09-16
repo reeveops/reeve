@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -134,4 +135,18 @@ func resolveRoot(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("resolve repo root %q: %w", root, err)
 	}
 	return abs, nil
+}
+
+// repoPathForRoot returns root relative to the repository checkout used by
+// GitHub Actions. Outside Actions, VCS paths retain their existing behavior.
+func repoPathForRoot(root string) string {
+	workspace := os.Getenv("GITHUB_WORKSPACE")
+	if workspace == "" {
+		return "."
+	}
+	rel, err := filepath.Rel(workspace, root)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "."
+	}
+	return filepath.ToSlash(rel)
 }

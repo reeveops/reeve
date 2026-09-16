@@ -43,13 +43,16 @@ type Engine interface {
 
 // PreviewInput wires the dependencies and run context together.
 type PreviewInput struct {
-	PRNumber      int
-	PRTitle       string
-	CommitSHA     string
-	RunNumber     int
-	CIRunID       string
-	CIRunURL      string
-	RepoRoot      string
+	PRNumber  int
+	PRTitle   string
+	CommitSHA string
+	RunNumber int
+	CIRunID   string
+	CIRunURL  string
+	RepoRoot  string
+	// RepoPath is RepoRoot relative to the VCS repository root. VCS changed
+	// files are scoped to this path before security gates and stack mapping.
+	RepoPath      string
 	Engine        Engine
 	Config        *schemas.Engine
 	Shared        *schemas.Shared
@@ -150,8 +153,12 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	// init must be decided BEFORE anything can reach the network.
 	var changed []string
 	var changedErr error
+	allChangesOutsideRoot := false
 	if !in.Local && in.VCS != nil {
 		changed, changedErr = in.VCS.ListChangedFiles(ctx, in.PRNumber)
+		if changedErr == nil {
+			changed, allChangesOutsideRoot = scopeChangedFiles(changed, in.RepoPath)
+		}
 	}
 
 	// Pre-approval OTEL isolation: observability.yaml is loaded from the
@@ -268,7 +275,11 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		cm := changeMappingFromConfig(in.Config)
 		res := discovery.AffectedDetailed(declared, changed, cm)
 		target = res.Stacks
-		mappingNotice = mappingNoticeFor(res)
+		if allChangesOutsideRoot {
+			mappingNotice = fmt.Sprintf("No changed files are under the configured root `%s`.", in.RepoPath)
+		} else {
+			mappingNotice = mappingNoticeFor(res)
+		}
 		slog.Debug("preview target: affected stacks", "count", len(target), "reason", res.Reason)
 	}
 	for _, s := range target {

@@ -89,6 +89,7 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 		RunNumber:    runNum,
 		CIRunURL:     runURL,
 		RepoRoot:     root,
+		RepoPath:     repoPathForRoot(root),
 		RepoFull:     repoFull,
 		Actor:        actor,
 		Engine:       engine,

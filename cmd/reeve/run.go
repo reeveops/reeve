@@ -119,6 +119,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		CIRunID:                  os.Getenv("GITHUB_RUN_ID"),
 		CIRunURL:                 runURL,
 		RepoRoot:                 root,
+		RepoPath:                 repoPathForRoot(root),
 		Engine:                   engine,
 		Config:                   engineCfg,
 		Shared:                   cfg.Shared,

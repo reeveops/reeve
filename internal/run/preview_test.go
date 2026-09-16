@@ -478,6 +478,57 @@ func TestPreviewLocalIgnoresChangedFiles(t *testing.T) {
 	}
 }
 
+func TestPreviewScopesRepositoryPathsToConfiguredRoot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine := &fakeEngine{enum: []discovery.Stack{
+		{Project: "api", Path: "envs/api", Name: "dev", Env: "dev"},
+		{Project: "web", Path: "envs/web", Name: "dev", Env: "dev"},
+	}}
+	store, _ := filesystem.New(t.TempDir())
+	fvcs := &fakeVCS{changed: []string{"tf/envs/api/main.tf"}, headSHA: "head-sha"}
+	out, err := Preview(ctx, PreviewInput{
+		PRNumber: 1, CommitSHA: "head-sha", RunNumber: 1,
+		RepoRoot: "/workspace/tf", RepoPath: "tf",
+		Engine: engine,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{Stacks: []schemas.StackDecl{
+			{Project: "api", Path: "envs/api", Stacks: []string{"dev"}},
+			{Project: "web", Path: "envs/web", Stacks: []string{"dev"}},
+		}}},
+		Shared: &schemas.Shared{}, Blob: store, VCS: fvcs, Comments: fvcs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Stacks) != 1 || out.Stacks[0].Project != "api" {
+		t.Fatalf("nested root must preview only api, got %+v", out.Stacks)
+	}
+}
+
+func TestPreviewIgnoresChangesOutsideConfiguredRoot(t *testing.T) {
+	t.Parallel()
+	store, _ := filesystem.New(t.TempDir())
+	fvcs := &fakeVCS{changed: []string{"app/main.go"}, headSHA: "head-sha"}
+	out, err := Preview(context.Background(), PreviewInput{
+		PRNumber: 1, CommitSHA: "head-sha", RunNumber: 1,
+		RepoRoot: "/workspace/tf", RepoPath: "tf",
+		Engine: &fakeEngine{enum: []discovery.Stack{{Project: "api", Path: "envs/api", Name: "dev"}}},
+		Config: &schemas.Engine{Engine: schemas.EngineBody{Stacks: []schemas.StackDecl{
+			{Project: "api", Path: "envs/api", Stacks: []string{"dev"}},
+		}}},
+		Shared: &schemas.Shared{}, Blob: store, VCS: fvcs, Comments: fvcs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Stacks) != 0 {
+		t.Fatalf("outside change must not preview stacks, got %+v", out.Stacks)
+	}
+	if !strings.Contains(out.CommentBody, "No changed files are under the configured root `tf`") {
+		t.Fatalf("missing nested-root scope notice:\n%s", out.CommentBody)
+	}
+}
+
 func TestPreviewLocalRejectsPRNumber(t *testing.T) {
 	// A local run keyed to a real PR could write a preview manifest that
 	// apply's freshness gate trusts. Refused before any work happens.

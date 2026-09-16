@@ -42,6 +42,7 @@ type ExplainInput struct {
 	CIRunURL       string
 	SelfCheckNames []string
 	RepoRoot       string
+	RepoPath       string // RepoRoot relative to the VCS repository root.
 	Engine         Engine
 	Config         *schemas.Engine
 	Shared         *schemas.Shared
@@ -82,6 +83,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list changed files: %w", err)
 	}
+	changed, _ = scopeChangedFiles(changed, in.RepoPath)
 	cm := changeMappingFromConfig(in.Config)
 	target := discovery.AffectedDetailed(declared, changed, cm).Stacks
 

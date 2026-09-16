@@ -69,6 +69,7 @@ type ApplyInput struct {
 	// Typically populated from $GITHUB_WORKFLOW + $GITHUB_JOB.
 	SelfCheckNames []string
 	RepoRoot       string
+	RepoPath       string // RepoRoot relative to the VCS repository root.
 	RepoFull       string // "owner/name" for audit log
 	Actor          string
 	Engine         applyEngine
@@ -225,6 +226,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	if err != nil {
 		return nil, fmt.Errorf("list changed files: %w", err)
 	}
+	changed, allOutside := scopeChangedFiles(changed, in.RepoPath)
 	slog.Debug("changed files", "count", len(changed), "files", changed)
 	cm := changeMappingFromConfig(in.Config)
 	mapRes := discovery.AffectedDetailed(declared, changed, cm)
@@ -235,6 +237,11 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 
 	// Docs/asset-only change: nothing to apply. Record on the timeline and exit.
+	if allOutside {
+		timeline.add(ctx, "⏭️", "skipped", fmt.Sprintf("no changed files are under the configured root %s", in.RepoPath))
+		slog.Info("apply skipped: changes outside configured root", "root", in.RepoPath)
+		return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
+	}
 	if mapRes.Reason == discovery.ReasonDocsOnly {
 		timeline.add(ctx, "⏭️", "skipped", "documentation/asset-only changes — no Pulumi stacks affected")
 		slog.Info("apply skipped: docs-only changes")

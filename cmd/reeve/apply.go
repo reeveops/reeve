@@ -138,6 +138,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		CIRunURL:        runURL,
 		SelfCheckNames:  selfNames,
 		RepoRoot:        root,
+		RepoPath:        repoPathForRoot(root),
 		RepoFull:        repoFull,
 		Actor:           actor,
 		Engine:          engine,

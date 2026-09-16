@@ -144,6 +144,29 @@ func TestPreviewExfilSuppressedWhenNotificationConfigModified(t *testing.T) {
 	}
 }
 
+func TestPreviewNestedRootSuppressesModifiedNotificationConfig(t *testing.T) {
+	const secret = "nestedRootSecret"
+	t.Setenv("EXFIL_SECRET", secret)
+	srv := newRecordingServer(t)
+	cfg := loadExfilConfig(t, srv.URL)
+	fvcs := &fakeVCS{
+		changed: []string{"tf/.reeve/notifications.yaml", "tf/projects/api/main.ts"},
+		headSHA: "attack-sha",
+	}
+	in := securityPreviewInput(t, cfg, fvcs)
+	in.RepoPath = "tf"
+	out, err := Preview(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if got := len(srv.recorded()); got != 0 {
+		t.Fatalf("nested-root config change dispatched %d request(s)", got)
+	}
+	if !strings.Contains(out.CommentBody, "Notification channels suppressed") {
+		t.Fatalf("missing suppression notice:\n%s", out.CommentBody)
+	}
+}
+
 // TestPreviewDesignatedExpansionWorksWhenConfigUntouched is the companion
 // assertion: when the PR does NOT touch notification config, the webhook
 // channel dispatches normally and the designated-field env expansion

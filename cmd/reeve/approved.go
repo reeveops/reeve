@@ -84,7 +84,7 @@ func runApproved(cmd *cobra.Command, _ []string) error {
 		sha = prMeta.HeadSHA
 	}
 
-	channels, reason := run.BuildPRNotifyChannels(ctx, cfg.Notifications, cfg.ChannelSourceFiles, store, client, pr)
+	channels, reason := run.BuildPRNotifyChannels(ctx, cfg.Notifications, cfg.ChannelSourceFiles, store, client, pr, repoPathForRoot(root))
 	if reason != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "notify: channels suppressed (%s)\n", reason)
 	}
