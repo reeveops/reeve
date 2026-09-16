@@ -28,6 +28,7 @@ type fakeEngine struct {
 	enum       []discovery.Stack
 	results    map[string]iac.PreviewResult
 	enumerated *bool
+	captureEnv chan<- map[string]string
 }
 
 type blockingPreviewEngine struct {
@@ -94,10 +95,56 @@ func (f *fakeEngine) EnumerateStacks(ctx context.Context, root string) ([]discov
 	return f.enum, nil
 }
 func (f *fakeEngine) Preview(ctx context.Context, s discovery.Stack, opts iac.PreviewOpts) (iac.PreviewResult, error) {
+	if f.captureEnv != nil {
+		env := make(map[string]string, len(opts.Env))
+		for key, value := range opts.Env {
+			env[key] = value
+		}
+		f.captureEnv <- env
+	}
 	if r, ok := f.results[s.Ref()]; ok {
 		return r, nil
 	}
 	return iac.PreviewResult{}, nil
+}
+
+func TestPreviewPassesStateEnvironmentToEngine(t *testing.T) {
+	registry := auth.NewRegistry()
+	if err := registry.Register(&fakeProvider{
+		name: "state-auth", typ: "test", env: map[string]string{"STATE_TOKEN": "short-lived"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	captured := make(chan map[string]string, 1)
+	engine := &fakeEngine{
+		enum:       []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
+		captureEnv: captured,
+	}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Preview(t.Context(), PreviewInput{
+		Local: true, RepoRoot: "/repo", Engine: engine, Blob: store,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Type: "pulumi",
+			State: schemas.EngineState{
+				AuthProvider: "state-auth",
+				SecretsProvider: schemas.EngineSecretsProvider{
+					Type: "passphrase", Passphrase: "state-passphrase",
+				},
+			},
+			Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"dev"}}},
+		}},
+		Shared: &schemas.Shared{}, AuthRegistry: registry,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := <-captured
+	if env["STATE_TOKEN"] != "short-lived" || env["PULUMI_CONFIG_PASSPHRASE"] != "state-passphrase" {
+		t.Fatalf("preview engine state environment = %#v", env)
+	}
 }
 
 type fakeVCS struct {

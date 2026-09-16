@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/reeveops/reeve/internal/auth"
 	"github.com/reeveops/reeve/internal/config/schemas"
@@ -95,15 +96,33 @@ func ResolveStateAuthEnvWith(ctx context.Context, engine *schemas.Engine, acquir
 
 func resolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, acquirer credentialAcquirer) (map[string]string, CleanupFunc, error) {
 	noop := func() {}
+	secretsEnv := stateSecretsEnv(engine)
 	if engine == nil || acquirer == nil || engine.Engine.State.AuthProvider == "" {
-		return nil, noop, nil
+		return secretsEnv, noop, nil
 	}
 	name := engine.Engine.State.AuthProvider
 	env, creds, err := acquirer.AcquireAll(ctx, []string{name})
 	if err != nil {
 		return nil, noop, fmt.Errorf("acquire state auth provider %q: %w", name, err)
 	}
-	return env, credentialCleanup(creds), nil
+	return mergeEnv(secretsEnv, env), credentialCleanup(creds), nil
+}
+
+// stateSecretsEnv bridges explicitly selected engine state encryption into
+// the isolated engine environment. Pulumi's standard variable is read only
+// when the engine config selects the passphrase secrets provider.
+func stateSecretsEnv(engine *schemas.Engine) map[string]string {
+	if engine == nil || engine.Engine.State.SecretsProvider.Type != "passphrase" {
+		return nil
+	}
+	passphrase := engine.Engine.State.SecretsProvider.Passphrase
+	if passphrase == "" {
+		passphrase = os.Getenv("PULUMI_CONFIG_PASSPHRASE")
+	}
+	if passphrase == "" {
+		return nil
+	}
+	return map[string]string{"PULUMI_CONFIG_PASSPHRASE": passphrase}
 }
 
 func credentialCleanup(creds []*auth.Credential) CleanupFunc {

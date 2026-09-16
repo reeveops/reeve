@@ -315,7 +315,8 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 			return nil, fmt.Errorf("prepare engine execution environment: %w", err)
 		}
 		defer executionCleanup()
-		stateEnv, stateCleanup, err := resolveStateAuthEnv(ctx, in.Config, credentialSource)
+		var stateCleanup CleanupFunc
+		stateEnv, stateCleanup, err = resolveStateAuthEnv(ctx, in.Config, credentialSource)
 		if err != nil {
 			outcome = "failed"
 			return nil, err

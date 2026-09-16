@@ -75,6 +75,38 @@ engine:
 	}
 }
 
+func TestLoadPulumiPassphraseReference(t *testing.T) {
+	t.Setenv("REEVE_TEST_PULUMI_PASSPHRASE", "resolved-passphrase")
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket: {type: filesystem, name: ./.reeve-state}
+`,
+		"pulumi.yaml": `version: 1
+config_type: engine
+engine:
+  type: pulumi
+  state:
+    url: file://./pulumi-state
+    secrets_provider:
+      type: passphrase
+      passphrase: ${env:REEVE_TEST_PULUMI_PASSPHRASE}
+  stacks:
+    - project: api
+      path: projects/api
+      stacks: [dev]
+`,
+	})
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	provider := cfg.Engines[0].Engine.State.SecretsProvider
+	if provider.Type != "passphrase" || provider.Passphrase != "resolved-passphrase" {
+		t.Fatalf("Pulumi passphrase provider was not resolved: %#v", provider)
+	}
+}
+
 func TestStackViewAndRetentionParse(t *testing.T) {
 	root := writeReeve(t, map[string]string{
 		"shared.yaml": `version: 1

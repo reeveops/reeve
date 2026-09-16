@@ -537,6 +537,21 @@ engine:
       required: true
 ```
 
+For a Pulumi passphrase provider, set `type: passphrase` and pass
+`PULUMI_CONFIG_PASSPHRASE` to Reeve through the shared workflow secret.
+
+```yaml
+state:
+  backend: file
+  url: file://./pulumi-state
+  secrets_provider:
+    type: passphrase
+```
+
+Reeve copies that variable into the isolated engine environment only when the
+passphrase provider is selected. `passphrase: ${env:OTHER_NAME}` selects a
+different host variable explicitly.
+
 `max_parallel_stacks` bounds concurrent preview processes. Reeve preserves
 result order and serializes stacks that share one project directory.
 
