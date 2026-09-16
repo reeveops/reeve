@@ -32,3 +32,13 @@ type Metadata struct {
 	LastModified int64 // unix seconds; may be 0 if unknown
 	Size         int64
 }
+
+// ListedObject is object metadata returned by adapters that can preserve
+// provider listing results. Version is opaque and suitable only for a
+// subsequent conditional operation against the same adapter.
+type ListedObject struct {
+	Key          string
+	Version      string
+	LastModified int64 // unix seconds; may be 0 if unknown
+	Size         int64
+}

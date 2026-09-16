@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -13,6 +14,13 @@ import (
 // manifests, applied-state pointers. Lock blobs live elsewhere and are
 // handled by the lock reaper, so they are out of scope here.
 const retentionPrefix = "runs/"
+
+var errRetentionMetadataUnsupported = errors.New("blob store does not support metadata listing and conditional deletion")
+
+type retentionStore interface {
+	ListMetadata(context.Context, string) ([]blob.ListedObject, error)
+	DeleteIfMatch(context.Context, string, string) error
+}
 
 // resolveRetention returns the configured max-age duration. Returns (0, false)
 // when retention is disabled ("0"/negative); (d, true) otherwise, defaulting
@@ -45,27 +53,29 @@ func PruneRunArtifacts(ctx context.Context, store blob.Store, maxAge time.Durati
 	if store == nil || maxAge <= 0 {
 		return 0, nil
 	}
-	keys, err := store.List(ctx, retentionPrefix)
+	maintenance, ok := store.(retentionStore)
+	if !ok {
+		return 0, errRetentionMetadataUnsupported
+	}
+	objects, err := maintenance.ListMetadata(ctx, retentionPrefix)
 	if err != nil {
 		return 0, err
 	}
 	cutoff := now.Add(-maxAge)
 	deleted := 0
-	for _, key := range keys {
-		rc, meta, err := store.Get(ctx, key)
-		if err != nil {
-			slog.Debug("retention: stat failed, skipping", "key", key, "err", err)
-			continue
+	for _, object := range objects {
+		if object.LastModified == 0 || object.Version == "" {
+			continue // Incomplete metadata never authorizes deletion.
 		}
-		rc.Close()
-		if meta == nil || meta.LastModified == 0 {
-			continue // unknown age -> keep, never delete on missing metadata
-		}
-		if time.Unix(meta.LastModified, 0).After(cutoff) {
+		if time.Unix(object.LastModified, 0).After(cutoff) {
 			continue // newer than cutoff
 		}
-		if err := store.Delete(ctx, key); err != nil {
-			slog.Warn("retention: delete failed", "key", key, "err", err)
+		if err := maintenance.DeleteIfMatch(ctx, object.Key, object.Version); err != nil {
+			if errors.Is(err, blob.ErrPreconditionFailed) || errors.Is(err, blob.ErrNotFound) {
+				slog.Debug("retention: object changed after listing, skipping", "key", object.Key)
+				continue
+			}
+			slog.Warn("retention: delete failed", "key", object.Key, "err", err)
 			continue
 		}
 		deleted++
