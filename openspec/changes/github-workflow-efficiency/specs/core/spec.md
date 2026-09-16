@@ -43,7 +43,13 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 #### Scenario: Default comment prefilter
 
 - GIVEN `gitops` mode uses the default `/reeve` command prefix
-- WHEN a comment without that prefix triggers the caller workflow
+- WHEN a comment does not begin with that prefix and a following space
+- THEN the reusable workflow job MUST skip before a runner is assigned.
+
+#### Scenario: Quoted command
+
+- GIVEN an ordinary comment contains `/reeve` after prose or quote markup
+- WHEN the comment triggers the caller workflow
 - THEN the reusable workflow job MUST skip before a runner is assigned.
 
 #### Scenario: Drift mode

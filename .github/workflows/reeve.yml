@@ -126,8 +126,8 @@ jobs:
           github.event.comment.user.type != 'Bot' &&
           !endsWith(github.event.comment.user.login, '[bot]') &&
           (
-            inputs.command_prefix != '/reeve' ||
-            contains(github.event.comment.body, '/reeve')
+            contains(inputs.command_prefix, ',') ||
+            startsWith(github.event.comment.body, format('{0} ', inputs.command_prefix))
           )
         )
       )

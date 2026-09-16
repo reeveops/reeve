@@ -95,7 +95,7 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"inputs.mode == 'drift'",
 		"uses: $/.github/actions/reeve",
 		"github.event.action == 'created'",
-		"contains(github.event.comment.body, '/reeve')",
+		"startsWith(github.event.comment.body, format('{0} ', inputs.command_prefix))",
 		"cancel-in-progress:",
 		"opentofu-version:",
 		"terraform-version:",
@@ -111,6 +111,9 @@ func TestReusableWorkflowContract(t *testing.T) {
 	}
 	if strings.Contains(workflow, "secrets: inherit") {
 		t.Fatal("reusable workflow must map named secrets")
+	}
+	if strings.Contains(workflow, "contains(github.event.comment.body") {
+		t.Fatal("reusable workflow must not admit commands quoted inside ordinary comments")
 	}
 	if strings.Contains(workflow, "pull-requests: write") {
 		t.Fatal("reusable workflow must inherit mode-specific caller permissions")
