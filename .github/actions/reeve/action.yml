@@ -1,0 +1,343 @@
+name: reeve
+description: PR-native, self-hosted GitOps orchestrator for Pulumi
+author: reeve contributors
+branding:
+  icon: shield
+  color: blue
+
+# NOTE: Install is three-tier, cache first:
+#   1. Cache hit on the source hash -> reuse the cached binary (seconds).
+#   2. Cache miss -> try a prebuilt binary:
+#        @vX.Y.Z       -> that release's tarball, verified against the
+#                         release's checksums.txt (signed release pipeline).
+#        @master/@next -> the newest <branch>-<sha> per-push prerelease
+#                         (cosign-signed; one release per commit, published
+#                         by edge-build.yml).
+#   3. Any other ref (SHA pins, branches, forks), or any download/verify
+#      failure -> build from source (~30s on the first miss), as before.
+
+inputs:
+  command:
+    description: >-
+      reeve subcommand: "preview", "ready", "apply", "refresh", "pr-help", "lint", "stacks",
+      "drift run", "locks list", etc. Omit to auto-detect from the GitHub event context.
+    required: false
+    default: ""
+  root:
+    description: Path to the consumer repo root (where .reeve/ lives). Defaults to $GITHUB_WORKSPACE.
+    required: false
+    default: ""
+  pulumi-version:
+    description: Version of the Pulumi CLI to install. Leave blank to skip.
+    required: false
+    default: ""
+  opentofu-version:
+    description: Version of the OpenTofu CLI to install. Leave blank to skip.
+    required: false
+    default: ""
+  terraform-version:
+    description: Version of the Terraform CLI to install. Leave blank to skip.
+    required: false
+    default: ""
+  github-token:
+    description: GitHub token (needs issues:write to upsert PR comment).
+    required: false
+    default: ${{ github.token }}
+  slack-token:
+    description: Slack bot OAuth token.
+    required: false
+    default: ""
+  gcp-workload-identity-provider:
+    description: GCP Workload Identity Provider resource name. Required for GCS bucket auth.
+    required: false
+    default: ""
+  gcp-service-account:
+    description: GCP service account email to impersonate via WIF.
+    required: false
+    default: ""
+  extra-args:
+    description: >-
+      Additional whitespace-delimited args passed to the reeve subcommand.
+      Shell quoting and metacharacters are not evaluated.
+    required: false
+    default: ""
+  allowed-associations:
+    description: >-
+      Comma-separated author_association values allowed to trigger comment
+      commands (/reeve ...). Commenters outside this list are skipped before
+      any command dispatch. The approvals gate still applies afterwards.
+    required: false
+    default: "OWNER,MEMBER,COLLABORATOR"
+  command-prefix:
+    description: >-
+      Comma-separated list of comment prefixes accepted as reeve commands.
+      The first word of a comment must exactly match one of these (spaces
+      around entries are trimmed).
+
+      The default is the slash style only. The mention style ("@reeve apply")
+      used to be a default and no longer is: github.com/reeve is a real
+      person's account, so every "@reeve ..." comment sent them a
+      notification for a command that had nothing to do with them. Add
+      "@reeve" back here if you want it, but prefer a handle your org
+      actually controls.
+    required: false
+    default: "/reeve"
+  run-on-approval:
+    description: >-
+      Set "true" to dispatch "run approved" when a pull_request_review is
+      submitted with state approved (requires subscribing the workflow to
+      pull_request_review events). Default "false": approvals do not change
+      code and the apply gate re-checks approvals at apply time, so these
+      runs are pure CI cost. Tradeoff when disabled: you lose the automatic
+      approved-state notification (e.g. the Slack "ready to apply" update)
+      that reeve posts the moment a PR is approved.
+    required: false
+    default: "false"
+  log-level:
+    description: Log level for reeve (debug, info, warn, error).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Classify event
+      id: reeve-dispatch
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}/../../..
+        REEVE_INPUT_COMMAND: ${{ inputs.command }}
+        REEVE_RUN_ON_APPROVAL: ${{ inputs.run-on-approval }}
+        REEVE_ALLOWED_ASSOCIATIONS: ${{ inputs.allowed-associations }}
+        REEVE_COMMAND_PREFIXES: ${{ inputs.command-prefix }}
+      run: |
+        set -euo pipefail
+        "$ACTION_PATH/.github/scripts/classify-event.sh"
+
+    # reeve's own source is already on disk above github.action_path - it's the
+    # tree GHA checked out for the @ref this action was pinned with (@v1, @master,
+    # @v1.2.3). Build from there directly: no re-clone, no ref resolution, so the
+    # binary always matches the pinned action version.
+    - name: Hash reeve source
+      id: reeve-hash
+      if: steps.reeve-dispatch.outputs.run == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}/../../..
+      run: |
+        set -euo pipefail
+        # Canonical source hash (see .github/scripts/source-hash.sh): keyed on
+        # content AND repo-relative path, so the same tree hashes identically
+        # wherever it is checked out. Used only as the binary cache key.
+        echo "hash=$("$ACTION_PATH/.github/scripts/source-hash.sh" "$ACTION_PATH")" >> "$GITHUB_OUTPUT"
+
+    - name: Restore reeve binary cache
+      id: reeve-cache
+      if: steps.reeve-dispatch.outputs.run == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ runner.temp }}/reeve-bin/reeve
+        key: reeve-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
+
+    # On a cache miss, try a prebuilt binary before reaching for the Go
+    # toolchain (see the NOTE at the top for the ref semantics). The script
+    # never fails the job: any problem (missing asset, checksum mismatch,
+    # network, unsupported arch) logs why and reports fetched=false, which
+    # re-enables the source-build steps below. actions/cache's post step
+    # saves whatever ends up at the cached path, downloaded or built alike.
+    - name: Install cosign for binary verification
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    - name: Fetch prebuilt binary
+      id: reeve-fetch
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}/../../..
+        REEVE_REF: ${{ github.action_ref }}
+        REEVE_REPO: ${{ github.action_repository }}
+        REEVE_OS: ${{ runner.os }}
+        REEVE_ARCH: ${{ runner.arch }}
+        REEVE_DEST: ${{ runner.temp }}/reeve-bin/reeve
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        "$ACTION_PATH/.github/scripts/fetch-binary.sh"
+
+    - name: Set up Go (from reeve's go.mod)
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      with:
+        go-version-file: ${{ github.action_path }}/../../../go.mod
+        cache-dependency-path: ${{ github.action_path }}/../../../go.sum
+
+    - name: Build reeve
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
+      shell: bash
+      env:
+        SRCHASH: ${{ steps.reeve-hash.outputs.hash }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/reeve-bin"
+        go build -trimpath -ldflags="-s -w -X main.version=source-${SRCHASH:0:12}" \
+          -o "$RUNNER_TEMP/reeve-bin/reeve" ./cmd/reeve
+      working-directory: ${{ github.action_path }}/../../..
+
+    - name: Add reeve to PATH
+      if: steps.reeve-dispatch.outputs.run == 'true'
+      shell: bash
+      run: echo "$RUNNER_TEMP/reeve-bin" >> "$GITHUB_PATH"
+
+    - name: Checkout workload
+      if: steps.reeve-dispatch.outputs.run == 'true'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        ref: ${{ (github.event.pull_request.number || github.event.issue.pull_request) && format('refs/pull/{0}/head', github.event.pull_request.number || github.event.issue.number) || '' }}
+        fetch-depth: 1
+        persist-credentials: false
+
+    - name: Authenticate to GCP
+      if: ${{ steps.reeve-dispatch.outputs.run == 'true' && inputs.gcp-workload-identity-provider != '' }}
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+      with:
+        workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+        service_account: ${{ inputs.gcp-service-account }}
+
+    - name: Install Pulumi CLI
+      if: ${{ steps.reeve-dispatch.outputs.run == 'true' && inputs.pulumi-version != '' }}
+      uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7
+      with:
+        pulumi-version: ${{ inputs.pulumi-version }}
+
+    - name: Install OpenTofu CLI
+      if: ${{ steps.reeve-dispatch.outputs.run == 'true' && inputs.opentofu-version != '' }}
+      uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
+      with:
+        tofu_version: ${{ inputs.opentofu-version }}
+        tofu_wrapper: false
+
+    - name: Install Terraform CLI
+      if: ${{ steps.reeve-dispatch.outputs.run == 'true' && inputs.terraform-version != '' }}
+      uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false
+
+    - name: Run reeve
+      if: steps.reeve-dispatch.outputs.run == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        SLACK_BOT_TOKEN: ${{ inputs.slack-token }}
+        REEVE_BIN: ${{ runner.temp }}/reeve-bin/reeve
+        REEVE_LOG_LEVEL: ${{ inputs.log-level }}
+        REEVE_INPUT_ROOT: ${{ inputs.root }}
+        REEVE_INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
+        # The CLI re-enforces these values when it reads historical approval
+        # comments, so action dispatch and approval evaluation stay aligned.
+        REEVE_ALLOWED_ASSOCIATIONS: ${{ inputs.allowed-associations }}
+        REEVE_COMMAND_PREFIXES: ${{ inputs.command-prefix }}
+        REEVE_DISPATCH_COMMAND: ${{ steps.reeve-dispatch.outputs.command }}
+        REEVE_DISPATCH_AUTO_ARGS: ${{ steps.reeve-dispatch.outputs.auto_args }}
+        REEVE_DISPATCH_UNLOCK_REF: ${{ steps.reeve-dispatch.outputs.unlock_ref }}
+        REEVE_DISPATCH_BREAK_GLASS: ${{ steps.reeve-dispatch.outputs.break_glass }}
+      run: |
+        set -euo pipefail
+        ROOT="$REEVE_INPUT_ROOT"
+        if [ -z "$ROOT" ]; then ROOT="$GITHUB_WORKSPACE"; fi
+        cd "$ROOT"
+
+        CMD="$REEVE_DISPATCH_COMMAND"
+        EXTRA_ARGS=()
+        if [[ -n "$REEVE_INPUT_EXTRA_ARGS" ]]; then
+          read -r -a EXTRA_ARGS <<< "$REEVE_INPUT_EXTRA_ARGS"
+        fi
+        while IFS= read -r ARG; do
+          EXTRA_ARGS+=("$ARG")
+        done < <(jq -r '.[]' <<< "$REEVE_DISPATCH_AUTO_ARGS")
+        UNLOCK_REF="$REEVE_DISPATCH_UNLOCK_REF"
+        if [[ "$REEVE_DISPATCH_BREAK_GLASS" == "true" ]]; then
+          REEVE_BREAK_GLASS_COMMENT=$(jq -r '.comment.body // ""' < "$GITHUB_EVENT_PATH")
+          export REEVE_BREAK_GLASS_COMMENT
+        fi
+
+        RUN_URL_ARGS=()
+        if [[ -n "${GITHUB_SERVER_URL:-}" && -n "${GITHUB_REPOSITORY:-}" && -n "${GITHUB_RUN_ID:-}" ]]; then
+          RUN_URL_ARGS+=(--run-url "${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
+        fi
+
+        case "$CMD" in
+          preview|"run preview")
+            if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+              PR_NUMBER=$(jq -r .pull_request.number < "$GITHUB_EVENT_PATH")
+              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            elif [[ "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
+              PR_NUMBER=$(jq -r '.issue.number' < "$GITHUB_EVENT_PATH")
+              "$REEVE_BIN" run preview --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            else
+              "$REEVE_BIN" run preview --local "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            fi
+            ;;
+          approved|"run approved")
+            # .pull_request.number on the review path; .issue.number on the
+            # issue_comment path (/reeve approve).
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run approved --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            ;;
+          ready|"run ready")
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run ready --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            ;;
+          apply|"run apply")
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run apply --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            ;;
+          refresh|"run refresh")
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run refresh --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            ;;
+          unlock)
+            # PR-scoped lock cleanup: removes this PR from lock holders and
+            # queues (one stack, or all of them). Never touches other PRs'
+            # locks - admin force-unlock stays CLI-only. If reeve refuses
+            # because the PR looks mid-apply, relay the hint back onto the
+            # PR as a comment (the commenter isn't watching the run log).
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number' < "$GITHUB_EVENT_PATH")
+            set +e
+            UNLOCK_ARGS=()
+            if [[ -n "$UNLOCK_REF" ]]; then UNLOCK_ARGS+=("$UNLOCK_REF"); fi
+            UNLOCK_OUT=$("$REEVE_BIN" locks unlock "${UNLOCK_ARGS[@]}" --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}" 2>&1)
+            UNLOCK_STATUS=$?
+            set -e
+            printf '%s\n' "$UNLOCK_OUT"
+            if [[ $UNLOCK_STATUS -ne 0 && "$UNLOCK_OUT" == *"re-run with --force"* ]]; then
+              HINT=$(printf '%s\n' "$UNLOCK_OUT" | grep -m1 're-run with --force' | sed 's/^Error: //')
+              BODY="⚠️ ${HINT/re-run with --force/comment \`/reeve unlock --force\` if you are sure}"
+              curl -sf -X POST \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                -d "$(jq -n --arg b "$BODY" '{body:$b}')" > /dev/null \
+                || echo "warning: could not post refusal comment"
+              exit 0
+            fi
+            exit $UNLOCK_STATUS
+            ;;
+          pr-help|"run pr-help")
+            PR_NUMBER=$(jq -r '.issue.number // 0' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run pr-help --pr "$PR_NUMBER" "${EXTRA_ARGS[@]}"
+            ;;
+          "run explain")
+            # .issue.number on the issue_comment path; .pull_request.number
+            # when a workflow passes command "run explain" on a PR event.
+            PR_NUMBER=$(jq -r '.pull_request.number // .issue.number // 0' < "$GITHUB_EVENT_PATH")
+            "$REEVE_BIN" run explain --pr "$PR_NUMBER" "${RUN_URL_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            ;;
+          *)
+            CMD_ARGS=()
+            read -r -a CMD_ARGS <<< "$CMD"
+            "$REEVE_BIN" "${CMD_ARGS[@]}" "${EXTRA_ARGS[@]}"
+            ;;
+        esac

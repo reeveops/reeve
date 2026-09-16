@@ -142,7 +142,7 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) }}
     steps:
       - name: Run Reeve GitOps
-        uses: $/.
+        uses: $/.github/actions/reeve
         with:
           root: ${{ inputs.root }}
           pulumi-version: ${{ inputs.pulumi_version }}
@@ -175,7 +175,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Run Reeve drift detection
-        uses: $/.
+        uses: $/.github/actions/reeve
         with:
           command: drift run
           root: ${{ inputs.root }}

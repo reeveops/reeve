@@ -12,7 +12,7 @@ import (
 )
 
 func TestActionRunBlocksContainNoExpressions(t *testing.T) {
-	data := readRepoFile(t, "action.yml")
+	data := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
 	scanner := bufio.NewScanner(strings.NewReader(data))
 	inRun := false
 	runIndent := 0
@@ -38,7 +38,10 @@ func TestActionRunBlocksContainNoExpressions(t *testing.T) {
 
 func TestWorkflowActionsArePinned(t *testing.T) {
 	sha := regexp.MustCompile(`^[0-9a-f]{40}$`)
-	paths := []string{repoPath(t, "action.yml")}
+	paths := []string{
+		repoPath(t, "action.yml"),
+		repoPath(t, ".github", "actions", "reeve", "action.yml"),
+	}
 	workflows, err := filepath.Glob(repoPath(t, ".github", "workflows", "*.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +83,7 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"workflow_call:",
 		"inputs.mode == 'gitops'",
 		"inputs.mode == 'drift'",
-		"uses: $/.",
+		"uses: $/.github/actions/reeve",
 		"github.event.action == 'created'",
 		"contains(github.event.comment.body, '/reeve')",
 		"cancel-in-progress:",
@@ -96,10 +99,11 @@ func TestReusableWorkflowContract(t *testing.T) {
 	if strings.Contains(workflow, "secrets: inherit") {
 		t.Fatal("reusable workflow must map named secrets")
 	}
-	if !strings.Contains(readRepoFile(t, "action.yml"), "persist-credentials: false") {
+	implementation := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
+	if !strings.Contains(implementation, "persist-credentials: false") {
 		t.Fatal("composite action checkout must not persist credentials")
 	}
-	action := readRepoFile(t, "action.yml")
+	action := implementation
 	for _, want := range []string{"Install Pulumi CLI", "Install OpenTofu CLI", "Install Terraform CLI"} {
 		if !strings.Contains(action, want) {
 			t.Errorf("composite action is missing %q", want)
@@ -115,8 +119,29 @@ func TestReusableWorkflowContract(t *testing.T) {
 	}
 }
 
+func TestPublicActionForwardsInputs(t *testing.T) {
+	t.Parallel()
+	wrapper := readRepoFile(t, "action.yml")
+	implementation := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
+	if !strings.Contains(wrapper, "uses: $/.github/actions/reeve") {
+		t.Fatal("public action must invoke the pinned internal implementation")
+	}
+	for _, input := range []string{
+		"command", "root", "pulumi-version", "opentofu-version", "terraform-version",
+		"github-token", "slack-token", "gcp-workload-identity-provider", "gcp-service-account",
+		"extra-args", "allowed-associations", "command-prefix", "run-on-approval", "log-level",
+	} {
+		if !strings.Contains(implementation, "  "+input+":") {
+			t.Errorf("internal action is missing input %q", input)
+		}
+		if !strings.Contains(wrapper, input+": ${{ inputs."+input+" }}") {
+			t.Errorf("public action does not forward input %q", input)
+		}
+	}
+}
+
 func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
-	script := extractRunReeveScript(t, readRepoFile(t, "action.yml"))
+	script := extractRunReeveScript(t, readRepoFile(t, ".github", "actions", "reeve", "action.yml"))
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "injected")
 	argsPath := filepath.Join(dir, "args")
@@ -303,7 +328,7 @@ func TestActionClassifier(t *testing.T) {
 }
 
 func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
-	action := readRepoFile(t, "action.yml")
+	action := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
 	for _, name := range []string{
 		"Hash reeve source",
 		"Restore reeve binary cache",
@@ -315,6 +340,8 @@ func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
 		"Checkout workload",
 		"Authenticate to GCP",
 		"Install Pulumi CLI",
+		"Install OpenTofu CLI",
+		"Install Terraform CLI",
 		"Run reeve",
 	} {
 		marker := "- name: " + name
@@ -398,7 +425,7 @@ func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
 	if !dispatch.Run {
 		t.Fatal("preview event was skipped by classifier")
 	}
-	script := extractRunReeveScript(t, readRepoFile(t, "action.yml"))
+	script := extractRunReeveScript(t, readRepoFile(t, ".github", "actions", "reeve", "action.yml"))
 	dir := t.TempDir()
 	eventPath := filepath.Join(dir, "event.json")
 	argsPath := filepath.Join(dir, "args")
