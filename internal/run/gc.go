@@ -33,10 +33,8 @@ func resolveRetention(s *schemas.Shared) (time.Duration, bool) {
 	return d, true
 }
 
-// PruneRunArtifacts deletes blob items under runs/ older than maxAge. It is
-// best-effort and opportunistic (called at run start, like the lock reaper):
-// per-item failures are logged and skipped rather than aborting. Returns the
-// count deleted.
+// PruneRunArtifacts deletes blob items under runs/ older than maxAge.
+// Per-item failures are logged and skipped rather than aborting.
 //
 // Note on PR-merge-based cleanup: reeve can't reliably know a PR's merge state
 // without extra VCS wiring (webhooks or polling), so retention is purely
@@ -76,14 +74,13 @@ func PruneRunArtifacts(ctx context.Context, store blob.Store, maxAge time.Durati
 	return deleted, nil
 }
 
-// PruneRunArtifactsOpportunistic wraps PruneRunArtifacts for call sites that
-// just want best-effort cleanup with config-driven age and wall-clock now.
-func PruneRunArtifactsOpportunistic(ctx context.Context, store blob.Store, s *schemas.Shared) {
+// PruneConfiguredRunArtifacts applies config-driven retention at the supplied
+// time. The boolean reports whether retention is enabled.
+func PruneConfiguredRunArtifacts(ctx context.Context, store blob.Store, s *schemas.Shared, now time.Time) (int, bool, error) {
 	maxAge, enabled := resolveRetention(s)
 	if !enabled {
-		return
+		return 0, false, nil
 	}
-	if _, err := PruneRunArtifacts(ctx, store, maxAge, time.Now()); err != nil {
-		slog.Warn("retention: prune failed", "err", err)
-	}
+	pruned, err := PruneRunArtifacts(ctx, store, maxAge, now)
+	return pruned, true, err
 }

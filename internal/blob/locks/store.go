@@ -341,7 +341,6 @@ func (s *Store) reapSnapshot(ctx context.Context, key string, snapshot lockSnaps
 }
 
 // ReapAll walks locks/ and reaps expired holders across every stack.
-// Called opportunistically by reeve invocations and by `reeve locks reap`.
 // ttl bounds promoted holders' leases; <=0 falls back to the 4h default.
 func (s *Store) ReapAll(ctx context.Context, ttl time.Duration) (int, error) {
 	keys, err := s.store.List(ctx, "locks")

@@ -77,9 +77,6 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 	cfg, root, store, engine, authReg := env.cfg, env.root, env.store, env.engine, env.authReg
 
 	lockStore := blocks.New(store)
-	if n, _ := lockStore.ReapAll(ctx, run.LockTTL(cfg.Shared)); n > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "reaped %d expired lock(s)\n", n)
-	}
 
 	engineCfg := env.engineCfg
 

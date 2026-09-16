@@ -433,9 +433,8 @@ Stable within a major version.
 
 reeve writes lock state → apply runs → writes result. If S3 goes away
 between the first two steps, the lock may be held indefinitely from
-reeve's perspective. The opportunistic reaper cleans up based on TTL;
-wait the configured TTL (default 4h), or use `reeve locks explain` +
-`reeve locks reap` once the bucket is back.
+reeve's perspective. Wait the configured TTL (default 4h), then run
+`reeve maintenance run` or `reeve locks reap` once the bucket is back.
 
 ### Clock skew
 

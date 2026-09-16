@@ -100,13 +100,6 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	cfg, root, store, engine, authReg := env.cfg, env.root, env.store, env.engine, env.authReg
 	engineCfg := env.engineCfg
 
-	// Opportunistic blob retention: prune run artifacts older than max_age.
-	// Timed: it lists and deletes against the bucket, so a slow or throttled
-	// backend shows up here rather than as an unexplained gap.
-	pruneStart := time.Now()
-	run.PruneRunArtifactsOpportunistic(ctx, store, cfg.Shared)
-	slog.Debug("run artifact prune finished", "ms", time.Since(pruneStart).Milliseconds())
-
 	// OTEL is NOT built here for preview: run.Preview constructs it after
 	// the pre-approval observability gate (a PR that modifies
 	// observability.yaml must not get an OTLP exporter pointed at its own

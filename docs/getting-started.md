@@ -320,7 +320,7 @@ approvals:
       require_all_groups: true    # one from each group, not 2-of-any
 
 locking:
-  ttl: 4h                         # opportunistic reaper cleans up expired locks
+  ttl: 4h                         # maintenance reaps expired locks
   queue: fifo
 ```
 
