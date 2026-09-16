@@ -12,7 +12,21 @@ import (
 	"testing"
 
 	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob/blobtest"
 )
+
+func TestContract(t *testing.T) {
+	blobtest.RunContract(t, blobtest.Subject{
+		NewStore: func(t *testing.T) blob.Store {
+			t.Helper()
+			store, err := New(t.TempDir())
+			if err != nil {
+				t.Fatalf("new filesystem store: %v", err)
+			}
+			return store
+		},
+	})
+}
 
 func TestPutGet(t *testing.T) {
 	ctx := context.Background()
@@ -133,6 +147,47 @@ func TestList(t *testing.T) {
 	}
 	if len(keys) != 2 {
 		t.Fatalf("expected 2 keys under pr-1, got %v", keys)
+	}
+}
+
+func TestListMetadataAndConditionalDelete(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "runs/pr-1/old/manifest.json"
+	if _, err := s.Put(ctx, key, strings.NewReader("old")); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := s.ListMetadata(ctx, "runs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 {
+		t.Fatalf("listed %d objects, want 1", len(objects))
+	}
+	listed := objects[0]
+	if listed.Key != key || listed.Version == "" || listed.LastModified == 0 || listed.Size != 3 {
+		t.Fatalf("listed object = %+v", listed)
+	}
+
+	if _, err := s.Put(ctx, key, strings.NewReader("new")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteIfMatch(ctx, key, listed.Version); !errors.Is(err, blob.ErrPreconditionFailed) {
+		t.Fatalf("delete replaced object = %v, want ErrPreconditionFailed", err)
+	}
+	objects, err = s.ListMetadata(ctx, key)
+	if err != nil || len(objects) != 1 {
+		t.Fatalf("relist: objects=%v err=%v", objects, err)
+	}
+	if err := s.DeleteIfMatch(ctx, key, objects[0].Version); err != nil {
+		t.Fatalf("delete current object: %v", err)
+	}
+	if _, _, err := s.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+		t.Fatalf("get deleted object = %v, want ErrNotFound", err)
 	}
 }
 

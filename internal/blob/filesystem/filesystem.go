@@ -13,6 +13,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -135,6 +137,11 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (*blob.Metadat
 		return nil, err
 	}
 	defer root.Close()
+	lock, err := acquireLock(root, k)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.release()
 	return writeAtomic(root, k, r)
 }
 
@@ -242,6 +249,131 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		return nil
 	})
 	return out, err
+}
+
+// ListMetadata returns object metadata without opening object contents.
+func (s *Store) ListMetadata(ctx context.Context, prefix string) ([]blob.ListedObject, error) {
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	fsys := root.FS()
+
+	start := "."
+	if strings.TrimSpace(prefix) != "" {
+		k, err := cleanKey(prefix)
+		if err != nil {
+			return nil, err
+		}
+		start = path.Clean(k)
+	}
+
+	info, err := fs.Stat(fsys, start)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return []blob.ListedObject{listedObject(start, info)}, nil
+	}
+
+	var out []blob.ListedObject
+	err = fs.WalkDir(fsys, start, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if p == lockNamespace {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if p == lockNamespace || strings.HasPrefix(p, lockNamespace+"/") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		out = append(out, listedObject(p, info))
+		return nil
+	})
+	return out, err
+}
+
+// DeleteIfMatch removes key only while it is still the listed version.
+func (s *Store) DeleteIfMatch(ctx context.Context, key, version string) error {
+	if version == "" {
+		return blob.ErrPreconditionFailed
+	}
+	k, err := cleanKey(key)
+	if err != nil {
+		return err
+	}
+	root, err := s.openRoot()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	lock, err := acquireLock(root, k)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
+
+	info, err := fs.Stat(root.FS(), osKey(k))
+	if errors.Is(err, fs.ErrNotExist) {
+		return blob.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if fileVersion(info) != version {
+		return blob.ErrPreconditionFailed
+	}
+	if err := root.Remove(osKey(k)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return blob.ErrNotFound
+		}
+		return err
+	}
+	return nil
+}
+
+func listedObject(key string, info fs.FileInfo) blob.ListedObject {
+	return blob.ListedObject{
+		Key:          key,
+		Version:      fileVersion(info),
+		LastModified: info.ModTime().Unix(),
+		Size:         info.Size(),
+	}
+}
+
+func fileVersion(info fs.FileInfo) string {
+	version := strconv.FormatInt(info.Size(), 10) + ":" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
+	v := reflect.ValueOf(info.Sys())
+	if v.IsValid() && v.Kind() == reflect.Pointer && !v.IsNil() {
+		v = v.Elem()
+	}
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return version
+	}
+	for _, name := range []string{"Dev", "Ino"} {
+		field := v.FieldByName(name)
+		if !field.IsValid() {
+			continue
+		}
+		switch field.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			version += ":" + strconv.FormatInt(field.Int(), 10)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			version += ":" + strconv.FormatUint(field.Uint(), 10)
+		}
+	}
+	return version
 }
 
 // writeAtomic writes r to key via a sibling temp file plus rename. Both the
