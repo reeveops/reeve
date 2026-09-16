@@ -411,6 +411,14 @@ func TestActionClassifier(t *testing.T) {
 			wantArgs:    []string{"--trigger-source", "comment", "--force", "--refresh"},
 		},
 		{
+			name:        "CRLF apply flags",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve apply --force\r\nquoted text","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "apply",
+			wantArgs:    []string{"--trigger-source", "comment", "--force"},
+		},
+		{
 			name:        "refresh flags",
 			eventName:   "issue_comment",
 			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve refresh --dry-run --all","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,

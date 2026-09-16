@@ -127,6 +127,7 @@ case "${GITHUB_EVENT_NAME:-}" in
       skip "Comment authored by bot '$author_login' - skipping (self-trigger guard)."
     fi
     comment_body=$(jq -r '.comment.body // ""' < "$GITHUB_EVENT_PATH")
+    comment_body=${comment_body//$'\r'/}
     first_line=${comment_body%%$'\n'*}
     read -r prefix verb rest <<< "$first_line"
     if ! accepted_prefix "${prefix:-}"; then
