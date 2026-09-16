@@ -25,6 +25,9 @@ assert_contains() {
 }
 
 assert_eq "$(classify_ref v1.2.3)" version
+assert_eq "$(classify_ref v1.2.3-rc.1)" version
+assert_eq "$(classify_ref v1.2.3-rc.1+build.7)" other
+assert_eq "$(classify_ref v1.2.3-)" other
 assert_eq "$(classify_ref master)" edge
 assert_eq "$(classify_ref next)" edge
 assert_eq "$(classify_ref 0123456789abcdef0123456789abcdef01234567)" commit
@@ -37,6 +40,15 @@ trap 'rm -rf "$test_root"' EXIT
 source_hash=$(printf 'a%.0s' {1..64})
 other_hash=$(printf 'b%.0s' {1..64})
 commit_ref=0123456789abcdef0123456789abcdef01234567
+
+REEVE_REF=feature/test REEVE_REPO=reeveops/reeve REEVE_SOURCE_HASH=$source_hash REEVE_OS=Linux REEVE_ARCH=X64 \
+  prebuilt_eligible && fail "feature ref was prebuilt eligible"
+REEVE_REF=$commit_ref REEVE_REPO=reeveops/reeve REEVE_SOURCE_HASH=$source_hash REEVE_OS=macOS REEVE_ARCH=X64 \
+  prebuilt_eligible && fail "macOS was prebuilt eligible"
+REEVE_REF=$commit_ref REEVE_REPO=reeveops/reeve REEVE_SOURCE_HASH=$source_hash REEVE_OS=Linux REEVE_ARCH=X64 \
+  prebuilt_eligible || fail "commit ref was not prebuilt eligible"
+REEVE_REF=v1.2.3-rc.1 REEVE_REPO=reeveops/reeve REEVE_SOURCE_HASH=invalid REEVE_OS=Linux REEVE_ARCH=X64 \
+  prebuilt_eligible || fail "prerelease ref was not prebuilt eligible"
 
 printf '%s\n' "$source_hash" > "$test_root/source-hash.txt"
 REEVE_SOURCE_HASH=$source_hash verify_source_hash "$test_root/source-hash.txt"
@@ -188,9 +200,14 @@ step_block() {
 }
 
 fetch_step=$(step_block "Fetch prebuilt binary")
+classify_step=$(step_block "Classify prebuilt binary eligibility")
+cosign_step=$(step_block "Install cosign for binary verification")
 setup_step=$(step_block "Set up Go (from reeve's go.mod)")
 build_step=$(step_block "Build reeve")
 assert_contains "$fetch_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
+assert_contains "$classify_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
+assert_contains "$cosign_step" "steps.reeve-binary.outputs.eligible == 'true'"
+assert_contains "$fetch_step" "steps.reeve-binary.outputs.eligible == 'true'"
 assert_contains "$setup_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
 assert_contains "$setup_step" "steps.reeve-fetch.outputs.fetched != 'true'"
 assert_contains "$build_step" "steps.reeve-cache.outputs.cache-hit != 'true'"

@@ -132,7 +132,7 @@ of every path, so all of this only matters on a cache miss:
 
 | Pin                | Binary source                                                                                           |
 | ------------------ | ------------------------------------------------------------------------------------------------------- |
-| `@vX.Y.Z`          | Release tarball from that release, verified against its cosign-signed `checksums.txt`                   |
+| `@vX.Y.Z[-pre]`    | Release tarball from that release, verified against its cosign-signed `checksums.txt`                   |
 | `@master` / `@next`| Source-matched per-push prerelease with a valid checksum and cosign signature                           |
 | full commit SHA    | That commit's retained source-matched prerelease, with source-build fallback                            |
 | anything else      | Built from source on the runner (feature branches and forks)                                            |

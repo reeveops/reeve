@@ -8,7 +8,7 @@ branding:
 # NOTE: Install is three-tier, cache first:
 #   1. Cache hit on the source hash -> reuse the cached binary (seconds).
 #   2. Cache miss -> try a prebuilt binary:
-#        @vX.Y.Z       -> that release's tarball, verified against the
+#        @vX.Y.Z[-pre] -> that release's tarball, verified against the
 #                         release's checksums.txt (signed release pipeline).
 #        @master/@next -> the source-matched per-push prerelease.
 #        @<full SHA>   -> that commit's retained per-push prerelease.
@@ -164,14 +164,29 @@ runs:
     # network, unsupported arch) logs why and reports fetched=false, which
     # re-enables the source-build steps below. A separate save step publishes
     # the verified result before any workload-controlled code runs.
-    - name: Install cosign for binary verification
+    - name: Classify prebuilt binary eligibility
+      id: reeve-binary
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}/../../..
+        REEVE_REF: ${{ inputs.source-ref || github.action_ref }}
+        REEVE_REPO: ${{ inputs.source-repository || github.action_repository }}
+        REEVE_SOURCE_HASH: ${{ steps.reeve-hash.outputs.hash }}
+        REEVE_OS: ${{ runner.os }}
+        REEVE_ARCH: ${{ runner.arch }}
+      run: |
+        set -euo pipefail
+        "$ACTION_PATH/.github/scripts/fetch-binary.sh" classify
+
+    - name: Install cosign for binary verification
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-binary.outputs.eligible == 'true'
       continue-on-error: true
       uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
     - name: Fetch prebuilt binary
       id: reeve-fetch
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-binary.outputs.eligible == 'true'
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}/../../..

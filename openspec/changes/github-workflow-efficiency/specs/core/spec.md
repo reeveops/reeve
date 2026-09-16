@@ -88,17 +88,35 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 - WHEN the action validates its typed drift inputs
 - THEN it MUST stop before Reeve execution with a clear error.
 
-#### Scenario: Named secrets
+#### Scenario: Named integration secrets
 
-- GIVEN the caller needs a Reeve token override, notification token, or engine credential
+- GIVEN the caller needs a Reeve token override or notification token
 - WHEN it invokes the reusable workflow
 - THEN it MUST map only the named secret and MUST NOT require `secrets: inherit`.
+
+#### Scenario: Engine credentials
+
+- GIVEN an engine or state backend requires credentials
+- WHEN the reusable workflow invokes Reeve
+- THEN it MUST resolve them through configured auth providers and MUST NOT accept long-lived engine credentials as workflow-call secrets.
 
 #### Scenario: Engine setup
 
 - GIVEN a caller selects a Pulumi, OpenTofu, or Terraform CLI version
 - WHEN the reusable workflow accepts an event
 - THEN it MUST install the selected CLI after event classification and disable wrapper shims for HCL engines.
+
+#### Scenario: Ineligible prebuilt binary
+
+- GIVEN the action source is an unsupported ref, operating system, or architecture
+- WHEN the binary cache misses
+- THEN it MUST skip verifier installation and build the exact checked source.
+
+#### Scenario: Signed prerelease tag
+
+- GIVEN the action source is a semantic-version prerelease tag
+- WHEN the binary cache misses
+- THEN it MUST resolve and verify that tag's release artifact before falling back to source.
 
 ### Requirement: Pinned workflow scaffolding
 

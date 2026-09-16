@@ -101,7 +101,6 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"cancel-in-progress:",
 		"opentofu-version:",
 		"terraform-version:",
-		"pulumi_access_token:",
 		"reeve_token:",
 		"name: Reeve",
 		"REEVE_SELF_CHECK_NAMES:",
@@ -118,6 +117,18 @@ func TestReusableWorkflowContract(t *testing.T) {
 	}
 	if strings.Contains(workflow, "secrets: inherit") {
 		t.Fatal("reusable workflow must map named secrets")
+	}
+	for _, credential := range []string{
+		"pulumi_access_token",
+		"pulumi_config_passphrase",
+		"terraform_cloud_token",
+		"PULUMI_ACCESS_TOKEN",
+		"PULUMI_CONFIG_PASSPHRASE",
+		"TF_TOKEN_app_terraform_io",
+	} {
+		if strings.Contains(workflow, credential) {
+			t.Errorf("reusable workflow must resolve engine credentials through configured auth providers: found %q", credential)
+		}
 	}
 	if strings.Contains(workflow, "contains(github.event.comment.body") {
 		t.Fatal("reusable workflow must not admit commands quoted inside ordinary comments")
@@ -508,6 +519,7 @@ func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
 	for _, name := range []string{
 		"Hash reeve source",
 		"Restore reeve binary cache",
+		"Classify prebuilt binary eligibility",
 		"Install cosign for binary verification",
 		"Fetch prebuilt binary",
 		"Set up Go (from reeve's go.mod)",
