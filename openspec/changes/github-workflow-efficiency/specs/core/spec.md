@@ -54,6 +54,12 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 
 #### Scenario: Named secrets
 
-- GIVEN the caller needs a GitHub token override or Slack notification
+- GIVEN the caller needs a GitHub token override, notification token, or engine credential
 - WHEN it invokes the reusable workflow
 - THEN it MUST map only the named secret and MUST NOT require `secrets: inherit`.
+
+#### Scenario: Engine setup
+
+- GIVEN a caller selects a Pulumi, OpenTofu, or Terraform CLI version
+- WHEN the reusable workflow accepts an event
+- THEN it MUST install the selected CLI after event classification and disable wrapper shims for HCL engines.

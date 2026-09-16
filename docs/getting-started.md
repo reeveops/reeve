@@ -164,10 +164,14 @@ jobs:
     with:
       mode: gitops
       pulumi_version: latest
+    secrets:
+      pulumi_access_token: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+      pulumi_config_passphrase: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
 ```
 
 Pin the workflow call to a reviewed full commit SHA.
 The shared workflow owns routing, checkout, caching, tool setup, timeout, and safe preview concurrency.
+Use `opentofu_version` or `terraform_version` instead of `pulumi_version` for an HCL engine.
 
 That's it. The action auto-detects the command from the event:
 

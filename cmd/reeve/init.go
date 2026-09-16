@@ -148,7 +148,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(w, "\nwarning: .reeve/ does not validate: %v\n", err)
 	}
 
-	printNextSteps(w)
+	printNextSteps(w, opts.EngineType)
 	return nil
 }
 
@@ -263,8 +263,15 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-func printNextSteps(w io.Writer) {
-	fmt.Fprint(w, `
+func printNextSteps(w io.Writer, engine string) {
+	versionInput := "pulumi_version: latest"
+	switch engine {
+	case "tofu":
+		versionInput = "opentofu_version: latest"
+	case "terraform":
+		versionInput = "terraform_version: latest"
+	}
+	fmt.Fprintf(w, `
 Next steps:
   1. Review the generated files under .reeve/ (settings you skipped are
      included as comments), then commit the directory.
@@ -290,8 +297,8 @@ Next steps:
            uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
            with:
              mode: gitops
-             pulumi_version: latest
+             %s
 
 See docs/getting-started.md for the full walk-through.
-`)
+`, versionInput)
 }

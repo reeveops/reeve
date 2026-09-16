@@ -229,7 +229,10 @@ jobs:
 ```
 
 The shared workflow uses the composite action from the same pinned Reeve commit.
-Named secrets can be passed as `github_token` and `slack_token` without `secrets: inherit`.
+Set `pulumi_version`, `opentofu_version`, or `terraform_version` to install the workload CLI after event classification.
+
+Named secrets include `github_token`, `slack_token`, `pulumi_access_token`, `pulumi_config_passphrase`, and `terraform_cloud_token`.
+Map only the credentials the workload needs instead of using `secrets: inherit`.
 
 The exact-commit self reference requires GitHub.com and runner 2.336.0 or newer.
 GHES users can keep using the composite action directly until GitHub adds self references there.

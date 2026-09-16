@@ -27,6 +27,16 @@ on:
         required: false
         type: string
         default: ""
+      opentofu_version:
+        description: OpenTofu CLI version, or blank to skip installation.
+        required: false
+        type: string
+        default: ""
+      terraform_version:
+        description: Terraform CLI version, or blank to skip installation.
+        required: false
+        type: string
+        default: ""
       command_prefix:
         description: Comma-separated accepted PR comment prefixes.
         required: false
@@ -63,6 +73,15 @@ on:
         required: false
       slack_token:
         description: Optional Slack bot token.
+        required: false
+      pulumi_access_token:
+        description: Optional Pulumi Cloud access token.
+        required: false
+      pulumi_config_passphrase:
+        description: Optional Pulumi stack passphrase.
+        required: false
+      terraform_cloud_token:
+        description: Optional HCP Terraform token for app.terraform.io.
         required: false
 
 jobs:
@@ -114,6 +133,10 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+    env:
+      PULUMI_ACCESS_TOKEN: ${{ secrets.pulumi_access_token }}
+      PULUMI_CONFIG_PASSPHRASE: ${{ secrets.pulumi_config_passphrase }}
+      TF_TOKEN_app_terraform_io: ${{ secrets.terraform_cloud_token }}
     concurrency:
       group: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) && format('reeve-preview-{0}-{1}', github.repository_id, github.event.pull_request.number) || format('reeve-command-{0}-{1}', github.repository_id, github.run_id) }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) }}
@@ -123,6 +146,8 @@ jobs:
         with:
           root: ${{ inputs.root }}
           pulumi-version: ${{ inputs.pulumi_version }}
+          opentofu-version: ${{ inputs.opentofu_version }}
+          terraform-version: ${{ inputs.terraform_version }}
           github-token: ${{ secrets.github_token || github.token }}
           slack-token: ${{ secrets.slack_token }}
           gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
@@ -141,6 +166,10 @@ jobs:
       pull-requests: read
       issues: write
       id-token: write
+    env:
+      PULUMI_ACCESS_TOKEN: ${{ secrets.pulumi_access_token }}
+      PULUMI_CONFIG_PASSPHRASE: ${{ secrets.pulumi_config_passphrase }}
+      TF_TOKEN_app_terraform_io: ${{ secrets.terraform_cloud_token }}
     concurrency:
       group: reeve-drift-${{ github.repository_id }}
       cancel-in-progress: false
@@ -151,6 +180,8 @@ jobs:
           command: drift run
           root: ${{ inputs.root }}
           pulumi-version: ${{ inputs.pulumi_version }}
+          opentofu-version: ${{ inputs.opentofu_version }}
+          terraform-version: ${{ inputs.terraform_version }}
           github-token: ${{ secrets.github_token || github.token }}
           slack-token: ${{ secrets.slack_token }}
           gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}

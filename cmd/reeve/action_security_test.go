@@ -84,6 +84,9 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"github.event.action == 'created'",
 		"contains(github.event.comment.body, '/reeve')",
 		"cancel-in-progress:",
+		"opentofu-version:",
+		"terraform-version:",
+		"pulumi_access_token:",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("reusable workflow is missing %q", want)
@@ -94,6 +97,20 @@ func TestReusableWorkflowContract(t *testing.T) {
 	}
 	if !strings.Contains(readRepoFile(t, "action.yml"), "persist-credentials: false") {
 		t.Fatal("composite action checkout must not persist credentials")
+	}
+	action := readRepoFile(t, "action.yml")
+	for _, want := range []string{"Install Pulumi CLI", "Install OpenTofu CLI", "Install Terraform CLI"} {
+		if !strings.Contains(action, want) {
+			t.Errorf("composite action is missing %q", want)
+		}
+		if strings.Index(action, "name: Classify event") > strings.Index(action, "name: "+want) {
+			t.Errorf("%s must run after event classification", want)
+		}
+	}
+	for _, want := range []string{"tofu_wrapper: false", "terraform_wrapper: false"} {
+		if !strings.Contains(action, want) {
+			t.Errorf("composite action is missing %q", want)
+		}
 	}
 }
 

@@ -31,6 +31,14 @@ inputs:
     description: Version of the Pulumi CLI to install. Leave blank to skip.
     required: false
     default: ""
+  opentofu-version:
+    description: Version of the OpenTofu CLI to install. Leave blank to skip.
+    required: false
+    default: ""
+  terraform-version:
+    description: Version of the Terraform CLI to install. Leave blank to skip.
+    required: false
+    default: ""
   github-token:
     description: GitHub token (needs issues:write to upsert PR comment).
     required: false
@@ -202,6 +210,20 @@ runs:
       uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7
       with:
         pulumi-version: ${{ inputs.pulumi-version }}
+
+    - name: Install OpenTofu CLI
+      if: ${{ steps.reeve-dispatch.outputs.run == 'true' && inputs.opentofu-version != '' }}
+      uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2
+      with:
+        tofu_version: ${{ inputs.opentofu-version }}
+        tofu_wrapper: false
+
+    - name: Install Terraform CLI
+      if: ${{ steps.reeve-dispatch.outputs.run == 'true' && inputs.terraform-version != '' }}
+      uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false
 
     - name: Run reeve
       if: steps.reeve-dispatch.outputs.run == 'true'
