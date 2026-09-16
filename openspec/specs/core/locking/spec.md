@@ -39,6 +39,13 @@ scans `locks/` for expired TTLs before acquiring. Quiet repos may run an
 optional scheduled GH Actions workflow (`reeve locks reap`) to sweep.
 No control plane.
 
+## Maintenance reads and writes
+
+- Lock walkers reuse decoded state and its version within each transition attempt.
+- Reaping and PR cleanup leave unchanged holder and queue state unwritten, preserving the stored timestamp and version.
+- CAS conflicts reread current state and reevaluate expiry, PR identity, and run ownership before retrying.
+- Listed lock content must derive back to the key being read; mismatched objects are not modified.
+
 ## Release triggers
 
 - Apply finished → the finishing run releases per stack, then removes its PR from

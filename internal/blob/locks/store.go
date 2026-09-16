@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -50,7 +51,7 @@ func (s *Store) ensureCAS(ctx context.Context) error {
 // stack names originate in the repo under review (Pulumi.yaml, stack
 // filenames), and plan artifacts already sanitise for the same reason.
 // The mapping is injective; keys are derived from real names only (see
-// namesFor), never from names parsed back out of a key.
+// snapshotFor), never from names parsed back out of a key.
 func (s *Store) key(project, stack string) string {
 	return fmt.Sprintf("locks/%s/%s.json",
 		blob.SlugComponent(project, "project"),
@@ -76,39 +77,38 @@ func (s *Store) Get(ctx context.Context, project, stack string) (corelocks.Lock,
 	return l, md.ETag, nil
 }
 
-// getByKey reads a lock object at an exact key, without deriving that key
-// from names. The walkers use it so key derivation only ever happens from
-// the real project/stack, never from a key parsed back into components -
-// which is what let the slug stay injective instead of having to be
-// idempotent.
-func (s *Store) getByKey(ctx context.Context, key string) (corelocks.Lock, error) {
-	rc, _, err := s.store.Get(ctx, key)
+type lockSnapshot struct {
+	lock corelocks.Lock
+	etag string
+}
+
+// getByKey reads state and version at the listed key without reversing its slug.
+func (s *Store) getByKey(ctx context.Context, key string) (lockSnapshot, error) {
+	rc, md, err := s.store.Get(ctx, key)
 	if err != nil {
-		return corelocks.Lock{}, err
+		return lockSnapshot{}, err
 	}
 	defer rc.Close()
 	var l corelocks.Lock
 	if err := json.NewDecoder(rc).Decode(&l); err != nil {
-		return corelocks.Lock{}, fmt.Errorf("decode lock %s: %w", key, err)
+		return lockSnapshot{}, fmt.Errorf("decode lock %s: %w", key, err)
 	}
-	return l, nil
+	return lockSnapshot{lock: l, etag: md.ETag}, nil
 }
 
-// namesFor returns the authoritative project/stack for a stored lock: the
-// object's own content, not its key. A lock whose content does not derive
-// back to the key it was found under is skipped rather than acted on under
-// the wrong identity.
-func (s *Store) namesFor(ctx context.Context, key string) (string, string, bool) {
-	l, err := s.getByKey(ctx, key)
+// snapshotFor validates the stored identity and retains the read for the walker.
+func (s *Store) snapshotFor(ctx context.Context, key string) (lockSnapshot, bool) {
+	snapshot, err := s.getByKey(ctx, key)
 	if err != nil {
 		slog.Debug("skipping unreadable lock object", "key", key, "err", err)
-		return "", "", false
+		return lockSnapshot{}, false
 	}
+	l := snapshot.lock
 	if l.Project == "" || l.Stack == "" || s.key(l.Project, l.Stack) != key {
 		slog.Debug("skipping lock whose content does not match its key", "key", key)
-		return "", "", false
+		return lockSnapshot{}, false
 	}
-	return l.Project, l.Stack, true
+	return snapshot, true
 }
 
 // TryAcquire runs the acquire transition with optimistic concurrency.
@@ -212,13 +212,24 @@ func holderActive(l corelocks.Lock, pr int, runID string, now time.Time) bool {
 // pr untouched. ttl bounds the promoted holder's lease. force=false refuses
 // (ErrHolderActive) to clear a holder whose lease is still active.
 func (s *Store) UnlockPR(ctx context.Context, project, stack string, pr int, runID string, ttl time.Duration, force bool) (corelocks.Lock, error) {
-	l, _, err := s.mutate(ctx, project, stack, func(cur corelocks.Lock) (corelocks.Lock, bool, error) {
+	l, etag, err := s.Get(ctx, project, stack)
+	if err != nil {
+		return corelocks.Lock{}, err
+	}
+	l, _, err = s.unlockSnapshot(ctx, s.key(project, stack), lockSnapshot{lock: l, etag: etag}, pr, runID, ttl, force)
+	return l, err
+}
+
+func (s *Store) unlockSnapshot(ctx context.Context, key string, snapshot lockSnapshot, pr int, runID string, ttl time.Duration, force bool) (corelocks.Lock, bool, error) {
+	return s.maintain(ctx, key, snapshot, func(cur corelocks.Lock) (corelocks.Lock, bool, error) {
 		if !force && holderActive(cur, pr, runID, s.Now()) {
 			return cur, false, ErrHolderActive
 		}
-		return corelocks.UnlockPR(cur, pr, runID, ttl, s.Now()), false, nil
+		next := corelocks.UnlockPR(cur, pr, runID, ttl, s.Now())
+		sameHolder := cur.Holder == nil && next.Holder == nil ||
+			cur.Holder != nil && next.Holder != nil && *cur.Holder == *next.Holder
+		return next, !sameHolder || !slices.Equal(cur.Queue, next.Queue), nil
 	})
-	return l, err
 }
 
 // UnlockPRAll removes pr from holder/queue across every stored lock.
@@ -240,25 +251,25 @@ func (s *Store) UnlockPRAll(ctx context.Context, pr int, runID string, ttl time.
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := s.namesFor(ctx, k)
+		snapshot, ok := s.snapshotFor(ctx, k)
 		if !ok {
 			continue
 		}
-		cur, _, err := s.Get(ctx, proj, stack)
-		if err != nil {
-			return n, active, err
-		}
+		cur := snapshot.lock
 		if !involvesPR(cur, pr) {
 			continue // avoid rewriting lock blobs the PR never touched
 		}
-		if _, err := s.UnlockPR(ctx, proj, stack, pr, runID, ttl, force); err != nil {
+		_, changed, err := s.unlockSnapshot(ctx, k, snapshot, pr, runID, ttl, force)
+		if err != nil {
 			if errors.Is(err, ErrHolderActive) {
-				active = append(active, proj+"/"+stack)
+				active = append(active, cur.Project+"/"+cur.Stack)
 				continue
 			}
 			return n, active, err
 		}
-		n++
+		if changed {
+			n++
+		}
 	}
 	return n, active, nil
 }
@@ -315,13 +326,18 @@ func forcePromoteQueue(l corelocks.Lock, now time.Time, ttl time.Duration) corel
 // Reap evicts an expired holder. Returns (lock, evicted). ttl bounds the
 // promoted holder's lease; <=0 falls back to the 4h default.
 func (s *Store) Reap(ctx context.Context, project, stack string, ttl time.Duration) (corelocks.Lock, bool, error) {
-	var evicted bool
-	l, _, err := s.mutate(ctx, project, stack, func(cur corelocks.Lock) (corelocks.Lock, bool, error) {
+	l, etag, err := s.Get(ctx, project, stack)
+	if err != nil {
+		return corelocks.Lock{}, false, err
+	}
+	return s.reapSnapshot(ctx, s.key(project, stack), lockSnapshot{lock: l, etag: etag}, ttl)
+}
+
+func (s *Store) reapSnapshot(ctx context.Context, key string, snapshot lockSnapshot, ttl time.Duration) (corelocks.Lock, bool, error) {
+	return s.maintain(ctx, key, snapshot, func(cur corelocks.Lock) (corelocks.Lock, bool, error) {
 		next, ev := corelocks.Reap(cur, ttl, s.Now())
-		evicted = ev
-		return next, false, nil
+		return next, ev, nil
 	})
-	return l, evicted, err
 }
 
 // ReapAll walks locks/ and reaps expired holders across every stack.
@@ -337,11 +353,11 @@ func (s *Store) ReapAll(ctx context.Context, ttl time.Duration) (int, error) {
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := s.namesFor(ctx, k)
+		snapshot, ok := s.snapshotFor(ctx, k)
 		if !ok {
 			continue
 		}
-		_, evicted, err := s.Reap(ctx, proj, stack, ttl)
+		_, evicted, err := s.reapSnapshot(ctx, k, snapshot, ttl)
 		if err != nil {
 			return n, err
 		}
@@ -363,17 +379,55 @@ func (s *Store) ListAll(ctx context.Context) ([]corelocks.Lock, error) {
 		if !strings.HasSuffix(k, ".json") {
 			continue
 		}
-		proj, stack, ok := s.namesFor(ctx, k)
+		snapshot, ok := s.snapshotFor(ctx, k)
 		if !ok {
 			continue
 		}
-		l, _, err := s.Get(ctx, proj, stack)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, l)
+		out = append(out, snapshot.lock)
 	}
 	return out, nil
+}
+
+// maintain reuses a validated read and writes only a changed maintenance transition.
+// Acquire and heartbeat use mutate because renewing a lease must still write.
+func (s *Store) maintain(ctx context.Context, key string, snapshot lockSnapshot,
+	fn func(corelocks.Lock) (corelocks.Lock, bool, error),
+) (corelocks.Lock, bool, error) {
+	for attempt := 0; attempt <= s.MaxRetries; attempt++ {
+		cur := snapshot.lock
+		if cur.Project == "" || cur.Stack == "" || s.key(cur.Project, cur.Stack) != key {
+			return corelocks.Lock{}, false, fmt.Errorf("lock content does not match key %s", key)
+		}
+		next, changed, err := fn(cur)
+		if err != nil || !changed {
+			return cur, false, err
+		}
+		if err := s.ensureCAS(ctx); err != nil {
+			return corelocks.Lock{}, false, err
+		}
+		data, err := json.MarshalIndent(next, "", "  ")
+		if err != nil {
+			return corelocks.Lock{}, false, err
+		}
+		_, err = s.store.PutIfMatch(ctx, key, bytes.NewReader(data), snapshot.etag)
+		if err == nil {
+			return next, true, nil
+		}
+		if !errors.Is(err, blob.ErrPreconditionFailed) {
+			return corelocks.Lock{}, false, err
+		}
+		if attempt == s.MaxRetries {
+			break
+		}
+		snapshot, err = s.getByKey(ctx, key)
+		if errors.Is(err, blob.ErrNotFound) {
+			return corelocks.NewLock(cur.Project, cur.Stack, s.Now()), false, nil
+		}
+		if err != nil {
+			return corelocks.Lock{}, false, err
+		}
+	}
+	return corelocks.Lock{}, false, fmt.Errorf("lock %s: exceeded %d retries", key, s.MaxRetries)
 }
 
 // mutate is the conditional-write retry loop.
