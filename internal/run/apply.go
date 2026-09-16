@@ -58,12 +58,13 @@ type applyVCS interface {
 
 // ApplyInput wires dependencies and run context.
 type ApplyInput struct {
-	PRNumber   int
-	CommitSHA  string // best-effort; overridden from PR HEAD post-GetPR
-	RunNumber  int
-	RunAttempt int
-	CIRunID    int64
-	CIRunURL   string
+	PRNumber        int
+	CommitSHA       string // best-effort; overridden from PR HEAD post-GetPR
+	ExpectedHeadSHA string // immutable workload checkout supplied by the maintained action
+	RunNumber       int
+	RunAttempt      int
+	CIRunID         int64
+	CIRunURL        string
 	// SelfCheckNames is the list of check_run names that belong to reeve
 	// itself and must be skipped when computing ChecksGreen (otherwise a
 	// previously failed apply pins the gate red on the same SHA forever).
@@ -188,7 +189,16 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	if err != nil {
 		return nil, fmt.Errorf("get pr: %w", err)
 	}
-	if pr.HeadSHA != "" {
+	if err := validateExpectedPRHead(in.ExpectedHeadSHA); err != nil {
+		return nil, err
+	}
+	if in.ExpectedHeadSHA != "" {
+		if err := comparePRHead(pr, in.ExpectedHeadSHA); err != nil {
+			return nil, err
+		}
+		in.CommitSHA = in.ExpectedHeadSHA
+		runID = runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
+	} else if pr.HeadSHA != "" {
 		in.CommitSHA = pr.HeadSHA
 		runID = runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
 	}
@@ -376,6 +386,12 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 	if len(teamMembers) == 0 {
 		slog.Debug("team expansion returned no members - approvals will use literal matching only")
+	}
+
+	// Approval and check reads may take time. Re-read the live PR head after
+	// them and before any lock, workload credential, or engine operation.
+	if err := revalidatePRHead(ctx, in.VCS, in.PRNumber, in.ExpectedHeadSHA); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()

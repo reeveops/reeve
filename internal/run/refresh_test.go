@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -35,6 +36,7 @@ func (e *credentialRefreshEngine) Refresh(_ context.Context, stack discovery.Sta
 
 type countingRefreshVCS struct {
 	headSHA    string
+	headSHAs   []string
 	getPRCalls int
 }
 
@@ -43,7 +45,15 @@ func (*countingRefreshVCS) ListChangedFiles(context.Context, int) ([]string, err
 }
 func (v *countingRefreshVCS) GetPR(context.Context, int) (*vcs.PR, error) {
 	v.getPRCalls++
-	return &vcs.PR{Number: 7, HeadSHA: v.headSHA, BaseRef: "main"}, nil
+	headSHA := v.headSHA
+	if len(v.headSHAs) > 0 {
+		index := v.getPRCalls - 1
+		if index >= len(v.headSHAs) {
+			index = len(v.headSHAs) - 1
+		}
+		headSHA = v.headSHAs[index]
+	}
+	return &vcs.PR{Number: 7, HeadSHA: headSHA, BaseRef: "main"}, nil
 }
 func (*countingRefreshVCS) UpsertComment(context.Context, int, string, string) error { return nil }
 func (*countingRefreshVCS) PostComment(context.Context, int, string) error           { return nil }
@@ -112,5 +122,31 @@ func TestRefreshUsesOneAuthoritativePRSnapshot(t *testing.T) {
 	want := "refresh-12-2-" + headSHA[:7]
 	if out.RunID != want {
 		t.Fatalf("run ID = %q, want %q", out.RunID, want)
+	}
+}
+
+func TestRefreshRevalidatesExpectedHeadBeforeStateChange(t *testing.T) {
+	expected := strings.Repeat("a", 40)
+	moved := strings.Repeat("b", 40)
+	vcsClient := &countingRefreshVCS{headSHAs: []string{expected, moved}}
+	engine := &credentialRefreshEngine{stacks: []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+	}}
+	_, err := Refresh(t.Context(), RefreshInput{
+		PRNumber: 7, CommitSHA: expected, ExpectedHeadSHA: expected,
+		RepoRoot: "/repo", Engine: engine, VCS: vcsClient, All: true,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Type: "tofu", Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"prod"}}},
+		}},
+		Shared: &schemas.Shared{},
+	})
+	if !errors.Is(err, ErrPRHeadMismatch) {
+		t.Fatalf("Refresh error = %v, want %v", err, ErrPRHeadMismatch)
+	}
+	if vcsClient.getPRCalls != 2 {
+		t.Fatalf("PR metadata reads = %d, want initial snapshot plus boundary revalidation", vcsClient.getPRCalls)
+	}
+	if len(engine.refreshed) != 0 {
+		t.Fatalf("engine refreshed after PR head moved: %v", engine.refreshed)
 	}
 }

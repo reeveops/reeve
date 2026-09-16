@@ -45,13 +45,14 @@ type Engine interface {
 
 // PreviewInput wires the dependencies and run context together.
 type PreviewInput struct {
-	PRNumber  int
-	PRTitle   string
-	CommitSHA string
-	RunNumber int
-	CIRunID   string
-	CIRunURL  string
-	RepoRoot  string
+	PRNumber        int
+	PRTitle         string
+	CommitSHA       string
+	ExpectedHeadSHA string
+	RunNumber       int
+	CIRunID         string
+	CIRunURL        string
+	RepoRoot        string
 	// RepoPath is RepoRoot relative to the VCS repository root. VCS changed
 	// files are scoped to this path before security gates and stack mapping.
 	RepoPath      string
@@ -147,7 +148,11 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}
 
 	var prMeta *vcs.PR
-	in.CommitSHA, prMeta = resolvePR(ctx, in.VCS, in.PRNumber, in.CommitSHA)
+	var err error
+	in.CommitSHA, prMeta, err = resolvePR(ctx, in.VCS, in.PRNumber, in.CommitSHA, in.ExpectedHeadSHA)
+	if err != nil {
+		return nil, err
+	}
 	slog.Debug("preview starting", "pr", in.PRNumber, "sha", in.CommitSHA, "local", in.Local)
 
 	runID := runIdentity("run", in.RunNumber, in.RunAttempt, in.CommitSHA)

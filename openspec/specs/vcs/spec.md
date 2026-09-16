@@ -65,6 +65,22 @@ snapshot.
 - **THEN** the adapter discards the snapshot, rediscovers the marker, and
   performs one edit or create attempt against the current state
 
+## Immutable PR workload identity
+
+The maintained action MUST resolve and checkout a full PR head commit SHA.
+The CLI MUST compare that identity with PR metadata before using it for gates or artifacts.
+
+#### Scenario: Event ref moves before checkout
+
+- **WHEN** an event identifies a PR whose head ref can move
+- **THEN** the action checks out the immutable head SHA resolved for that invocation
+- **AND** it verifies the working tree before credential or engine setup
+
+#### Scenario: Checked-out head no longer matches
+
+- **WHEN** the current PR head differs from the action-supplied checkout SHA
+- **THEN** PR commands fail closed instead of replacing the artifact identity
+
 ## GitHub Enterprise Server
 
 The adapter honors `GITHUB_API_URL` (set by the Actions runner on both

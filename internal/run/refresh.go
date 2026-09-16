@@ -37,24 +37,25 @@ type refreshVCS interface {
 
 // RefreshInput wires dependencies and run context for a refresh.
 type RefreshInput struct {
-	PRNumber     int
-	CommitSHA    string
-	RunNumber    int
-	RunAttempt   int
-	CIRunURL     string
-	RepoRoot     string
-	RepoPath     string // RepoRoot relative to the VCS repository root.
-	RepoFull     string
-	Actor        string
-	Engine       refreshEngine
-	Config       *schemas.Engine
-	Shared       *schemas.Shared
-	AuthConfig   *schemas.Auth
-	AuthRegistry *auth.Registry
-	Blob         blob.Store
-	Locks        *blocks.Store
-	VCS          refreshVCS // nil for --local
-	AuditWriter  *audit.Writer
+	PRNumber        int
+	CommitSHA       string
+	ExpectedHeadSHA string
+	RunNumber       int
+	RunAttempt      int
+	CIRunURL        string
+	RepoRoot        string
+	RepoPath        string // RepoRoot relative to the VCS repository root.
+	RepoFull        string
+	Actor           string
+	Engine          refreshEngine
+	Config          *schemas.Engine
+	Shared          *schemas.Shared
+	AuthConfig      *schemas.Auth
+	AuthRegistry    *auth.Registry
+	Blob            blob.Store
+	Locks           *blocks.Store
+	VCS             refreshVCS // nil for --local
+	AuditWriter     *audit.Writer
 	// DryRun reports what a refresh would reconcile and writes no state.
 	DryRun bool
 	// All refreshes every declared stack instead of the ones this PR's
@@ -107,7 +108,16 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		if err != nil {
 			return nil, fmt.Errorf("get pr: %w", err)
 		}
-		if pr.HeadSHA != "" {
+		if err := validateExpectedPRHead(in.ExpectedHeadSHA); err != nil {
+			return nil, err
+		}
+		if in.ExpectedHeadSHA != "" {
+			if err := comparePRHead(pr, in.ExpectedHeadSHA); err != nil {
+				return nil, err
+			}
+			in.CommitSHA = in.ExpectedHeadSHA
+			runID = runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
+		} else if pr.HeadSHA != "" {
 			in.CommitSHA = pr.HeadSHA
 			runID = runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
 		}
@@ -147,6 +157,9 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	}
 	if len(target) == 0 {
 		return &RefreshOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
+	}
+	if err := revalidatePRHead(ctx, in.VCS, in.PRNumber, in.ExpectedHeadSHA); err != nil {
+		return nil, err
 	}
 	executionEnv, executionCleanup, err := iac.ExecutionEnv()
 	if err != nil {

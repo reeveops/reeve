@@ -124,6 +124,7 @@ func runApply(cmd *cobra.Command, _ []string) error {
 		PRNumber:        pr,
 		TriggerSource:   flagStringOrDefault(cmd, "trigger-source", ""),
 		CommitSHA:       sha,
+		ExpectedHeadSHA: os.Getenv("REEVE_EXPECTED_HEAD_SHA"),
 		RunNumber:       runNum,
 		RunAttempt:      runAttempt,
 		CIRunID:         ciRunID,

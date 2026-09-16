@@ -102,9 +102,11 @@ Apply waits until approvals, checks, preview, lock, freeze, fork, draft, and pol
 
 Stack credentials override state credentials when both explicitly provide the same environment key.
 
-- Each acquired credential set is cleaned after use.
-- Drift cleans an expired credential set before acquiring its replacement.
-- Drift cleans the replacement credential set after the final attempt.
+- One command reuses each provider credential across state access and every matching stack.
+- Concurrent requests for one provider share one acquisition.
+- A credential expiring within 30 seconds is replaced before a new consumer receives it.
+- Drift invalidates the cached generation before rebinding after an expired-credential failure.
+- Every acquired generation is cleaned once when the command ends, including replaced and invalidated generations.
 
 This boundary prevents accidental ambient inheritance but is not an operating-system sandbox.
 Run approved untrusted code under a separate user, container, VM, or job boundary.
