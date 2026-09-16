@@ -31,7 +31,7 @@ Every later action step MUST depend on an accepted classification.
 
 ### Requirement: Shared workflow modes
 
-The public reusable workflow MUST require either `gitops` or `drift` mode.
+The public reusable workflow MUST require `gitops`, `drift`, or `maintenance` mode.
 It MUST invoke the composite action from the same Reeve commit as the workflow file.
 
 #### Scenario: GitOps mode
@@ -63,6 +63,12 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 - GIVEN a drift caller selects a named schedule or stack pattern and optional stale-only filtering
 - WHEN the called workflow starts
 - THEN it MUST pass each value as a distinct CLI argument without shell evaluation.
+
+#### Scenario: Maintenance mode
+
+- GIVEN a scheduled or manual caller selects `maintenance` mode
+- WHEN the called workflow starts
+- THEN it MUST run `reeve maintenance run` without installing an IaC engine.
 
 #### Scenario: Conflicting drift scope
 

@@ -177,6 +177,9 @@ jobs:
 Pin the workflow call to a reviewed full commit SHA.
 The shared workflow owns routing, checkout, caching, tool setup, timeout, and safe preview concurrency.
 
+Scheduled bucket cleanup uses the same workflow with `mode: maintenance` and runs no IaC engine.
+It executes `reeve maintenance run` for expired locks and configured artifact retention.
+
 Use `opentofu_version` or `terraform_version` instead of `pulumi_version` for an HCL engine.
 Add `id-token: write` only when an AWS OIDC, GCP WIF, or Azure federated provider needs it.
 

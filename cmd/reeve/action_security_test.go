@@ -93,6 +93,7 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"workflow_call:",
 		"inputs.mode == 'gitops'",
 		"inputs.mode == 'drift'",
+		"inputs.mode == 'maintenance'",
 		"uses: $/.github/actions/reeve",
 		"github.event.action == 'created'",
 		"startsWith(github.event.comment.body, format('{0} ', inputs.command_prefix))",
@@ -106,6 +107,8 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"default: reeve / Reeve,reeve / gitops",
 		"drift_schedule:",
 		"drift-schedule: ${{ inputs.drift_schedule }}",
+		"command: maintenance run",
+		"group: reeve-maintenance-${{ github.repository_id }}",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("reusable workflow is missing %q", want)
@@ -119,6 +122,16 @@ func TestReusableWorkflowContract(t *testing.T) {
 	}
 	if strings.Contains(workflow, "pull-requests: write") {
 		t.Fatal("reusable workflow must inherit mode-specific caller permissions")
+	}
+	maintenanceAt := strings.Index(workflow, "  maintenance:")
+	if maintenanceAt < 0 {
+		t.Fatal("reusable workflow is missing maintenance mode")
+	}
+	maintenance := workflow[maintenanceAt:]
+	for _, unwanted := range []string{"pulumi-version:", "opentofu-version:", "terraform-version:"} {
+		if strings.Contains(maintenance, unwanted) {
+			t.Errorf("maintenance mode must not install an IaC engine: found %q", unwanted)
+		}
 	}
 	implementation := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
 	if !strings.Contains(implementation, "persist-credentials: false") {

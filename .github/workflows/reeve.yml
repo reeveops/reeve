@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       mode:
-        description: Run PR GitOps or scheduled drift detection.
+        description: Run PR GitOps, drift detection, or bucket maintenance.
         required: true
         type: string
       runner:
@@ -106,7 +106,7 @@ on:
 
 jobs:
   invalid-mode:
-    if: inputs.mode != 'gitops' && inputs.mode != 'drift'
+    if: inputs.mode != 'gitops' && inputs.mode != 'drift' && inputs.mode != 'maintenance'
     runs-on: ubuntu-latest
     timeout-minutes: 1
     permissions: {}
@@ -201,4 +201,23 @@ jobs:
           drift-schedule: ${{ inputs.drift_schedule }}
           drift-pattern: ${{ inputs.drift_pattern }}
           drift-if-stale: ${{ inputs.drift_if_stale }}
+          log-level: ${{ inputs.log_level }}
+
+  maintenance:
+    name: Reeve maintenance
+    if: inputs.mode == 'maintenance' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: reeve-maintenance-${{ github.repository_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Run Reeve bucket maintenance
+        uses: $/.github/actions/reeve
+        with:
+          command: maintenance run
+          root: ${{ inputs.root }}
+          github-token: ${{ secrets.reeve_token || github.token }}
+          gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
+          gcp-service-account: ${{ inputs.gcp_service_account }}
           log-level: ${{ inputs.log_level }}

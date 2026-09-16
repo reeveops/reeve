@@ -217,8 +217,9 @@ permissions:
 
 ### Shared workflow modes
 
-Use the shared workflow with `mode: gitops` for pull request previews and commands.
-Use `mode: drift` from a scheduled or manual workflow for drift detection.
+- Use `mode: gitops` for pull request previews and commands.
+- Use `mode: drift` from a scheduled or manual workflow for drift detection.
+- Use `mode: maintenance` from a trusted schedule or manual workflow for lock reaping and artifact retention.
 
 ```yaml
 jobs:
@@ -260,6 +261,21 @@ jobs:
 
 Drift callers may set `drift_schedule`, `drift_pattern`, or `drift_if_stale`.
 Schedule and pattern are mutually exclusive; stale-only filtering composes with either.
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  maintenance:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: maintenance
+```
+
+Maintenance mode installs no IaC engine and runs only on `schedule` or `workflow_dispatch`.
+Grant `id-token: write` only when bucket access uses federation.
 
 ### Event triggers
 
