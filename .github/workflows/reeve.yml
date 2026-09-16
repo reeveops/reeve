@@ -57,6 +57,11 @@ on:
         required: false
         type: string
         default: ""
+      self_check_names:
+        description: Comma-separated Reeve check names excluded from apply gates.
+        required: false
+        type: string
+        default: reeve / Reeve,reeve / gitops
       gcp_workload_identity_provider:
         description: GCP Workload Identity Provider resource name.
         required: false
@@ -99,6 +104,7 @@ jobs:
           exit 1
 
   gitops:
+    name: Reeve
     if: >-
       inputs.mode == 'gitops' && (
         (
@@ -128,6 +134,7 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     env:
+      REEVE_SELF_CHECK_NAMES: ${{ inputs.self_check_names }}
       PULUMI_ACCESS_TOKEN: ${{ secrets.pulumi_access_token }}
       PULUMI_CONFIG_PASSPHRASE: ${{ secrets.pulumi_config_passphrase }}
       TF_TOKEN_app_terraform_io: ${{ secrets.terraform_cloud_token }}
@@ -152,6 +159,7 @@ jobs:
           log-level: ${{ inputs.log_level }}
 
   drift:
+    name: Reeve drift
     if: inputs.mode == 'drift' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
