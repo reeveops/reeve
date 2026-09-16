@@ -173,6 +173,9 @@ Pin the workflow call to a reviewed full commit SHA.
 The shared workflow owns routing, checkout, caching, tool setup, timeout, and safe preview concurrency.
 Use `opentofu_version` or `terraform_version` instead of `pulumi_version` for an HCL engine.
 
+Keep the caller job ID `reeve` and require the `reeve / Reeve` check in branch protection.
+If the caller job ID changes, pass its full check name through `self_check_names` so apply does not wait on an earlier Reeve run.
+
 That's it. The action auto-detects the command from the event:
 
 | Event / Comment                                    | Action                   |

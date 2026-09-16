@@ -91,6 +91,9 @@ func TestReusableWorkflowContract(t *testing.T) {
 		"terraform-version:",
 		"pulumi_access_token:",
 		"reeve_token:",
+		"name: Reeve",
+		"REEVE_SELF_CHECK_NAMES:",
+		"default: reeve / Reeve,reeve / gitops",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("reusable workflow is missing %q", want)
