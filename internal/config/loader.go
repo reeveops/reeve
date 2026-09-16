@@ -286,6 +286,12 @@ func (c *Config) Validate() error {
 	if err := c.validateDurations(); err != nil {
 		return err
 	}
+	for _, engine := range c.Engines {
+		if engine.Engine.Execution.MaxParallelStacks < 0 {
+			return fmt.Errorf("engine config (engine.type=%s): engine.execution.max_parallel_stacks must be zero or positive",
+				engine.Engine.Type)
+		}
+	}
 	if err := c.validateApprovalSources(); err != nil {
 		return err
 	}

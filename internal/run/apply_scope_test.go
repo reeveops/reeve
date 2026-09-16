@@ -93,6 +93,7 @@ func TestApplyWithNoPlanForCommitDoesNotWiden(t *testing.T) {
 	store, _ := filesystem.New(t.TempDir())
 	in := twoStackInput(t, engine, store)
 	in.CommitSHA = "commit-with-no-preview"
+	in.VCS.(*bgVCS).headSHA = in.CommitSHA
 
 	out, err := Apply(context.Background(), in)
 	if err != nil {

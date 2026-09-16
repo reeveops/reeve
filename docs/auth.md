@@ -89,6 +89,7 @@ The constructed environment contains:
 - `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` from an isolated CI home or the existing local environment.
 - Credentials selected by auth bindings for the current stack and mode.
 - Credentials selected by `engine.state.auth_provider` for backend access.
+- `PULUMI_CONFIG_PASSPHRASE` when `engine.state.secrets_provider.type` is `passphrase`.
 - `TF_IN_AUTOMATION=1` for Terraform and OpenTofu commands.
 - `PULUMI_EXPERIMENTAL=true` for Pulumi saved-plan commands.
 

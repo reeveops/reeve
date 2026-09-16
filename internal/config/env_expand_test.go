@@ -12,6 +12,7 @@ func TestExpandEnvDesignatedFields(t *testing.T) {
 	t.Setenv("TEST_TOKEN", "resolved-token")
 	t.Setenv("TEST_TENANT", "resolved-tenant")
 	t.Setenv("TEST_APP_ID", "12345")
+	t.Setenv("TEST_PULUMI_PASSPHRASE", "resolved-passphrase")
 
 	c := &Config{
 		Shared: &schemas.Shared{},
@@ -39,6 +40,12 @@ func TestExpandEnvDesignatedFields(t *testing.T) {
 	c.Shared.Bucket.Name = "${env:TEST_BUCKET}" // designated
 	c.Shared.Bucket.Type = "gcs"                // literal, must not change
 	c.Shared.Locking.AdminOverride.Allowed = []string{"${env:TEST_TENANT}", "@literal"}
+	c.Engines = []*schemas.Engine{{Engine: schemas.EngineBody{State: schemas.EngineState{
+		SecretsProvider: schemas.EngineSecretsProvider{
+			Type:       "passphrase",
+			Passphrase: "${env:TEST_PULUMI_PASSPHRASE}",
+		},
+	}}}}
 
 	warnings := c.ExpandEnv()
 	if len(warnings) != 0 {
@@ -62,6 +69,9 @@ func TestExpandEnvDesignatedFields(t *testing.T) {
 	}
 	if got := c.Auth.Providers["gh"].AppID; got != "12345" {
 		t.Errorf("auth app_id (any-typed) not expanded: %v", got)
+	}
+	if got := c.Engines[0].Engine.State.SecretsProvider.Passphrase; got != "resolved-passphrase" {
+		t.Errorf("Pulumi state passphrase not expanded: %q", got)
 	}
 	wh := c.Notifications.Channels[0]
 	if wh.URL != "https://api.example.com/hook/resolved-token" {

@@ -40,8 +40,10 @@ type RefreshInput struct {
 	PRNumber     int
 	CommitSHA    string
 	RunNumber    int
+	RunAttempt   int
 	CIRunURL     string
 	RepoRoot     string
+	RepoPath     string // RepoRoot relative to the VCS repository root.
 	RepoFull     string
 	Actor        string
 	Engine       refreshEngine
@@ -93,10 +95,22 @@ type RefreshOutput struct {
 // lock and the run is audited.
 func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	start := time.Now()
-	runID := fmt.Sprintf("refresh-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	runID := runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
 
 	if !in.Engine.Capabilities().SupportsRefresh {
 		return nil, fmt.Errorf("engine %s does not support refresh", in.Engine.Name())
+	}
+	var pr *vcs.PR
+	if !in.Local && in.VCS != nil {
+		var err error
+		pr, err = in.VCS.GetPR(ctx, in.PRNumber)
+		if err != nil {
+			return nil, fmt.Errorf("get pr: %w", err)
+		}
+		if pr.HeadSHA != "" {
+			in.CommitSHA = pr.HeadSHA
+			runID = runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
+		}
 	}
 	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
 	if err != nil {
@@ -106,11 +120,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	declared := discovery.Resolve(enum, decls, filter)
 
 	target := declared
-	if !in.Local && in.VCS != nil {
-		pr, gerr := in.VCS.GetPR(ctx, in.PRNumber)
-		if gerr != nil {
-			return nil, fmt.Errorf("get pr: %w", gerr)
-		}
+	if pr != nil {
 		forkOptIn := in.Shared != nil && in.Shared.Apply.AllowForkPRs
 		if pr.IsDraft {
 			return nil, fmt.Errorf("PR #%d is in draft - convert to ready for review before refreshing state", in.PRNumber)
@@ -123,6 +133,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			if cerr != nil {
 				return nil, fmt.Errorf("list changed files: %w", cerr)
 			}
+			changed, _ = scopeChangedFiles(changed, in.RepoPath)
 			// Same anti-broadening rule apply uses: a changed file that maps
 			// to no stack must not turn a scoped command into a global one.
 			res := discovery.AffectedDetailed(declared, changed, changeMappingFromConfig(in.Config))
@@ -142,7 +153,17 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
 	}
 	defer executionCleanup()
-	stateEnv, stateCleanup, err := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+	var credentialSource credentialAcquirer
+	if in.AuthRegistry != nil {
+		credentialCache := auth.NewCredentialCache(in.AuthRegistry)
+		credentialSource = credentialCache
+		defer func() {
+			if err := credentialCache.Close(); err != nil {
+				slog.Warn("credential cache cleanup failed", "err", err)
+			}
+		}()
+	}
+	stateEnv, stateCleanup, err := resolveStateAuthEnv(ctx, in.Config, credentialSource)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +258,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		}
 		// ModeApply: a refresh writes state, so it needs write credentials,
 		// not the read-only preview role.
-		authEnv, authCleanup, aerr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModeApply, LocalAuth{})
+		authEnv, authCleanup, aerr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModeApply, LocalAuth{})
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())

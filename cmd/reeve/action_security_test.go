@@ -36,6 +36,15 @@ func TestActionRunBlocksContainNoExpressions(t *testing.T) {
 	}
 }
 
+func TestPreviewRejectsNegativeParallelism(t *testing.T) {
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"preview", "--max-parallel-stacks=-1"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "max-parallel-stacks") {
+		t.Fatalf("negative preview parallelism must be rejected, got %v", err)
+	}
+}
+
 func TestWorkflowActionsArePinned(t *testing.T) {
 	sha := regexp.MustCompile(`^[0-9a-f]{40}$`)
 	paths := []string{

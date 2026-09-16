@@ -29,6 +29,7 @@ func TestResolvePRHeadSHA(t *testing.T) {
 		prNumber int
 		sha      string
 		wantSHA  string
+		wantPR   bool
 	}{
 		{
 			name:     "nil vcs returns sha unchanged",
@@ -57,6 +58,7 @@ func TestResolvePRHeadSHA(t *testing.T) {
 			prNumber: 1,
 			sha:      "env-sha",
 			wantSHA:  "env-sha",
+			wantPR:   true,
 		},
 		{
 			name:     "matching HeadSHA returns sha unchanged",
@@ -64,6 +66,7 @@ func TestResolvePRHeadSHA(t *testing.T) {
 			prNumber: 1,
 			sha:      "same-sha",
 			wantSHA:  "same-sha",
+			wantPR:   true,
 		},
 		{
 			name:     "differing HeadSHA overrides to PR head",
@@ -71,14 +74,18 @@ func TestResolvePRHeadSHA(t *testing.T) {
 			prNumber: 1,
 			sha:      "merge-commit-sha",
 			wantSHA:  "pr-head-sha",
+			wantPR:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolvePRHeadSHA(ctx, tt.vcs, tt.prNumber, tt.sha)
+			got, pr := resolvePR(ctx, tt.vcs, tt.prNumber, tt.sha)
 			if got != tt.wantSHA {
-				t.Errorf("resolvePRHeadSHA = %q, want %q", got, tt.wantSHA)
+				t.Errorf("resolvePR SHA = %q, want %q", got, tt.wantSHA)
+			}
+			if (pr != nil) != tt.wantPR {
+				t.Errorf("resolvePR metadata present = %v, want %v", pr != nil, tt.wantPR)
 			}
 		})
 	}

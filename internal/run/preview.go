@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/reeveops/reeve/internal/auth"
@@ -43,13 +45,16 @@ type Engine interface {
 
 // PreviewInput wires the dependencies and run context together.
 type PreviewInput struct {
-	PRNumber      int
-	PRTitle       string
-	CommitSHA     string
-	RunNumber     int
-	CIRunID       string
-	CIRunURL      string
-	RepoRoot      string
+	PRNumber  int
+	PRTitle   string
+	CommitSHA string
+	RunNumber int
+	CIRunID   string
+	CIRunURL  string
+	RepoRoot  string
+	// RepoPath is RepoRoot relative to the VCS repository root. VCS changed
+	// files are scoped to this path before security gates and stack mapping.
+	RepoPath      string
 	Engine        Engine
 	Config        *schemas.Engine
 	Shared        *schemas.Shared
@@ -67,8 +72,11 @@ type PreviewInput struct {
 	// preview.
 	Observability *schemas.Observability
 	Blob          blob.Store
-	VCS           prReader      // may be nil for --local
-	Comments      commentPoster // may be nil for --local
+	// OpenBlob opens the configured store after discovery finds target stacks.
+	// A zero-target preview leaves it unopened and reports through CI/comments.
+	OpenBlob func(context.Context) (blob.Store, error)
+	VCS      prReader      // may be nil for --local
+	Comments commentPoster // may be nil for --local
 	// ChannelSourceFiles are the repo-relative config files the loader
 	// sourced notification channels from (config.Config.ChannelSourceFiles).
 	// If the PR's changed files include any of them, pre-approval events
@@ -102,6 +110,9 @@ type PreviewInput struct {
 	// that clickops may have invalidated. Off by default: a refresh costs a
 	// full provider read per stack on every push.
 	Refresh bool
+	// MaxParallelStacks overrides engine.execution.max_parallel_stacks when
+	// positive. Zero uses the config value, which defaults to one.
+	MaxParallelStacks int
 }
 
 // PreviewOutput bundles the artifacts from a preview run.
@@ -133,7 +144,8 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		return nil, fmt.Errorf("--local previews must not carry a PR number (got %d): local artifacts must stay outside PR context; drop --pr or run without --local", in.PRNumber)
 	}
 
-	in.CommitSHA = resolvePRHeadSHA(ctx, in.VCS, in.PRNumber, in.CommitSHA)
+	var prMeta *vcs.PR
+	in.CommitSHA, prMeta = resolvePR(ctx, in.VCS, in.PRNumber, in.CommitSHA)
 	slog.Debug("preview starting", "pr", in.PRNumber, "sha", in.CommitSHA, "local", in.Local)
 
 	runID := fmt.Sprintf("run-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
@@ -150,8 +162,12 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	// init must be decided BEFORE anything can reach the network.
 	var changed []string
 	var changedErr error
+	allChangesOutsideRoot := false
 	if !in.Local && in.VCS != nil {
 		changed, changedErr = in.VCS.ListChangedFiles(ctx, in.PRNumber)
+		if changedErr == nil {
+			changed, allChangesOutsideRoot = scopeChangedFiles(changed, in.RepoPath)
+		}
 	}
 
 	// Pre-approval OTEL isolation: observability.yaml is loaded from the
@@ -210,14 +226,64 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 	}
 
+	decls, filter := declarationsFromConfig(in.Config)
+	cm := changeMappingFromConfig(in.Config)
+	var target []discovery.Stack
+	mappingNotice := ""
+	if in.Local || in.VCS == nil {
+		enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
+		if err != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("enumerate stacks: %w", err)
+		}
+		target = discovery.Resolve(enum, decls, filter)
+		slog.Debug("preview target: all declared stacks", "count", len(target))
+	} else {
+		if changedErr != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("list changed files: %w", changedErr)
+		}
+		slog.Debug("changed files", "count", len(changed), "files", changed)
+		if allChangesOutsideRoot {
+			mappingNotice = fmt.Sprintf("No changed files are under the configured root `%s`.", in.RepoPath)
+			slog.Debug("preview target: no files under configured root")
+		} else if preflight := discovery.AffectedDetailed(nil, changed, cm); preflight.Reason == discovery.ReasonDocsOnly {
+			mappingNotice = mappingNoticeFor(preflight)
+			slog.Debug("preview target: all changed files ignored", "reason", preflight.Reason)
+		} else {
+			enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
+			if err != nil {
+				outcome = "failed"
+				return nil, fmt.Errorf("enumerate stacks: %w", err)
+			}
+			declared := discovery.Resolve(enum, decls, filter)
+			res := discovery.AffectedDetailed(declared, changed, cm)
+			target = res.Stacks
+			mappingNotice = mappingNoticeFor(res)
+			slog.Debug("preview target: affected stacks", "count", len(target), "reason", res.Reason)
+		}
+	}
+	for _, s := range target {
+		slog.Debug("target stack", "ref", s.Ref(), "path", s.Path)
+	}
+
+	// Cloud storage is unnecessary for an authoritative zero-target result.
+	// Defer opening it until discovery proves the run needs artifacts or state.
+	if len(target) > 0 && in.Blob == nil && in.OpenBlob != nil {
+		store, err := in.OpenBlob(ctx)
+		if err != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("open blob store: %w", err)
+		}
+		in.Blob = store
+	}
+
 	// Channels are built once and reused for the preview-started and
-	// preview-finished events below.
+	// preview-finished events below. A zero-target result stays on the PR and
+	// in CI, avoiding notification side effects that may require blob state.
 	var channels []notify.Channel
-	if notifyActive && !suppressChannels {
+	if len(target) > 0 && notifyActive && !suppressChannels {
 		channels = BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.Comments)
-		// Timeline heartbeat: preview started. PR title/author are not
-		// fetched yet; the payload carries what the timeline needs (event,
-		// SHA, this run's CI URL).
 		if err := NotifyPREvent(ctx, channels, notify.EventPlanning, PRNotifyInput{
 			PlanRequested: in.PlanRequested,
 			PR:            in.PRNumber, CommitSHA: in.CommitSHA, RunID: ciRunID, RunURL: in.CIRunURL,
@@ -227,69 +293,44 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 	}
 
-	executionEnv, executionCleanup, err := iac.ExecutionEnv()
-	if err != nil {
-		outcome = "failed"
-		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
-	}
-	defer executionCleanup()
-	stateEnv, stateCleanup, err := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
-	if err != nil {
-		outcome = "failed"
-		return nil, err
-	}
-	defer stateCleanup()
-	stateEnv = mergeEnv(executionEnv, stateEnv)
-	if err := PulumiLogin(ctx, in.Config, stateEnv); err != nil {
-		outcome = "failed"
-		return nil, err
-	}
-
-	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
-	if err != nil {
-		outcome = "failed"
-		return nil, fmt.Errorf("enumerate stacks: %w", err)
-	}
-
-	decls, filter := declarationsFromConfig(in.Config)
-	declared := discovery.Resolve(enum, decls, filter)
-
-	var target []discovery.Stack
-	mappingNotice := ""
-	if in.Local || in.VCS == nil {
-		target = declared
-		slog.Debug("preview target: all declared stacks", "count", len(target))
-	} else {
-		if changedErr != nil {
-			outcome = "failed"
-			return nil, fmt.Errorf("list changed files: %w", changedErr)
+	// Discovery is local and needs no credentials. Keep execution-home setup,
+	// state authentication, and backend login behind the target decision so a
+	// docs-only or outside-root change cannot acquire credentials or start an
+	// engine session for zero stacks.
+	var stateEnv map[string]string
+	var credentialSource credentialAcquirer
+	if len(target) > 0 {
+		if in.AuthRegistry != nil {
+			credentialCache := auth.NewCredentialCache(in.AuthRegistry)
+			credentialSource = credentialCache
+			defer func() {
+				if err := credentialCache.Close(); err != nil {
+					slog.Warn("credential cache cleanup failed", "err", err)
+				}
+			}()
 		}
-		slog.Debug("changed files", "count", len(changed), "files", changed)
-		cm := changeMappingFromConfig(in.Config)
-		res := discovery.AffectedDetailed(declared, changed, cm)
-		target = res.Stacks
-		mappingNotice = mappingNoticeFor(res)
-		slog.Debug("preview target: affected stacks", "count", len(target), "reason", res.Reason)
-	}
-	for _, s := range target {
-		slog.Debug("target stack", "ref", s.Ref(), "path", s.Path)
+		executionEnv, executionCleanup, err := iac.ExecutionEnv()
+		if err != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("prepare engine execution environment: %w", err)
+		}
+		defer executionCleanup()
+		var stateCleanup CleanupFunc
+		stateEnv, stateCleanup, err = resolveStateAuthEnv(ctx, in.Config, credentialSource)
+		if err != nil {
+			outcome = "failed"
+			return nil, err
+		}
+		defer stateCleanup()
+		stateEnv = mergeEnv(executionEnv, stateEnv)
+		if err := PulumiLogin(ctx, in.Config, stateEnv); err != nil {
+			outcome = "failed"
+			return nil, err
+		}
 	}
 
 	appCfg := toApprovalsConfig(in.Shared)
-	summaries := make([]summary.StackSummary, 0, len(target))
-	for i, s := range target {
-		// Stacks preview sequentially and an engine call can take minutes, so
-		// each one brackets itself: without this a multi-stack preview is a
-		// single silent block with no way to tell which stack is slow.
-		slog.Info("preview stack starting", "stack", s.Ref(), "n", i+1, "of", len(target))
-		stackStart := time.Now()
-		ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv)
-		rules := approvals.Resolve(appCfg, s.Ref())
-		ss.RequiredApprovers = rules.Approvers
-		summaries = append(summaries, ss)
-		slog.Info("preview stack finished", "stack", s.Ref(), "status", string(ss.Status),
-			"sec", int(time.Since(stackStart).Seconds()))
-	}
+	summaries := runPreviewTargets(ctx, in, otelProvider, target, runID, stateEnv, appCfg, credentialSource)
 
 	sort := "status_grouped"
 	if in.Shared != nil && in.Shared.Comments.Sort != "" {
@@ -371,15 +412,10 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 	}
 
-	// Fetch PR metadata once for author + title (used by Slack).
 	var prAuthor, prTitle string
-	if in.PRNumber > 0 && !in.Local {
-		if pr, err := in.VCS.GetPR(ctx, in.PRNumber); err == nil {
-			prAuthor = pr.Author
-			prTitle = pr.Title
-		} else {
-			slog.Warn("fetch pr metadata for slack failed", "err", err, "pr", in.PRNumber)
-		}
+	if prMeta != nil {
+		prAuthor = prMeta.Author
+		prTitle = prMeta.Title
 	}
 	if prTitle == "" {
 		prTitle = in.PRTitle
@@ -417,10 +453,82 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	return out, nil
 }
 
-func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string) summary.StackSummary {
+type previewTarget struct {
+	index int
+	stack discovery.Stack
+}
+
+// runPreviewTargets previews independent project directories concurrently.
+// Stacks sharing a directory stay serial because engine working data and
+// workspace selection are scoped to that directory.
+func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, target []discovery.Stack, runID string, stateEnv map[string]string, appCfg approvals.Config, credentialSource credentialAcquirer) []summary.StackSummary {
+	if len(target) == 0 {
+		return nil
+	}
+	groups := make([][]previewTarget, 0, len(target))
+	groupByPath := make(map[string]int, len(target))
+	for i, stack := range target {
+		path := filepath.Clean(absJoin(in.RepoRoot, stack.Path))
+		group, ok := groupByPath[path]
+		if !ok {
+			group = len(groups)
+			groupByPath[path] = group
+			groups = append(groups, nil)
+		}
+		groups[group] = append(groups[group], previewTarget{index: i, stack: stack})
+	}
+
+	parallel := previewParallelism(in)
+	if parallel > len(groups) {
+		parallel = len(groups)
+	}
+	slog.Info("preview execution starting", "stacks", len(target), "project_groups", len(groups), "parallel", parallel)
+
+	summaries := make([]summary.StackSummary, len(target))
+	work := make(chan []previewTarget)
+	var workers sync.WaitGroup
+	for range parallel {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for group := range work {
+				for _, item := range group {
+					s := item.stack
+					slog.Info("preview stack starting", "stack", s.Ref(), "n", item.index+1, "of", len(target))
+					stackStart := time.Now()
+					ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv, credentialSource)
+					rules := approvals.Resolve(appCfg, s.Ref())
+					ss.RequiredApprovers = rules.Approvers
+					summaries[item.index] = ss
+					slog.Info("preview stack finished", "stack", s.Ref(), "status", string(ss.Status),
+						"sec", int(time.Since(stackStart).Seconds()))
+				}
+			}
+		}()
+	}
+	for _, group := range groups {
+		work <- group
+	}
+	close(work)
+	workers.Wait()
+	return summaries
+}
+
+func previewParallelism(in PreviewInput) int {
+	parallel := in.MaxParallelStacks
+	if parallel == 0 && in.Config != nil {
+		parallel = in.Config.Engine.Execution.MaxParallelStacks
+	}
+	if parallel < 1 {
+		return 1
+	}
+	return parallel
+}
+
+func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string, credentialSource credentialAcquirer) summary.StackSummary {
 	redactor := BuildRedactor(in.Shared)
 
-	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview,
+	authEnv, authCleanup, authErr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModePreview,
 		LocalAuth{Enabled: in.Local, Providers: in.LocalAuthProviders})
 	if authErr != nil {
 		redactedErr := redactor.Redact(authErr.Error())

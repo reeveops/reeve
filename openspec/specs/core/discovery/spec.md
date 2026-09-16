@@ -28,10 +28,34 @@ per plan appendix). Revisit only if a user files a concrete need.
 
 ## Change-mapping order
 
-1. **Skip** - drop files matching default skip globs + `ignore_changes`.
-2. **Docs-only** - if nothing remains, run nothing; report "Documentation/asset-only changes".
-3. **Match** - remaining files map to stacks by path / per-stack config / `extra_triggers`.
-4. **Broaden** - files matching no stack are "unmapped". `scope: auto` (default) previews/applies all stacks and reports why; `scope: pulumi_only` ignores them.
+1. **Scope** - convert VCS paths to paths relative to the configured root and drop files outside that root.
+2. **Skip** - drop files matching default skip globs + `ignore_changes`.
+3. **Docs-only** - if every scoped file is skippable, run nothing; report "Documentation/asset-only changes".
+4. **Match** - remaining files map to stacks by path / per-stack config / `extra_triggers`.
+5. **Broaden** - files matching no stack are "unmapped". `scope: auto` (default) previews/applies all stacks and reports why; `scope: pulumi_only` ignores them.
+
+## Configured-root path scope
+
+VCS providers return repository-relative changed paths. Reeve MUST strip the configured root prefix before change mapping and pre-approval config checks.
+
+#### Scenario: Nested root maps one stack
+
+- **GIVEN** the configured root is `tf`
+- **AND** a stack path is `envs/lifecycle`
+- **WHEN** the VCS reports `tf/envs/lifecycle/main.tf`
+- **THEN** only that stack is selected
+
+#### Scenario: Change outside nested root
+
+- **GIVEN** the configured root is `tf`
+- **WHEN** the VCS reports only `app/main.go`
+- **THEN** no stack is selected
+
+#### Scenario: Nested security config change
+
+- **GIVEN** the configured root is `tf`
+- **WHEN** the VCS reports `tf/.reeve/notifications.yaml`
+- **THEN** the pre-approval notification gate treats `.reeve/notifications.yaml` as modified
 
 ## Default skip globs
 

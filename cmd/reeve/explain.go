@@ -92,6 +92,7 @@ func runExplain(cmd *cobra.Command, _ []string) error {
 		CIRunURL:       runURL,
 		SelfCheckNames: selfCheckNames(),
 		RepoRoot:       root,
+		RepoPath:       repoPathForRoot(root),
 		Engine:         engine,
 		Config:         engineCfg,
 		Shared:         cfg.Shared,

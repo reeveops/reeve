@@ -58,17 +58,19 @@ type applyVCS interface {
 
 // ApplyInput wires dependencies and run context.
 type ApplyInput struct {
-	PRNumber  int
-	CommitSHA string // best-effort; overridden from PR HEAD post-GetPR
-	RunNumber int
-	CIRunID   int64
-	CIRunURL  string
+	PRNumber   int
+	CommitSHA  string // best-effort; overridden from PR HEAD post-GetPR
+	RunNumber  int
+	RunAttempt int
+	CIRunID    int64
+	CIRunURL   string
 	// SelfCheckNames is the list of check_run names that belong to reeve
 	// itself and must be skipped when computing ChecksGreen (otherwise a
 	// previously failed apply pins the gate red on the same SHA forever).
 	// Typically populated from $GITHUB_WORKFLOW + $GITHUB_JOB.
 	SelfCheckNames []string
 	RepoRoot       string
+	RepoPath       string // RepoRoot relative to the VCS repository root.
 	RepoFull       string // "owner/name" for audit log
 	Actor          string
 	Engine         applyEngine
@@ -145,7 +147,7 @@ type ApplyOutput struct {
 // The PR comment is updated at the end with the aggregated results.
 func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) {
 	start := time.Now()
-	runID := fmt.Sprintf("apply-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	runID := runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
 
 	// Break-glass fail-fast: a missing justification never starts a run.
 	if in.BreakGlass != nil && strings.TrimSpace(in.BreakGlass.Justification) == "" {
@@ -179,6 +181,18 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
 		}
 	}
+
+	// Resolve the authoritative PR snapshot once. The command runner does not
+	// prefetch it, so head identity and every gate use the same VCS response.
+	pr, err := in.VCS.GetPR(ctx, in.PRNumber)
+	if err != nil {
+		return nil, fmt.Errorf("get pr: %w", err)
+	}
+	if pr.HeadSHA != "" {
+		in.CommitSHA = pr.HeadSHA
+		runID = runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
+	}
+	slog.Debug("pr fetched", "number", in.PRNumber, "head_sha", pr.HeadSHA, "author", pr.Author, "base_ref", pr.BaseRef, "is_draft", pr.IsDraft, "is_fork", pr.IsFork)
 
 	// OTEL root span for this run. Finished at return.
 	ctx, endRun := in.OTEL.StartRunSpan(ctx, "apply", in.PRNumber, in.CommitSHA)
@@ -225,6 +239,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	if err != nil {
 		return nil, fmt.Errorf("list changed files: %w", err)
 	}
+	changed, allOutside := scopeChangedFiles(changed, in.RepoPath)
 	slog.Debug("changed files", "count", len(changed), "files", changed)
 	cm := changeMappingFromConfig(in.Config)
 	mapRes := discovery.AffectedDetailed(declared, changed, cm)
@@ -235,6 +250,11 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 
 	// Docs/asset-only change: nothing to apply. Record on the timeline and exit.
+	if allOutside {
+		timeline.add(ctx, "⏭️", "skipped", fmt.Sprintf("no changed files are under the configured root %s", in.RepoPath))
+		slog.Info("apply skipped: changes outside configured root", "root", in.RepoPath)
+		return &ApplyOutput{RunID: runID, DurationSec: int(time.Since(start).Seconds())}, nil
+	}
 	if mapRes.Reason == discovery.ReasonDocsOnly {
 		timeline.add(ctx, "⏭️", "skipped", "documentation/asset-only changes — no Pulumi stacks affected")
 		slog.Info("apply skipped: docs-only changes")
@@ -287,12 +307,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 
 	// 2. Per-stack context: PR + checks + upstream-commits + approvals + CODEOWNERS.
-	pr, err := in.VCS.GetPR(ctx, in.PRNumber)
-	if err != nil {
-		return nil, fmt.Errorf("get pr: %w", err)
-	}
-	slog.Debug("pr fetched", "number", in.PRNumber, "head_sha", pr.HeadSHA, "author", pr.Author, "base_ref", pr.BaseRef, "is_draft", pr.IsDraft, "is_fork", pr.IsFork)
-
 	gi, err := gatherGateInputs(ctx, in.VCS, in.Shared, in.CommentApproval,
 		in.PRNumber, pr, in.CommitSHA, changed,
 		vcs.ChecksGreenOpts{IgnoreRunID: in.CIRunID, IgnoreNames: in.SelfCheckNames})
@@ -462,6 +476,16 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
 	}
 	defer executionCleanup()
+	var credentialSource credentialAcquirer
+	if in.AuthRegistry != nil {
+		credentialCache := auth.NewCredentialCache(in.AuthRegistry)
+		credentialSource = credentialCache
+		defer func() {
+			if err := credentialCache.Close(); err != nil {
+				slog.Warn("credential cache cleanup failed", "err", err)
+			}
+		}()
+	}
 	stateEnv := executionEnv
 
 	// Plan locking is on when config asks for it AND the engine can execute
@@ -653,7 +677,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 
 		if !stateAuthAcquired {
-			resolvedStateEnv, stateCleanup, stateErr := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+			resolvedStateEnv, stateCleanup, stateErr := resolveStateAuthEnv(ctx, in.Config, credentialSource)
 			if stateErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(stateErr.Error())
@@ -676,10 +700,9 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			pulumiLoginDone = true
 		}
 
-		// Gates green - acquire auth creds and run apply. authCleanup must
-		// run before the loop iteration ends so on-disk credential
-		// artefacts (e.g. GCP WIF token files) do not outlive their use.
-		authEnv, authCleanup, aerr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModeApply, LocalAuth{})
+		// Gates green: resolve the stack credentials and run apply. The
+		// invocation cache retains provider ownership until every stack exits.
+		authEnv, authCleanup, aerr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModeApply, LocalAuth{})
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())

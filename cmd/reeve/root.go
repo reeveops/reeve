@@ -59,6 +59,7 @@ No control plane, no SaaS backend, no telemetry, no account. The user owns all s
 		newPlanRunCmd(),
 		newRenderCmd(),
 		newRunCmd(),
+		newMaintenanceCmd(),
 		newLocksCmd(),
 		newDriftCmd(),
 		newMigrateConfigCmd(),

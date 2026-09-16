@@ -55,6 +55,46 @@ func TestResolveStateAuthEnv(t *testing.T) {
 	}
 }
 
+func TestResolveStateAuthEnvPulumiPassphrase(t *testing.T) {
+	t.Setenv("PULUMI_CONFIG_PASSPHRASE", "workflow-passphrase")
+	engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
+		SecretsProvider: schemas.EngineSecretsProvider{Type: "passphrase"},
+	}}}
+	env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if env["PULUMI_CONFIG_PASSPHRASE"] != "workflow-passphrase" {
+		t.Fatalf("Pulumi passphrase missing: %#v", env)
+	}
+
+	engine.Engine.State.SecretsProvider.Passphrase = "configured-passphrase"
+	env, cleanup, err = ResolveStateAuthEnv(context.Background(), engine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if env["PULUMI_CONFIG_PASSPHRASE"] != "configured-passphrase" {
+		t.Fatalf("configured passphrase did not override the workflow value: %#v", env)
+	}
+}
+
+func TestResolveStateAuthEnvDoesNotPassUnselectedPulumiPassphrase(t *testing.T) {
+	t.Setenv("PULUMI_CONFIG_PASSPHRASE", "must-stay-in-controller")
+	engine := &schemas.Engine{Engine: schemas.EngineBody{State: schemas.EngineState{
+		SecretsProvider: schemas.EngineSecretsProvider{Type: "awskms"},
+	}}}
+	env, cleanup, err := ResolveStateAuthEnv(context.Background(), engine, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, ok := env["PULUMI_CONFIG_PASSPHRASE"]; ok {
+		t.Fatalf("unselected Pulumi passphrase escaped into the engine: %#v", env)
+	}
+}
+
 func localAuthCfg() *schemas.Auth {
 	return &schemas.Auth{
 		Providers: map[string]schemas.ProviderYAML{

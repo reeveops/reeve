@@ -89,7 +89,7 @@ func runReady(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	channels, reason := run.BuildPRNotifyChannels(ctx, cfg.Notifications, cfg.ChannelSourceFiles, store, client, pr)
+	channels, reason := run.BuildPRNotifyChannels(ctx, cfg.Notifications, cfg.ChannelSourceFiles, store, client, pr, repoPathForRoot(root))
 	if reason != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "notify: channels suppressed (%s)\n", reason)
 	}

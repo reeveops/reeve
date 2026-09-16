@@ -144,6 +144,55 @@ func TestPreviewExfilSuppressedWhenNotificationConfigModified(t *testing.T) {
 	}
 }
 
+func TestPreviewNoTargetSkipsNotificationDispatch(t *testing.T) {
+	srv := newRecordingServer(t)
+	fvcs := &fakeVCS{changed: []string{"docs/README.md"}, headSHA: "head-sha"}
+	out, err := Preview(context.Background(), PreviewInput{
+		PRNumber: 1, CommitSHA: "head-sha", RunNumber: 1, RepoRoot: "/nope",
+		Engine: &fakeEngine{},
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"dev"}}},
+		}},
+		Shared: &schemas.Shared{},
+		Notifications: &schemas.Notifications{Channels: []schemas.ChannelYAML{{
+			Type: "webhook", URL: srv.URL, On: []string{"planning", "plan"},
+		}}},
+		VCS: fvcs, Comments: fvcs,
+	})
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if got := srv.recorded(); len(got) != 0 {
+		t.Fatalf("zero-target preview dispatched %d notification request(s)", len(got))
+	}
+	if !out.CommentPosted {
+		t.Fatal("zero-target preview did not post its PR result")
+	}
+}
+
+func TestPreviewNestedRootSuppressesModifiedNotificationConfig(t *testing.T) {
+	const secret = "nestedRootSecret"
+	t.Setenv("EXFIL_SECRET", secret)
+	srv := newRecordingServer(t)
+	cfg := loadExfilConfig(t, srv.URL)
+	fvcs := &fakeVCS{
+		changed: []string{"tf/.reeve/notifications.yaml", "tf/projects/api/main.ts"},
+		headSHA: "attack-sha",
+	}
+	in := securityPreviewInput(t, cfg, fvcs)
+	in.RepoPath = "tf"
+	out, err := Preview(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if got := len(srv.recorded()); got != 0 {
+		t.Fatalf("nested-root config change dispatched %d request(s)", got)
+	}
+	if !strings.Contains(out.CommentBody, "Notification channels suppressed") {
+		t.Fatalf("missing suppression notice:\n%s", out.CommentBody)
+	}
+}
+
 // TestPreviewDesignatedExpansionWorksWhenConfigUntouched is the companion
 // assertion: when the PR does NOT touch notification config, the webhook
 // channel dispatches normally and the designated-field env expansion

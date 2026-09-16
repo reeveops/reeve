@@ -47,6 +47,24 @@ POST/PATCH retries only on 429 or a secondary rate limit
 (403 + `Retry-After`), where GitHub documents the request was rejected
 before processing; any other non-2xx surfaces unchanged.
 
+## Comment lookup reuse
+
+The GitHub adapter MUST reuse one paginated issue-comment snapshot per PR for
+marker lookup, comment approval evaluation, and stale-part cleanup within an
+invocation. Successful creates, edits, and stale-part deletes MUST update that
+snapshot.
+
+#### Scenario: Repeated marker updates
+
+- **WHEN** one invocation upserts the same or different markers on one PR
+- **THEN** the adapter lists that PR's comments once and reuses the snapshot
+
+#### Scenario: A cached comment was deleted
+
+- **WHEN** an edit by cached comment ID returns HTTP 404
+- **THEN** the adapter discards the snapshot, rediscovers the marker, and
+  performs one edit or create attempt against the current state
+
 ## GitHub Enterprise Server
 
 The adapter honors `GITHUB_API_URL` (set by the Actions runner on both
