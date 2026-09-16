@@ -913,7 +913,7 @@ func runWorkloadResolver(t *testing.T, mode, eventName, eventJSON, githubSHA, cu
 	script := repoPath(t, ".github", "scripts", "resolve-workload-ref.sh")
 	// #nosec G204 -- the executable is a repository-owned script and all fixtures travel through environment variables.
 	cmd := exec.Command(script, mode)
-	env := append(os.Environ(),
+	env := append(isolatedGitEnv(),
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GITHUB_OUTPUT="+outputPath,
 		"GITHUB_EVENT_NAME="+eventName,
@@ -953,11 +953,37 @@ func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	// #nosec G204 -- tests execute git with fixed arguments against a temporary repository.
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = isolatedGitEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return string(output)
+}
+
+func isolatedGitEnv() []string {
+	repositoryVars := map[string]struct{}{
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
+		"GIT_COMMON_DIR":                   {},
+		"GIT_DIR":                          {},
+		"GIT_GRAFT_FILE":                   {},
+		"GIT_IMPLICIT_WORK_TREE":           {},
+		"GIT_INDEX_FILE":                   {},
+		"GIT_NO_REPLACE_OBJECTS":           {},
+		"GIT_OBJECT_DIRECTORY":             {},
+		"GIT_PREFIX":                       {},
+		"GIT_REPLACE_REF_BASE":             {},
+		"GIT_SHALLOW_FILE":                 {},
+		"GIT_WORK_TREE":                    {},
+	}
+	env := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, found := repositoryVars[key]; !found {
+			env = append(env, entry)
+		}
+	}
+	return env
 }
 
 func readRepoFile(t *testing.T, parts ...string) string {
