@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,21 @@ type blockingPreviewEngine struct {
 	pathOverlap  bool
 	started      chan discovery.Stack
 	release      chan struct{}
+}
+
+type countingCredentialProvider struct {
+	acquires atomic.Int32
+	cleanups atomic.Int32
+}
+
+func (*countingCredentialProvider) Name() string { return "shared" }
+func (*countingCredentialProvider) Type() string { return "test" }
+func (p *countingCredentialProvider) Acquire(context.Context) (*auth.Credential, error) {
+	p.acquires.Add(1)
+	return &auth.Credential{
+		Env: map[string]string{"REEVE_TEST_CREDENTIAL": "short-lived"}, Kind: "test", Source: "shared",
+		Cleanup: func() error { p.cleanups.Add(1); return nil },
+	}, nil
 }
 
 func (e *blockingPreviewEngine) Name() string                   { return "blocking" }
@@ -192,7 +208,7 @@ func TestPreviewConcurrencyBoundAndProjectIsolation(t *testing.T) {
 	}
 	done := make(chan []summary.StackSummary, 1)
 	go func() {
-		done <- runPreviewTargets(ctx, in, nil, targets, "run-1", nil, approvals.Config{})
+		done <- runPreviewTargets(ctx, in, nil, targets, "run-1", nil, approvals.Config{}, nil)
 	}()
 
 	nextStarted := func() discovery.Stack {
@@ -260,6 +276,55 @@ func TestPreviewParallelismResolution(t *testing.T) {
 				t.Fatalf("previewParallelism = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPreviewReusesCredentialAcrossStateAndStacks(t *testing.T) {
+	provider := &countingCredentialProvider{}
+	registry := auth.NewRegistry()
+	if err := registry.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	stacks := []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+		{Project: "worker", Path: "projects/worker", Name: "prod", Env: "prod"},
+		{Project: "web", Path: "projects/web", Name: "prod", Env: "prod"},
+	}
+	engine := &fakeEngine{enum: stacks, results: map[string]iac.PreviewResult{}}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Preview(t.Context(), PreviewInput{
+		Local: true, RepoRoot: "/repo", Engine: engine, Blob: store,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Type: "tofu", State: schemas.EngineState{AuthProvider: "shared"},
+			Execution: schemas.Execution{MaxParallelStacks: 3},
+			Stacks: []schemas.StackDecl{
+				{Project: "api", Path: "projects/api", Stacks: []string{"prod"}},
+				{Project: "worker", Path: "projects/worker", Stacks: []string{"prod"}},
+				{Project: "web", Path: "projects/web", Stacks: []string{"prod"}},
+			},
+		}},
+		Shared: &schemas.Shared{}, AuthRegistry: registry,
+		AuthConfig: &schemas.Auth{
+			Providers: map[string]schemas.ProviderYAML{"shared": {Type: "test"}},
+			Bindings: []schemas.BindingYAML{{
+				Match: schemas.BindingMatch{Stack: "*/*", Mode: "preview"}, Providers: []string{"shared"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Stacks) != 3 {
+		t.Fatalf("preview stacks = %d, want 3", len(out.Stacks))
+	}
+	if provider.acquires.Load() != 1 {
+		t.Fatalf("credential acquisitions = %d, want 1", provider.acquires.Load())
+	}
+	if provider.cleanups.Load() != 1 {
+		t.Fatalf("credential cleanups = %d, want 1", provider.cleanups.Load())
 	}
 }
 
@@ -362,7 +427,7 @@ func TestRunPreviewOneRedactsAuthFailureLog(t *testing.T) {
 
 	got := runPreviewOne(context.Background(), PreviewInput{
 		Shared: &schemas.Shared{}, AuthConfig: cfg, AuthRegistry: reg,
-	}, nil, stack, "run-1", nil)
+	}, nil, stack, "run-1", nil, reg)
 	if got.Status != summary.StatusError {
 		t.Fatalf("status = %s, want error", got.Status)
 	}

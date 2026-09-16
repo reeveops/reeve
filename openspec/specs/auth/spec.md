@@ -37,8 +37,34 @@ Rules:
 - Each stack executes exactly once per run regardless of matches.
 - Conflicting providers of the same logical scope error at lint time.
 - `override:` explicitly replaces providers from more-general bindings.
-- All credentials acquired before run, discarded after.
+- Credentials are acquired when first needed and discarded after the command.
 - `duration:` defaults to 1h; lint warns above 4h.
+
+## Invocation reuse
+
+Preview MUST reuse a credential by provider name within one command invocation.
+Provider configuration fixes account, role, audience, and scope for that name.
+
+Concurrent requests for one provider MUST collapse into one acquisition. Failed
+acquisitions are not cached, and later requests may retry.
+
+Credentials expiring within 30 seconds MUST NOT be returned to a new consumer.
+Every acquired generation remains owned until command cleanup runs exactly once.
+
+#### Scenario: Stacks share one federation exchange
+
+- **GIVEN** state auth and multiple preview stacks resolve the same provider
+- **WHEN** they request credentials during one preview command
+- **THEN** the provider is acquired once
+- **AND** each consumer receives an independent environment map
+- **AND** the provider cleanup runs once after every preview finishes
+
+#### Scenario: A near-expiry generation is replaced
+
+- **GIVEN** a cached credential expires within the safety margin
+- **WHEN** another consumer requests the provider
+- **THEN** the cache acquires a new generation
+- **AND** both generations remain owned until command cleanup
 
 ## Hardening
 

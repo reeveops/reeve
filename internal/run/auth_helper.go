@@ -23,6 +23,10 @@ type LocalAuth struct {
 	Providers []string
 }
 
+type credentialAcquirer interface {
+	AcquireAll(ctx context.Context, names []string) (map[string]string, []*auth.Credential, error)
+}
+
 // ResolveAuthEnv returns the merged env var map for a single stack + mode
 // plus a cleanup func the caller defers. If cfg is nil or has no bindings,
 // it returns an empty map and the engine receives no workload credentials.
@@ -32,8 +36,12 @@ type LocalAuth struct {
 // logged but never propagated - they happen at end-of-run so the work has
 // already shipped.
 func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Registry, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
+	return resolveAuthEnv(ctx, cfg, registry, stackRef, mode, local)
+}
+
+func resolveAuthEnv(ctx context.Context, cfg *schemas.Auth, acquirer credentialAcquirer, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
 	noop := func() {}
-	if cfg == nil || registry == nil {
+	if cfg == nil || acquirer == nil {
 		return nil, noop, nil
 	}
 	bindings := make([]auth.Binding, 0, len(cfg.Bindings))
@@ -57,7 +65,7 @@ func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Regis
 	if len(names) == 0 {
 		return nil, noop, nil
 	}
-	env, creds, err := registry.AcquireAll(ctx, names)
+	env, creds, err := acquirer.AcquireAll(ctx, names)
 	if err != nil {
 		if local.Enabled {
 			return nil, noop, fmt.Errorf("acquire creds for %s (%s): %w\nhint: in --local runs, bind local-safe providers (aws_profile/aws_sso/gcloud_adc) via a `local:` list on the binding in .reeve/auth.yaml, or pass --local-auth <provider>", stackRef, mode, err)
@@ -69,12 +77,16 @@ func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Regis
 
 // ResolveStateAuthEnv acquires the provider selected by engine.state.
 func ResolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, registry *auth.Registry) (map[string]string, CleanupFunc, error) {
+	return resolveStateAuthEnv(ctx, engine, registry)
+}
+
+func resolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, acquirer credentialAcquirer) (map[string]string, CleanupFunc, error) {
 	noop := func() {}
-	if engine == nil || registry == nil || engine.Engine.State.AuthProvider == "" {
+	if engine == nil || acquirer == nil || engine.Engine.State.AuthProvider == "" {
 		return nil, noop, nil
 	}
 	name := engine.Engine.State.AuthProvider
-	env, creds, err := registry.AcquireAll(ctx, []string{name})
+	env, creds, err := acquirer.AcquireAll(ctx, []string{name})
 	if err != nil {
 		return nil, noop, fmt.Errorf("acquire state auth provider %q: %w", name, err)
 	}

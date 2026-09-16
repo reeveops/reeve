@@ -298,14 +298,24 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	// docs-only or outside-root change cannot acquire credentials or start an
 	// engine session for zero stacks.
 	var stateEnv map[string]string
+	var credentialSource credentialAcquirer
 	if len(target) > 0 {
+		if in.AuthRegistry != nil {
+			credentialCache := auth.NewCredentialCache(in.AuthRegistry)
+			credentialSource = credentialCache
+			defer func() {
+				if err := credentialCache.Close(); err != nil {
+					slog.Warn("credential cache cleanup failed", "err", err)
+				}
+			}()
+		}
 		executionEnv, executionCleanup, err := iac.ExecutionEnv()
 		if err != nil {
 			outcome = "failed"
 			return nil, fmt.Errorf("prepare engine execution environment: %w", err)
 		}
 		defer executionCleanup()
-		stateEnv, stateCleanup, err := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+		stateEnv, stateCleanup, err := resolveStateAuthEnv(ctx, in.Config, credentialSource)
 		if err != nil {
 			outcome = "failed"
 			return nil, err
@@ -319,7 +329,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}
 
 	appCfg := toApprovalsConfig(in.Shared)
-	summaries := runPreviewTargets(ctx, in, otelProvider, target, runID, stateEnv, appCfg)
+	summaries := runPreviewTargets(ctx, in, otelProvider, target, runID, stateEnv, appCfg, credentialSource)
 
 	sort := "status_grouped"
 	if in.Shared != nil && in.Shared.Comments.Sort != "" {
@@ -450,7 +460,7 @@ type previewTarget struct {
 // runPreviewTargets previews independent project directories concurrently.
 // Stacks sharing a directory stay serial because engine working data and
 // workspace selection are scoped to that directory.
-func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, target []discovery.Stack, runID string, stateEnv map[string]string, appCfg approvals.Config) []summary.StackSummary {
+func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, target []discovery.Stack, runID string, stateEnv map[string]string, appCfg approvals.Config, credentialSource credentialAcquirer) []summary.StackSummary {
 	if len(target) == 0 {
 		return nil
 	}
@@ -485,7 +495,7 @@ func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeve
 					s := item.stack
 					slog.Info("preview stack starting", "stack", s.Ref(), "n", item.index+1, "of", len(target))
 					stackStart := time.Now()
-					ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv)
+					ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv, credentialSource)
 					rules := approvals.Resolve(appCfg, s.Ref())
 					ss.RequiredApprovers = rules.Approvers
 					summaries[item.index] = ss
@@ -514,10 +524,10 @@ func previewParallelism(in PreviewInput) int {
 	return parallel
 }
 
-func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string) summary.StackSummary {
+func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string, credentialSource credentialAcquirer) summary.StackSummary {
 	redactor := BuildRedactor(in.Shared)
 
-	authEnv, authCleanup, authErr := ResolveAuthEnv(ctx, in.AuthConfig, in.AuthRegistry, s.Ref(), auth.ModePreview,
+	authEnv, authCleanup, authErr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModePreview,
 		LocalAuth{Enabled: in.Local, Providers: in.LocalAuthProviders})
 	if authErr != nil {
 		redactedErr := redactor.Redact(authErr.Error())
