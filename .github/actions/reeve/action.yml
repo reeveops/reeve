@@ -146,17 +146,17 @@ runs:
     - name: Restore reeve binary cache
       id: reeve-cache
       if: steps.reeve-dispatch.outputs.run == 'true'
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/reeve-bin/reeve
-        key: reeve-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
+        key: reeve-bin-v2-${{ github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
 
     # On a cache miss, try a prebuilt binary before reaching for the Go
     # toolchain (see the NOTE at the top for the ref semantics). The script
     # never fails the job: any problem (missing asset, checksum mismatch,
     # network, unsupported arch) logs why and reports fetched=false, which
-    # re-enables the source-build steps below. actions/cache's post step
-    # saves whatever ends up at the cached path, downloaded or built alike.
+    # re-enables the source-build steps below. A separate save step publishes
+    # the verified result before any workload-controlled code runs.
     - name: Install cosign for binary verification
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
       continue-on-error: true
@@ -197,6 +197,13 @@ runs:
         go build -trimpath -ldflags="-s -w -X main.version=source-${SRCHASH:0:12}" \
           -o "$RUNNER_TEMP/reeve-bin/reeve" ./cmd/reeve
       working-directory: ${{ github.action_path }}/../../..
+
+    - name: Save reeve binary cache
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ runner.temp }}/reeve-bin/reeve
+        key: reeve-bin-v2-${{ github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
 
     - name: Add reeve to PATH
       if: steps.reeve-dispatch.outputs.run == 'true'

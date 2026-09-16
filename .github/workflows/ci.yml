@@ -32,7 +32,9 @@ jobs:
         run: go test -race ./...
 
       - name: Test action binary resolver
-        run: bash .github/scripts/fetch-binary_test.sh
+        run: |
+          bash .github/scripts/fetch-binary_test.sh
+          bash .github/scripts/action-cache_test.sh
 
       # The reeve_minimal build excludes the interactive `reeve init` wizard
       # (charmbracelet/huh + its TUI tree). Nothing else compiles it, so

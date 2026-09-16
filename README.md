@@ -126,9 +126,9 @@ jobs:
 
 ### Pinning and binaries
 
-How you pin the action decides where its binary comes from. A per-runner
-cache (keyed on the action's source hash) sits in front of every path, so
-all of this only matters on a cache miss:
+How you pin the action decides where its binary comes from. A cache keyed by
+the action repository, build variant, platform, and source hash sits in front
+of every path, so all of this only matters on a cache miss:
 
 | Pin                | Binary source                                                                                           |
 | ------------------ | ------------------------------------------------------------------------------------------------------- |
@@ -139,6 +139,7 @@ all of this only matters on a cache miss:
 
 Prebuilt paths save the ~30s+ Go toolchain setup + build on first runs. Any
 download, source-match, or verification failure falls back to a source build.
+The action saves a verified download or local build before workload checkout.
 
 The run never breaks because a binary was unavailable.
 

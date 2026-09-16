@@ -375,8 +375,8 @@ The composite action resolves its binary in three tiers, cache first:
 | full commit SHA     | That commit's retained source-matched prerelease, with source-build fallback     |
 | anything else       | Built from source on the runner (branches and forks)                             |
 
-A per-runner cache keyed `reeve-<os>-<arch>-<source hash>` fronts all
-three paths. Only a cache miss triggers a download or build.
+A cache keyed `reeve-bin-v2-<action repo>-full-<os>-<arch>-<source hash>`
+fronts all three paths. Only a cache miss triggers a download or build.
 
 The edge workflow publishes a per-commit prerelease on every push to
 `master` and `next`, retaining the newest ten per branch.
@@ -384,6 +384,7 @@ The edge workflow publishes a per-commit prerelease on every push to
 The action selects a prerelease whose signed source hash matches the action
 source already on disk, then verifies its checksum and keyless signature.
 Any mismatch or missing retained release falls back to a source build.
+The action saves the verified download or local build before workload checkout.
 
 Prebuilt binaries save the ~30s+ Go toolchain and build cost on cache misses.
 

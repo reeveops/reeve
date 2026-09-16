@@ -48,3 +48,25 @@ commenter's `/reeve explain` is skipped, not answered.
 - **THEN** the second invocation edits the first comment in place
   instead of adding another
 
+### Requirement: Verified binary cache boundary
+
+The action MUST partition binary caches by cache schema, action source
+repository, build variant, operating system, architecture, and source hash.
+It MUST save a cache miss before checking out or executing workload code.
+
+#### Scenario: Verified download on a cache miss
+
+- **GIVEN** a downloaded binary passes checksum, signature, and source checks
+- **WHEN** the action prepares the workload
+- **THEN** the binary is saved under the complete cache identity first
+
+#### Scenario: Local build on a cache miss
+
+- **GIVEN** no verified prebuilt binary is available
+- **WHEN** the action builds the checked action source
+- **THEN** the built binary is saved before workload checkout
+
+#### Scenario: Workload runs after cache publication
+
+- **WHEN** PR-controlled workload code executes
+- **THEN** it cannot change the binary already published to the cache

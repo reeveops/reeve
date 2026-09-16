@@ -245,9 +245,9 @@ every stack touched by the changed files.
 
 ### Pinning and binaries
 
-The `uses:` ref decides where the action gets its `reeve` binary. A
-per-runner cache keyed on the action's source hash always comes first - on a
-cache hit nothing is downloaded or built:
+The `uses:` ref decides where the action gets its `reeve` binary. A cache
+keyed by the action repository, build variant, platform, and source hash comes
+first. On a cache hit nothing is downloaded or built:
 
 - **`@vX.Y.Z`** - downloads that release's signed tarball and verifies it
   against the release's `checksums.txt`.
@@ -260,6 +260,7 @@ cache hit nothing is downloaded or built:
 
 The prebuilt paths skip the Go toolchain setup + compile, saving ~30s+ on
 first runs and cache misses.
+The action publishes a verified download or local build before workload code runs.
 
 ## 5. Move the bucket to real storage
 
