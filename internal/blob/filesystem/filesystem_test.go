@@ -136,6 +136,47 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestListMetadataAndConditionalDelete(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "runs/pr-1/old/manifest.json"
+	if _, err := s.Put(ctx, key, strings.NewReader("old")); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := s.ListMetadata(ctx, "runs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 {
+		t.Fatalf("listed %d objects, want 1", len(objects))
+	}
+	listed := objects[0]
+	if listed.Key != key || listed.Version == "" || listed.LastModified == 0 || listed.Size != 3 {
+		t.Fatalf("listed object = %+v", listed)
+	}
+
+	if _, err := s.Put(ctx, key, strings.NewReader("new")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteIfMatch(ctx, key, listed.Version); !errors.Is(err, blob.ErrPreconditionFailed) {
+		t.Fatalf("delete replaced object = %v, want ErrPreconditionFailed", err)
+	}
+	objects, err = s.ListMetadata(ctx, key)
+	if err != nil || len(objects) != 1 {
+		t.Fatalf("relist: objects=%v err=%v", objects, err)
+	}
+	if err := s.DeleteIfMatch(ctx, key, objects[0].Version); err != nil {
+		t.Fatalf("delete current object: %v", err)
+	}
+	if _, _, err := s.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+		t.Fatalf("get deleted object = %v, want ErrNotFound", err)
+	}
+}
+
 // TestPutIfMatchSerializesConcurrentCreates is the race the lockfile exists
 // to prevent. Many goroutines race to create the same key with
 // If-None-Match; exactly one may win.

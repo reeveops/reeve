@@ -200,6 +200,61 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
+// ListMetadata returns metadata already present in ListObjectsV2 responses.
+func (s *Store) ListMetadata(ctx context.Context, prefix string) ([]blob.ListedObject, error) {
+	var out []blob.ListedObject
+	var continuationToken *string
+	fullPrefix := s.fullKey(prefix)
+	for {
+		res, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(fullPrefix),
+			ContinuationToken: continuationToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, obj := range res.Contents {
+			listed := blob.ListedObject{
+				Key:     strings.TrimPrefix(aws.ToString(obj.Key), s.prefix),
+				Version: strings.Trim(aws.ToString(obj.ETag), `"`),
+				Size:    aws.ToInt64(obj.Size),
+			}
+			if obj.LastModified != nil {
+				listed.LastModified = obj.LastModified.Unix()
+			}
+			out = append(out, listed)
+		}
+		if res.IsTruncated == nil || !*res.IsTruncated {
+			break
+		}
+		continuationToken = res.NextContinuationToken
+	}
+	return out, nil
+}
+
+// DeleteIfMatch removes key only if its ETag still matches version.
+func (s *Store) DeleteIfMatch(ctx context.Context, key, version string) error {
+	if version == "" {
+		return blob.ErrPreconditionFailed
+	}
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:  aws.String(s.bucket),
+		Key:     aws.String(s.fullKey(key)),
+		IfMatch: aws.String(`"` + version + `"`),
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return blob.ErrNotFound
+		}
+		if isPreconditionFailed(err) {
+			return blob.ErrPreconditionFailed
+		}
+		return err
+	}
+	return nil
+}
+
 func isNotFound(err error) bool {
 	var nf *s3types.NoSuchKey
 	if errors.As(err, &nf) {

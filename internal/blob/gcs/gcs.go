@@ -50,21 +50,19 @@ func (s *Store) fullKey(k string) string { return s.prefix + k }
 // Get reads an object.
 func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metadata, error) {
 	obj := s.client.Bucket(s.bucket).Object(s.fullKey(key))
-	attrs, err := obj.Attrs(ctx)
+	r, err := obj.NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, nil, blob.ErrNotFound
 		}
 		return nil, nil, err
 	}
-	r, err := obj.NewReader(ctx)
-	if err != nil {
-		return nil, nil, err
+	md := &blob.Metadata{Size: r.Attrs.Size}
+	if r.Attrs.Generation > 0 {
+		md.ETag = strconv.FormatInt(r.Attrs.Generation, 10)
 	}
-	md := &blob.Metadata{
-		ETag:         strconv.FormatInt(attrs.Generation, 10),
-		LastModified: attrs.Updated.Unix(),
-		Size:         attrs.Size,
+	if !r.Attrs.LastModified.IsZero() {
+		md.LastModified = r.Attrs.LastModified.Unix()
 	}
 	return r, md, nil
 }
@@ -144,6 +142,52 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		out = append(out, strings.TrimPrefix(attrs.Name, s.prefix))
 	}
 	return out, nil
+}
+
+// ListMetadata returns metadata already present in the provider listing.
+func (s *Store) ListMetadata(ctx context.Context, prefix string) ([]blob.ListedObject, error) {
+	it := s.client.Bucket(s.bucket).Objects(ctx, &storage.Query{Prefix: s.fullKey(prefix)})
+	var out []blob.ListedObject
+	for {
+		attrs, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		listed := blob.ListedObject{
+			Key:  strings.TrimPrefix(attrs.Name, s.prefix),
+			Size: attrs.Size,
+		}
+		if attrs.Generation > 0 {
+			listed.Version = strconv.FormatInt(attrs.Generation, 10)
+		}
+		if !attrs.Updated.IsZero() {
+			listed.LastModified = attrs.Updated.Unix()
+		}
+		out = append(out, listed)
+	}
+	return out, nil
+}
+
+// DeleteIfMatch removes key only if its generation still matches version.
+func (s *Store) DeleteIfMatch(ctx context.Context, key, version string) error {
+	gen, err := strconv.ParseInt(version, 10, 64)
+	if err != nil {
+		return fmt.Errorf("gcs: version must be a generation number: %w", err)
+	}
+	obj := s.client.Bucket(s.bucket).Object(s.fullKey(key)).If(storage.Conditions{GenerationMatch: gen})
+	if err := obj.Delete(ctx); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return blob.ErrNotFound
+		}
+		if isPreconditionFailed(err) {
+			return blob.ErrPreconditionFailed
+		}
+		return err
+	}
+	return nil
 }
 
 // isPreconditionFailed classifies a GCS conditional-write failure so the
