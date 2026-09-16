@@ -32,6 +32,14 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   working data and workspace selection share that directory.
 - Preview results, failure lists, and manifests retain discovery order.
 - Preview artifacts persist under `runs/pr-{n}/{run-id}/` for the PR lifetime.
+- A CI run ID includes the provider's run attempt when one is available. A
+  rerun of the same run number MUST write a distinct manifest, saved-plan
+  prefix, lock-holder identity, and audit record.
+- A supplied run attempt MUST be a positive integer. Invalid flag or
+  environment values MUST fail before artifact, lock, or audit identity is
+  generated.
+- Apply and readiness MUST reject unreadable or malformed preview history.
+  They MUST NOT fall back to an older valid manifest.
 - Apply does **not** replay a plan saved by the earlier preview. Preview
   freshness is a gate, not plan reuse: apply requires a successful preview on
   the current HEAD SHA within `preconditions.preview_freshness`, then
@@ -85,6 +93,28 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   login
 - Files mapping to no stack broaden to all stacks under `scope: auto` (default);
   `scope: pulumi_only` disables broadening. See discovery spec.
+
+#### Scenario: GitHub reruns one workflow run
+
+- **WHEN** attempts 1 and 2 use the same run number and commit SHA
+- **THEN** each attempt receives a different run ID and cannot overwrite the
+  other attempt's manifest or saved plans
+
+#### Scenario: Invalid run attempt
+
+- **GIVEN** a run attempt flag or environment value is present
+- **AND** the value is nonnumeric, zero, or negative
+- **WHEN** preview, apply, or refresh starts
+- **THEN** the command fails before generating durable run identity
+
+#### Scenario: Malformed preview history
+
+- **GIVEN** preview history cannot be listed or read
+- **OR** a manifest cannot be decoded or has an invalid timestamp, stack
+  reference, or status
+- **WHEN** apply or readiness selects the authoritative preview
+- **THEN** the operation fails closed
+- **AND** it does not accept an older manifest
 
 ## Apply trigger modes
 

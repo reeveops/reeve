@@ -70,6 +70,7 @@ func addPreviewFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("pr", 0, "PR number")
 	cmd.Flags().String("sha", "", "Commit SHA (default: $GITHUB_SHA)")
 	cmd.Flags().String("run-number", "", "CI run number (default: $GITHUB_RUN_NUMBER)")
+	cmd.Flags().String("run-attempt", "", "CI run attempt (default: $GITHUB_RUN_ATTEMPT)")
 	cmd.Flags().String("run-url", "", "CI run URL")
 	cmd.Flags().String("repo", "", "owner/repo (default: $GITHUB_REPOSITORY)")
 	cmd.Flags().String("token", "", "GitHub token (default: $GITHUB_TOKEN)")
@@ -94,6 +95,10 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 	pr := flagInt(cmd, "pr")
 	sha := flagStringOrEnv(cmd, "sha", "GITHUB_SHA")
 	runNum := flagIntOrEnv(cmd, "run-number", "GITHUB_RUN_NUMBER")
+	runAttempt, err := flagPositiveIntOrEnv(cmd, "run-attempt", "GITHUB_RUN_ATTEMPT")
+	if err != nil {
+		return err
+	}
 	runURL := flagStringOrEnv(cmd, "run-url", "")
 	repoFull := flagStringOrEnv(cmd, "repo", "GITHUB_REPOSITORY")
 	token := flagStringOrEnv(cmd, "token", "GITHUB_TOKEN")
@@ -116,6 +121,7 @@ func runPreview(cmd *cobra.Command, _ []string) error {
 		PRNumber:                 pr,
 		CommitSHA:                sha,
 		RunNumber:                runNum,
+		RunAttempt:               runAttempt,
 		CIRunID:                  os.Getenv("GITHUB_RUN_ID"),
 		CIRunURL:                 runURL,
 		RepoRoot:                 root,
@@ -233,4 +239,24 @@ func flagIntOrEnv(cmd *cobra.Command, name, envKey string) int {
 		return n
 	}
 	return 0
+}
+
+func flagPositiveIntOrEnv(cmd *cobra.Command, name, envKey string) (int, error) {
+	raw, source := "", ""
+	if cmd.Flags().Changed(name) {
+		raw, source = cmd.Flag(name).Value.String(), "--"+name
+	} else if envKey != "" {
+		raw = os.Getenv(envKey)
+		if raw != "" {
+			source = "$" + envKey
+		}
+	}
+	if source == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer, got %q", source, raw)
+	}
+	return n, nil
 }

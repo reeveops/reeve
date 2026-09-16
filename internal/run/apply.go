@@ -274,7 +274,11 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	// The preview manifest is keyed by commit SHA and immutable, so it is
 	// the only honest record of what was planned and approved. Apply
 	// executes that set - never more.
-	if previewed, ok := PreviewedStackRefs(ctx, in.Blob, in.PRNumber, in.CommitSHA); ok {
+	previewSnapshot, err := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, in.CommitSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load preview snapshot: %w", err)
+	}
+	if previewed, ok := previewSnapshot.StackRefs(); ok {
 		bound := make([]discovery.Stack, 0, len(target))
 		for _, s := range declared {
 			if previewed[s.Ref()] {
@@ -597,13 +601,8 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			freezeName = name
 		}
 
-		// Look up the prior preview manifest from blob for this SHA + stack.
-		prev, lookupErr := FindPreviewForStack(ctx, in.Blob, in.PRNumber, in.CommitSHA, s.Ref())
-		if lookupErr != nil {
-			// Not fatal - treat as "no preview" so the gate fails cleanly.
-			slog.Debug("preview lookup failed", "stack", s.Ref(), "sha", in.CommitSHA, "err", lookupErr)
-			prev = PreviewStatus{}
-		}
+		// Reuse the invocation-level preview snapshot for every stack gate.
+		prev := previewSnapshot.StackStatus(s.Ref())
 		slog.Debug("preview status", "stack", s.Ref(), "found", prev.Found, "succeeded", prev.Succeeded, "age", prev.Age)
 
 		// Evaluate every independent gate before repository-controlled policy
