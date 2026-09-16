@@ -63,3 +63,26 @@ It MUST invoke the composite action from the same Reeve commit as the workflow f
 - GIVEN a caller selects a Pulumi, OpenTofu, or Terraform CLI version
 - WHEN the reusable workflow accepts an event
 - THEN it MUST install the selected CLI after event classification and disable wrapper shims for HCL engines.
+
+### Requirement: Pinned workflow scaffolding
+
+`reeve init` MUST generate a GitOps caller when it has an exact Reeve source commit.
+It MUST preserve an existing workflow and MUST reject a moving workflow ref.
+
+#### Scenario: Release initialization
+
+- GIVEN a release binary embeds its full source commit
+- WHEN a user runs `reeve init` in a repository without a Reeve workflow
+- THEN it MUST write a caller pinned to that commit with the detected engine setup, baseline permissions, and comment-trigger events only.
+
+#### Scenario: Existing workflow
+
+- GIVEN `.github/workflows/reeve.yml` already exists
+- WHEN a user runs `reeve init` with or without `--force`
+- THEN it MUST preserve the existing workflow.
+
+#### Scenario: Development initialization
+
+- GIVEN a development binary does not embed a full source commit
+- WHEN a user supplies `--workflow-ref`
+- THEN Reeve MUST require a full 40-character commit SHA before writing any generated files.

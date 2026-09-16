@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/reeveops/reeve/internal/config"
 	"github.com/reeveops/reeve/internal/core/discovery"
 )
+
+var fullCommitRE = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
 // Approval-mode values for Options.ApprovalMode.
 const (
@@ -67,6 +70,51 @@ type File struct {
 	// fill-only-missing check against an existing .reeve/.
 	ConfigType string
 	Content    []byte
+}
+
+// RenderGitHubWorkflow produces the GitOps caller for the public reusable
+// workflow. The ref must be a full commit SHA so generated CI never follows a
+// moving branch or tag.
+func RenderGitHubWorkflow(engine, ref string) ([]byte, error) {
+	if engine == "" {
+		engine = "pulumi"
+	}
+	if engine != "pulumi" && engine != "terraform" && engine != "tofu" {
+		return nil, fmt.Errorf("unknown engine %q (pulumi | terraform | tofu)", engine)
+	}
+	if !fullCommitRE.MatchString(ref) {
+		return nil, fmt.Errorf("workflow ref must be a full 40-character commit SHA")
+	}
+
+	versionInput := "pulumi_version: latest"
+	switch engine {
+	case "terraform":
+		versionInput = "terraform_version: latest"
+	case "tofu":
+		versionInput = "opentofu_version: latest"
+	}
+
+	return []byte(fmt.Sprintf(`name: reeve
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  reeve:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@%s
+    with:
+      mode: gitops
+      %s
+`, strings.ToLower(ref), versionInput)), nil
 }
 
 // Validate rejects option combinations that would render broken config.

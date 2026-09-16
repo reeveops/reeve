@@ -76,6 +76,16 @@ func TestWorkflowActionsArePinned(t *testing.T) {
 	}
 }
 
+func TestReleaseEmbedsFullCommitForGeneratedWorkflow(t *testing.T) {
+	release := readRepoFile(t, ".goreleaser.yaml")
+	if !strings.Contains(release, "-X main.commit={{.Commit}}") {
+		t.Fatal("release binary must embed the full source commit")
+	}
+	if strings.Contains(release, "main.commit={{.ShortCommit}}") {
+		t.Fatal("short source commits cannot pin a generated workflow")
+	}
+}
+
 func TestReusableWorkflowContract(t *testing.T) {
 	t.Parallel()
 	workflow := readRepoFile(t, ".github", "workflows", "reeve.yml")

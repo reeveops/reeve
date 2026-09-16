@@ -91,6 +91,101 @@ func TestInitNonInteractiveScaffolds(t *testing.T) {
 	}
 }
 
+func TestInitWritesPinnedWorkflowForReleaseBuild(t *testing.T) {
+	fakeTTY(t, false)
+	root := pulumiRepo(t)
+	originalCommit := commit
+	commit = "0123456789abcdef0123456789abcdef01234567"
+	t.Cleanup(func() { commit = originalCommit })
+
+	out, err := runReeve(t, "init")
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "wrote   .github/workflows/reeve.yml") {
+		t.Fatalf("workflow write not reported:\n%s", out)
+	}
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "reeve.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"reeve.yml@0123456789abcdef0123456789abcdef01234567",
+		"mode: gitops",
+		"pulumi_version: latest",
+	} {
+		if !strings.Contains(string(workflow), want) {
+			t.Errorf("workflow missing %q:\n%s", want, workflow)
+		}
+	}
+}
+
+func TestInitWorkflowRefSelectsDetectedEngineAndPreservesExisting(t *testing.T) {
+	fakeTTY(t, false)
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "main.tf"), "terraform {}\n")
+	t.Chdir(root)
+	const ref = "89abcdef0123456789abcdef0123456789abcdef"
+
+	out, err := runReeve(t, "init", "--workflow-ref", ref)
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	workflowPath := filepath.Join(root, ".github", "workflows", "reeve.yml")
+	workflow, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(workflow), "terraform_version: latest") {
+		t.Fatalf("terraform workflow input missing:\n%s", workflow)
+	}
+
+	mustWrite(t, workflowPath, "name: custom\n")
+	out, err = runReeve(t, "init", "--workflow-ref", ref, "--force")
+	if err != nil {
+		t.Fatalf("second init: %v\n%s", err, out)
+	}
+	workflow, err = os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(workflow) != "name: custom\n" {
+		t.Fatalf("existing workflow was overwritten:\n%s", workflow)
+	}
+	if !strings.Contains(out, "existing workflow is never overwritten") {
+		t.Errorf("preserved workflow not reported:\n%s", out)
+	}
+}
+
+func TestInitRejectsUnpinnedWorkflowRefBeforeWriting(t *testing.T) {
+	fakeTTY(t, false)
+	root := pulumiRepo(t)
+
+	if out, err := runReeve(t, "init", "--workflow-ref", "master"); err == nil {
+		t.Fatalf("want error for moving workflow ref:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".reeve")); !os.IsNotExist(err) {
+		t.Fatalf("invalid ref wrote config: %v", err)
+	}
+}
+
+func TestInitWorkflowWriteRejectsSymlinkedGitHubDirectory(t *testing.T) {
+	fakeTTY(t, false)
+	root := pulumiRepo(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, ".github")); err != nil {
+		t.Fatal(err)
+	}
+
+	const ref = "0123456789abcdef0123456789abcdef01234567"
+	if out, err := runReeve(t, "init", "--workflow-ref", ref); err == nil {
+		t.Fatalf("want error for symlinked .github directory:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "workflows", "reeve.yml")); !os.IsNotExist(err) {
+		t.Fatalf("workflow escaped repository root: %v", err)
+	}
+}
+
 func TestInitAutoSelectsNonInteractiveWithoutTTY(t *testing.T) {
 	fakeTTY(t, false)
 	root := pulumiRepo(t)
@@ -278,7 +373,7 @@ func TestInitHelpMentionsModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init --help: %v", err)
 	}
-	for _, want := range []string{"--non-interactive", "--force", "wizard", "*.bak", "reeve lint"} {
+	for _, want := range []string{"--non-interactive", "--force", "--workflow-ref", "wizard", "*.bak", "reeve lint"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing %q", want)
 		}
