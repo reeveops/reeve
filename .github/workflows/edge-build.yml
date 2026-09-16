@@ -3,8 +3,8 @@ name: edge-build
 # Per-push prebuilt binaries for the GitHub Action fast-path. Every push to
 # master/next builds linux amd64+arm64 binaries and publishes them as their
 # OWN prerelease tagged <branch>-<shortsha> (e.g. next-5993c47) - one release
-# per commit, never a rolling dumping ground. The action, when pinned @master
-# or @next, resolves the newest <branch>-* prerelease and downloads its asset.
+# per commit, never a rolling dumping ground. The action selects a release by
+# its signed source hash, including when the caller uses a full commit SHA.
 # Hand-cut v*.*.* (and vX.Y.Z-rc) tags remain the primary distribution and are
 # entirely the maintainer's call.
 #
@@ -44,13 +44,14 @@ jobs:
           SHORTSHA="${GITHUB_SHA::7}"
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           mkdir -p dist
+          "$GITHUB_WORKSPACE/.github/scripts/source-hash.sh" "$GITHUB_WORKSPACE" > dist/source-hash.txt
           for ARCH in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath \
               -ldflags="-s -w -X main.version=${BRANCH}-${SHORTSHA} -X main.commit=${SHORTSHA} -X main.date=${DATE}" \
               -o "dist/${ARCH}/reeve" ./cmd/reeve
             tar -C "dist/${ARCH}" -czf "dist/reeve_linux_${ARCH}.tar.gz" reeve
           done
-          (cd dist && sha256sum reeve_linux_*.tar.gz > checksums.txt)
+          (cd dist && sha256sum reeve_linux_*.tar.gz source-hash.txt > checksums.txt)
           ls -l dist
 
       - name: Install cosign
@@ -75,6 +76,7 @@ jobs:
           BRANCH="$GITHUB_REF_NAME"
           SHORTSHA="${GITHUB_SHA::7}"
           TAG="${BRANCH}-${SHORTSHA}"
+          SOURCE_HASH=$(cat dist/source-hash.txt)
           # One prerelease per commit. On a re-run of the same commit the tag
           # already exists; clobber its assets (same source, not accumulation).
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
@@ -85,11 +87,10 @@ jobs:
               --notes "$(cat <<EOF
           Prebuilt binaries for commit \`${SHORTSHA}\` on \`${BRANCH}\`,
           consumed by the reeve GitHub Action fast-path: a workflow pinned to
-          this branch (\`@${BRANCH}\`) resolves the newest \`${BRANCH}-*\`
-          prerelease, downloads the matching linux binary, verifies its
-          checksum, and skips the Go toolchain + source build. If resolution
-          fails (edge build still running, unsupported arch), the action
-          silently builds from source.
+          this branch (\`@${BRANCH}\`) or the full commit SHA. The action
+          requires the signed source hash to match its checked-out source.
+
+          reeve-source-hash: ${SOURCE_HASH}
 
           \`checksums.txt\` is cosign keyless-signed; \`checksums.txt.bundle\`
           carries the Sigstore certificate + transparency-log proof. The
@@ -101,6 +102,7 @@ jobs:
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             dist/reeve_linux_amd64.tar.gz \
             dist/reeve_linux_arm64.tar.gz \
+            dist/source-hash.txt \
             dist/checksums.txt \
             dist/checksums.txt.bundle
 

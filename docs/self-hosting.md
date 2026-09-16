@@ -364,21 +364,21 @@ The composite action resolves its binary in three tiers, cache first:
 | Pin                 | Binary source                                                                    |
 | ------------------- | -------------------------------------------------------------------------------- |
 | `@vX.Y.Z`           | Release tarball, verified against the release's cosign-signed `checksums.txt`    |
-| `@master` / `@next` | Newest per-push `<branch>-<sha>` prerelease binary, verified against its checksum + cosign signature (auto-fallback to source build) |
-| anything else       | Built from source on the runner (SHA pins, branches, forks)                      |
+| `@master` / `@next` | Source-matched per-push prerelease, verified against its checksum and cosign signature |
+| full commit SHA     | That commit's retained source-matched prerelease, with source-build fallback     |
+| anything else       | Built from source on the runner (branches and forks)                             |
 
 A per-runner cache keyed `reeve-<os>-<arch>-<source hash>` fronts all
-three paths; only a cache miss triggers a download or build. The edge
-assets are published by `.github/workflows/edge-build.yml` on every push
-to `master`/`next` as a per-commit prerelease tagged `<branch>-<sha>`
-(the newest ten are kept). The action resolves the newest such prerelease,
-verifies its `checksums.txt` and keyless `checksums.txt.bundle`, then installs
-the binary; any failure silently
-falls back to a source build. Because it takes the *newest* prerelease, an
-edge binary can come from a slightly newer commit than the pinned action
-source. Prebuilt binaries save the ~30s+ Go toolchain + build cost on cache
-misses. For reproducible, version-pinned, always-signed distribution pin
-`@vX.Y.Z` (or a commit SHA, which always builds from the pinned source).
+three paths. Only a cache miss triggers a download or build.
+
+The edge workflow publishes a per-commit prerelease on every push to
+`master` and `next`, retaining the newest ten per branch.
+
+The action selects a prerelease whose signed source hash matches the action
+source already on disk, then verifies its checksum and keyless signature.
+Any mismatch or missing retained release falls back to a source build.
+
+Prebuilt binaries save the ~30s+ Go toolchain and build cost on cache misses.
 
 ---
 

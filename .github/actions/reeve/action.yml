@@ -10,11 +10,10 @@ branding:
 #   2. Cache miss -> try a prebuilt binary:
 #        @vX.Y.Z       -> that release's tarball, verified against the
 #                         release's checksums.txt (signed release pipeline).
-#        @master/@next -> the newest <branch>-<sha> per-push prerelease
-#                         (cosign-signed; one release per commit, published
-#                         by edge-build.yml).
-#   3. Any other ref (SHA pins, branches, forks), or any download/verify
-#      failure -> build from source (~30s on the first miss), as before.
+#        @master/@next -> the source-matched per-push prerelease.
+#        @<full SHA>   -> that commit's retained per-push prerelease.
+#   3. Other refs, unavailable assets, or any verification failure build from
+#      source (~30s on the first miss).
 
 inputs:
   command:
@@ -128,7 +127,8 @@ runs:
         set -euo pipefail
         # Canonical source hash (see .github/scripts/source-hash.sh): keyed on
         # content AND repo-relative path, so the same tree hashes identically
-        # wherever it is checked out. Used only as the binary cache key.
+        # wherever it is checked out. It keys the cache and binds any edge
+        # binary download to this exact action source.
         echo "hash=$("$ACTION_PATH/.github/scripts/source-hash.sh" "$ACTION_PATH")" >> "$GITHUB_OUTPUT"
 
     - name: Restore reeve binary cache
@@ -158,6 +158,7 @@ runs:
         ACTION_PATH: ${{ github.action_path }}/../../..
         REEVE_REF: ${{ github.action_ref }}
         REEVE_REPO: ${{ github.action_repository }}
+        REEVE_SOURCE_HASH: ${{ steps.reeve-hash.outputs.hash }}
         REEVE_OS: ${{ runner.os }}
         REEVE_ARCH: ${{ runner.arch }}
         REEVE_DEST: ${{ runner.temp }}/reeve-bin/reeve
