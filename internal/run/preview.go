@@ -234,37 +234,17 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 	}
 
-	executionEnv, executionCleanup, err := iac.ExecutionEnv()
-	if err != nil {
-		outcome = "failed"
-		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
-	}
-	defer executionCleanup()
-	stateEnv, stateCleanup, err := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
-	if err != nil {
-		outcome = "failed"
-		return nil, err
-	}
-	defer stateCleanup()
-	stateEnv = mergeEnv(executionEnv, stateEnv)
-	if err := PulumiLogin(ctx, in.Config, stateEnv); err != nil {
-		outcome = "failed"
-		return nil, err
-	}
-
-	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
-	if err != nil {
-		outcome = "failed"
-		return nil, fmt.Errorf("enumerate stacks: %w", err)
-	}
-
 	decls, filter := declarationsFromConfig(in.Config)
-	declared := discovery.Resolve(enum, decls, filter)
-
+	cm := changeMappingFromConfig(in.Config)
 	var target []discovery.Stack
 	mappingNotice := ""
 	if in.Local || in.VCS == nil {
-		target = declared
+		enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
+		if err != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("enumerate stacks: %w", err)
+		}
+		target = discovery.Resolve(enum, decls, filter)
 		slog.Debug("preview target: all declared stacks", "count", len(target))
 	} else {
 		if changedErr != nil {
@@ -272,18 +252,52 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 			return nil, fmt.Errorf("list changed files: %w", changedErr)
 		}
 		slog.Debug("changed files", "count", len(changed), "files", changed)
-		cm := changeMappingFromConfig(in.Config)
-		res := discovery.AffectedDetailed(declared, changed, cm)
-		target = res.Stacks
 		if allChangesOutsideRoot {
 			mappingNotice = fmt.Sprintf("No changed files are under the configured root `%s`.", in.RepoPath)
+			slog.Debug("preview target: no files under configured root")
+		} else if preflight := discovery.AffectedDetailed(nil, changed, cm); preflight.Reason == discovery.ReasonDocsOnly {
+			mappingNotice = mappingNoticeFor(preflight)
+			slog.Debug("preview target: all changed files ignored", "reason", preflight.Reason)
 		} else {
+			enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
+			if err != nil {
+				outcome = "failed"
+				return nil, fmt.Errorf("enumerate stacks: %w", err)
+			}
+			declared := discovery.Resolve(enum, decls, filter)
+			res := discovery.AffectedDetailed(declared, changed, cm)
+			target = res.Stacks
 			mappingNotice = mappingNoticeFor(res)
+			slog.Debug("preview target: affected stacks", "count", len(target), "reason", res.Reason)
 		}
-		slog.Debug("preview target: affected stacks", "count", len(target), "reason", res.Reason)
 	}
 	for _, s := range target {
 		slog.Debug("target stack", "ref", s.Ref(), "path", s.Path)
+	}
+
+	// Discovery is local and needs no credentials. Keep execution-home setup,
+	// state authentication, and backend login behind the target decision so a
+	// docs-only or outside-root change cannot acquire credentials or start an
+	// engine session for zero stacks.
+	var stateEnv map[string]string
+	if len(target) > 0 {
+		executionEnv, executionCleanup, err := iac.ExecutionEnv()
+		if err != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("prepare engine execution environment: %w", err)
+		}
+		defer executionCleanup()
+		stateEnv, stateCleanup, err := ResolveStateAuthEnv(ctx, in.Config, in.AuthRegistry)
+		if err != nil {
+			outcome = "failed"
+			return nil, err
+		}
+		defer stateCleanup()
+		stateEnv = mergeEnv(executionEnv, stateEnv)
+		if err := PulumiLogin(ctx, in.Config, stateEnv); err != nil {
+			outcome = "failed"
+			return nil, err
+		}
 	}
 
 	appCfg := toApprovalsConfig(in.Shared)

@@ -20,13 +20,17 @@ import (
 )
 
 type fakeEngine struct {
-	enum    []discovery.Stack
-	results map[string]iac.PreviewResult
+	enum       []discovery.Stack
+	results    map[string]iac.PreviewResult
+	enumerated *bool
 }
 
 func (f *fakeEngine) Name() string                   { return "fake" }
 func (f *fakeEngine) Capabilities() iac.Capabilities { return iac.Capabilities{} }
 func (f *fakeEngine) EnumerateStacks(ctx context.Context, root string) ([]discovery.Stack, error) {
+	if f.enumerated != nil {
+		*f.enumerated = true
+	}
 	return f.enum, nil
 }
 func (f *fakeEngine) Preview(ctx context.Context, s discovery.Stack, opts iac.PreviewOpts) (iac.PreviewResult, error) {
@@ -583,8 +587,18 @@ func TestPreviewLocalSkipsSHAOverride(t *testing.T) {
 // stack, an empty manifest is written and no stacks are returned.
 func TestPreviewNoAffectedStacks(t *testing.T) {
 	ctx := context.Background()
+	stateAuthAcquired := false
+	engineEnumerated := false
+	registry := auth.NewRegistry()
+	if err := registry.Register(&fakeProvider{
+		name: "state-auth", typ: "test", acquired: &stateAuthAcquired,
+		env: map[string]string{"STATE_TOKEN": "must-not-be-acquired"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	engine := &fakeEngine{
-		enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
+		enum:       []discovery.Stack{{Project: "api", Path: "projects/api", Name: "dev", Env: "dev"}},
+		enumerated: &engineEnumerated,
 	}
 	fvcs := &fakeVCS{
 		changed: []string{"docs/README.md"}, // matches no stack path
@@ -599,17 +613,25 @@ func TestPreviewNoAffectedStacks(t *testing.T) {
 		Engine:    engine,
 		Config: &schemas.Engine{Engine: schemas.EngineBody{
 			Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"dev"}}},
+			State:  schemas.EngineState{AuthProvider: "state-auth"},
 		}},
-		Shared:   &schemas.Shared{},
-		Blob:     store,
-		VCS:      fvcs,
-		Comments: fvcs,
+		Shared:       &schemas.Shared{},
+		AuthRegistry: registry,
+		Blob:         store,
+		VCS:          fvcs,
+		Comments:     fvcs,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(out.Stacks) != 0 {
 		t.Fatalf("expected 0 affected stacks, got %d", len(out.Stacks))
+	}
+	if stateAuthAcquired {
+		t.Fatal("no-op preview acquired state credentials")
+	}
+	if engineEnumerated {
+		t.Fatal("docs-only preview initialized the engine enumerator")
 	}
 	// FindPreviewForStack must return Found=false when stack not in manifest.
 	status, err := FindPreviewForStack(ctx, store, 1, "head-sha", "api/dev")

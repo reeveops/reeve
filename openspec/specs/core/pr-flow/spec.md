@@ -45,6 +45,14 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   that survives `ignore_changes` filtering.
 - Docs/asset-only changes (skip globs) run nothing; preview/apply report
   "Documentation/asset-only changes".
+- A preview with no target stacks MUST finish without acquiring state or
+  workload credentials and without initializing an engine backend session.
+
+#### Scenario: Documentation-only preview
+
+- **WHEN** discovery maps the changed files to no stacks
+- **THEN** preview writes its empty result and reports success without state
+  authentication or engine backend login
 - Files mapping to no stack broaden to all stacks under `scope: auto` (default);
   `scope: pulumi_only` disables broadening. See discovery spec.
 
