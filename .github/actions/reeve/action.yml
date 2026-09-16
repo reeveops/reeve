@@ -203,12 +203,25 @@ runs:
         set -euo pipefail
         "$ACTION_PATH/.github/scripts/fetch-binary.sh"
 
+    # setup-go hashes dependency files only inside GITHUB_WORKSPACE. The
+    # action source lives under RUNNER_WORKSPACE/_actions, so stage only the
+    # checksum input before asking setup-go to restore its module cache.
+    - name: Stage Go cache metadata
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
+      shell: bash
+      env:
+        ACTION_ROOT: ${{ steps.reeve-hash.outputs.root }}
+        CACHE_DEPENDENCY_FILE: ${{ github.workspace }}/.reeve-action-go.sum
+      run: |
+        set -euo pipefail
+        cp "$ACTION_ROOT/go.sum" "$CACHE_DEPENDENCY_FILE"
+
     - name: Set up Go (from reeve's go.mod)
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
       with:
         go-version-file: ${{ steps.reeve-hash.outputs.root }}/go.mod
-        cache-dependency-path: ${{ steps.reeve-hash.outputs.root }}/go.sum
+        cache-dependency-path: ${{ github.workspace }}/.reeve-action-go.sum
 
     - name: Build reeve
       if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
