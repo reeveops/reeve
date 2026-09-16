@@ -27,6 +27,15 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 
 - Preview runs in parallel across stacks; apply serializes per-stack via locks.
 - Preview artifacts persist under `runs/pr-{n}/{run-id}/` for the PR lifetime.
+- A CI run ID includes the provider's run attempt when one is available. A
+  rerun of the same run number MUST write a distinct manifest, saved-plan
+  prefix, lock-holder identity, and audit record.
+
+#### Scenario: GitHub reruns one workflow run
+
+- **WHEN** attempts 1 and 2 use the same run number and commit SHA
+- **THEN** each attempt receives a different run ID and cannot overwrite the
+  other attempt's manifest or saved plans
 - Apply does **not** replay a plan saved by the earlier preview. Preview
   freshness is a gate, not plan reuse: apply requires a successful preview on
   the current HEAD SHA within `preconditions.preview_freshness`, then

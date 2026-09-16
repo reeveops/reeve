@@ -58,11 +58,12 @@ type applyVCS interface {
 
 // ApplyInput wires dependencies and run context.
 type ApplyInput struct {
-	PRNumber  int
-	CommitSHA string // best-effort; overridden from PR HEAD post-GetPR
-	RunNumber int
-	CIRunID   int64
-	CIRunURL  string
+	PRNumber   int
+	CommitSHA  string // best-effort; overridden from PR HEAD post-GetPR
+	RunNumber  int
+	RunAttempt int
+	CIRunID    int64
+	CIRunURL   string
 	// SelfCheckNames is the list of check_run names that belong to reeve
 	// itself and must be skipped when computing ChecksGreen (otherwise a
 	// previously failed apply pins the gate red on the same SHA forever).
@@ -145,7 +146,7 @@ type ApplyOutput struct {
 // The PR comment is updated at the end with the aggregated results.
 func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) {
 	start := time.Now()
-	runID := fmt.Sprintf("apply-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	runID := runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
 
 	// Break-glass fail-fast: a missing justification never starts a run.
 	if in.BreakGlass != nil && strings.TrimSpace(in.BreakGlass.Justification) == "" {
