@@ -365,6 +365,11 @@ refused with "another run of this PR holds the lock" instead of applying
 concurrently. Once the first run finishes or its lease expires, the
 next attempt proceeds normally.
 
+Locks created by an older reeve binary use the previous holder identity and
+remain binding after an upgrade until their lease expires. After confirming
+the old runner has stopped, use `reeve locks unlock --pr N --force` or comment
+`/reeve unlock --force` on the PR to clear its active holders.
+
 `reeve locks list` inspects the live state. `reeve locks explain <stack>`
 shows holder + queue. `reeve locks unlock <project/stack> --pr N` removes a
 closed or abandoned PR from a lock's holder/queue (omit the stack to sweep

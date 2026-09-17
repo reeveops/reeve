@@ -168,6 +168,8 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 - **AND** break-glass is configured and authorizes the actor
 - **WHEN** the actor requests apply with a mandatory justification
 - **THEN** the unavailable preview gates are overridden as warnings
+- **AND** apply uses only stacks matched precisely by the current changed-file mapping
+- **AND** an unmapped file does not broaden recovery to every declared stack
 - **AND** the PR comment, timeline, and audit record name the override
 - **AND** checks, policy, locks, fork, and draft gates remain enforced
 

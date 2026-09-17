@@ -40,17 +40,6 @@ func TestRunIdentity(t *testing.T) {
 	}
 }
 
-func TestLockIdentitySeparatesAttempts(t *testing.T) {
-	t.Parallel()
-	const sha = "abcdef1234567890"
-	if got := lockIdentity("apply", 42, 2, sha); got != "apply-42-2-abcdef1234567890" {
-		t.Fatalf("lockIdentity() = %q, want %q", got, "apply-42-2-abcdef1234567890")
-	}
-	if lockIdentity("apply", 42, 1, sha) == lockIdentity("apply", 42, 2, sha) {
-		t.Fatal("lock identities must differ across attempts")
-	}
-}
-
 func TestApplyRerunWaitsForEarlierAttemptLease(t *testing.T) {
 	t.Parallel()
 	store, err := filesystem.New(t.TempDir())
@@ -61,11 +50,11 @@ func TestApplyRerunWaitsForEarlierAttemptLease(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	lockStore.Now = func() time.Time { return now }
 	const sha = "abcdef1234567890"
-	holder := corelocks.Holder{PR: 42, CommitSHA: sha, RunID: lockIdentity("apply", 7, 1, sha)}
+	holder := corelocks.Holder{PR: 42, CommitSHA: sha, RunID: runIdentity("apply", 7, 1, sha)}
 	if _, acquired, err := lockStore.TryAcquire(t.Context(), "api", "prod", holder, time.Hour); err != nil || !acquired {
 		t.Fatalf("attempt 1 acquire = (%t, %v), want success", acquired, err)
 	}
-	retry := corelocks.Holder{PR: 42, CommitSHA: sha, RunID: lockIdentity("apply", 7, 2, sha)}
+	retry := corelocks.Holder{PR: 42, CommitSHA: sha, RunID: runIdentity("apply", 7, 2, sha)}
 	if _, acquired, err := lockStore.TryAcquire(t.Context(), "api", "prod", retry, time.Hour); !errors.Is(err, corelocks.ErrHeldBySamePR) || acquired {
 		t.Fatalf("attempt 2 live-lease acquire = (%t, %v), want %v", acquired, err, corelocks.ErrHeldBySamePR)
 	}

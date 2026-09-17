@@ -299,6 +299,36 @@ func TestBreakGlassRecoversFromUnavailablePreviewHistory(t *testing.T) {
 	}
 }
 
+func TestBreakGlassPreviewRecoveryDoesNotBroadenScope(t *testing.T) {
+	engine, fv := newBGFixture()
+	engine.enum = append(engine.enum, discovery.Stack{
+		Project: "worker", Path: "projects/worker", Name: "prod", Env: "prod",
+	})
+	fv.changed = []string{"projects/api/main.ts", "shared/provider.ts"}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := bgApplyInput(t, engine, fv, bgShared(&schemas.BreakGlassYAML{
+		Authorized: schemas.BreakGlassAuthorized{InternalList: []string{"alice"}},
+	}), store)
+	in.Config.Engine.Stacks = append(in.Config.Engine.Stacks, schemas.StackDecl{
+		Project: "worker", Path: "projects/worker", Stacks: []string{"prod"},
+	})
+	putRawManifest(t, store, 18, "run-999", bgSHA, "{not-json")
+
+	out, err := Apply(t.Context(), in)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if out.Blocked || len(engine.applied) != 1 || engine.applied[0] != "api/prod" {
+		t.Fatalf("recovery widened apply scope: out=%+v applied=%v", out, engine.applied)
+	}
+	if !strings.Contains(fv.allComments(), "not every declared stack") {
+		t.Fatalf("timeline did not explain precise recovery scope:\n%s", fv.allComments())
+	}
+}
+
 func TestBreakGlassUnconfiguredFailsClosed(t *testing.T) {
 	engine, fv := newBGFixture()
 	store, _ := filesystem.New(t.TempDir())

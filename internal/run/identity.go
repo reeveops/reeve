@@ -18,9 +18,3 @@ func artifactSHA(commitSHA string) string {
 	}
 	return commitSHA
 }
-
-// lockIdentity distinguishes provider attempts so a retry cannot adopt the
-// live lease of a cancelled or still-running earlier attempt.
-func lockIdentity(op string, runNumber, runAttempt int, commitSHA string) string {
-	return runIdentity(op, runNumber, runAttempt, commitSHA)
-}

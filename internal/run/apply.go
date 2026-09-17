@@ -160,7 +160,6 @@ func (e *previewSnapshotLoadError) Unwrap() error { return e.cause }
 func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) {
 	start := time.Now()
 	runID := runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
-	lockRunID := lockIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
 
 	// Break-glass fail-fast: a missing justification never starts a run.
 	if in.BreakGlass != nil && strings.TrimSpace(in.BreakGlass.Justification) == "" {
@@ -210,11 +209,9 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 		in.CommitSHA = in.ExpectedHeadSHA
 		runID = runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
-		lockRunID = lockIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
 	} else if pr.HeadSHA != "" {
 		in.CommitSHA = pr.HeadSHA
 		runID = runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
-		lockRunID = lockIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
 	}
 	slog.Debug("pr fetched", "number", in.PRNumber, "head_sha", pr.HeadSHA, "author", pr.Author, "base_ref", pr.BaseRef, "is_draft", pr.IsDraft, "is_fork", pr.IsFork)
 
@@ -322,8 +319,9 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	} else if mapRes.Reason == discovery.ReasonBroadened {
 		if previewLoadErr != nil {
 			timeline.add(ctx, "⚠️", "scope reconstructed", fmt.Sprintf(
-				"preview history is unavailable; current changed-file mapping selected every declared stack because %s maps to no specific stack",
-				strings.Join(mapRes.Unmapped, ", ")))
+				"preview history is unavailable; apply targets the %d stack(s) the current changed-file mapping matched precisely, not every declared stack, because %s maps to no specific stack",
+				len(mapRes.Matched), strings.Join(mapRes.Unmapped, ", ")))
+			target = mapRes.Matched
 		} else {
 			// No preview manifest for this commit: every stack will fail the
 			// preview gate anyway, but do not silently widen the blast radius
@@ -590,7 +588,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		// this same PR (double `/reeve apply`, workflow re-run) is refused
 		// with ErrHeldBySamePR and must not proceed to apply.
 		lock, acquired, err := in.Locks.TryAcquire(ctx, s.Project, s.Name, corelocks.Holder{
-			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: lockRunID, Actor: in.Actor,
+			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
 		}, ttl)
 		if errors.Is(err, corelocks.ErrHeldBySamePR) {
 			holderRun := "unknown"
@@ -605,7 +603,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			ss.Error = fmt.Sprintf("another run of PR #%d (%s) currently holds the lock for this stack; wait for it to finish or for its lease to expire at %s", in.PRNumber, holderRun, expiry)
 			anyBlocked = true
 			slog.Info("lock held by concurrent run of same PR",
-				"stack", s.Ref(), "pr", in.PRNumber, "holder_run", holderRun, "this_run", lockRunID)
+				"stack", s.Ref(), "pr", in.PRNumber, "holder_run", holderRun, "this_run", runID)
 			summaries = append(summaries, ss)
 			continue
 		}
@@ -727,7 +725,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			}
 			anyBlocked = true
 			if acquired {
-				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "gates blocked")
+				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "gates blocked")
 			}
 			summaries = append(summaries, ss)
 			continue
@@ -738,7 +736,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			if stateErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(stateErr.Error())
-				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "state auth failed")
+				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state auth failed")
 				summaries = append(summaries, ss)
 				continue
 			}
@@ -750,7 +748,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			if loginErr := PulumiLogin(ctx, in.Config, stateEnv); loginErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(loginErr.Error())
-				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "state login failed")
+				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state login failed")
 				summaries = append(summaries, ss)
 				continue
 			}
@@ -763,7 +761,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())
-			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "auth resolve failed")
+			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "auth resolve failed")
 			summaries = append(summaries, ss)
 			continue
 		}
@@ -810,7 +808,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		// its LIVE holder reaped mid-flight (two applies would then run
 		// concurrently). Refreshes every ttl/3 until the engine returns.
 		stopHeartbeat := in.Locks.StartHeartbeat(stackCtx, s.Project, s.Name, corelocks.Holder{
-			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: lockRunID, Actor: in.Actor,
+			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
 		}, ttl)
 		res, aerr := in.Engine.Apply(stackCtx, s, iac.ApplyOpts{
 			Cwd:        absJoin(in.RepoRoot, s.Path),
@@ -831,7 +829,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			ss.Error = redactor.Redact(aerr.Error())
 			stackOutcome = "error"
 			endStack(stackOutcome, time.Since(stackStart).Seconds())
-			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "engine apply failed")
+			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "engine apply failed")
 			summaries = append(summaries, ss)
 			PostAnnotation(ctx, in.Annotations, annotations.EventApplyFailed,
 				s.Project, s.Name, s.Env, "failed", ss.Error, in.PRNumber, in.CommitSHA)
@@ -850,7 +848,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		} else {
 			ss.Status = summary.StatusPlanned
 		}
-		releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "stack apply complete")
+		releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "stack apply complete")
 		summaries = append(summaries, ss)
 	}
 
@@ -921,7 +919,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		if in.Locks != nil && in.PRNumber > 0 {
 			// force=true: this is the finishing run clearing its own
 			// runID-scoped entries; its lease may still look active.
-			if n, _, err := in.Locks.UnlockPRAll(pctx, in.PRNumber, lockRunID, ttl, true); err != nil {
+			if n, _, err := in.Locks.UnlockPRAll(pctx, in.PRNumber, runID, ttl, true); err != nil {
 				slog.Warn("lock unlock sweep failed", "pr", in.PRNumber, "err", err)
 			} else if n > 0 {
 				slog.Info("removed lock entries after successful apply", "pr", in.PRNumber, "locks", n)

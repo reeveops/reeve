@@ -147,7 +147,7 @@ func TestRefreshRerunRefusesEarlierAttemptLock(t *testing.T) {
 				t.Fatal(err)
 			}
 			lockStore := blocks.New(store)
-			holder := corelocks.Holder{PR: 7, CommitSHA: sha, RunID: lockIdentity("refresh", 12, 1, sha)}
+			holder := corelocks.Holder{PR: 7, CommitSHA: sha, RunID: runIdentity("refresh", 12, 1, sha)}
 			if _, acquired, err := lockStore.TryAcquire(t.Context(), "api", "prod", holder, time.Hour); err != nil || !acquired {
 				t.Fatalf("initial acquire = (%t, %v), want success", acquired, err)
 			}
