@@ -22,7 +22,7 @@ single table line with no section.
 
 A help comment is upserted separately under marker `<!-- reeve:help -->`,
 listing available commands. A ready comment is upserted under
-`<!-- reeve:ready -->` when `/reeve ready` is triggered (manually or via `auto_ready`).
+`<!-- reeve:ready -->` when `/reeve ready` is triggered (manually or from a ready-for-review event).
 
 Apply comment mirrors preview structure, adds durations, floats failures
 to top. Apply writes the same marker preview wrote for that commit, so a
@@ -143,7 +143,7 @@ delete is logged, never fatal.
 
 - `status_grouped` (default): blocked → ready → no-op.
 - `alphabetical`: by `{project}/{stack}`.
-- `env_priority`: configured priority order (e.g. `prod > staging > dev`).
+- Other sort values are not supported unless implemented by the current renderer and configuration schema.
 
 ## Testing
 

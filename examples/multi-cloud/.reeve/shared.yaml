@@ -21,7 +21,7 @@ approvals:
       required_approvals: 2
       approvers: ["@org/sre", "@org/security"]
       require_all_groups: true
-    "*/prod/payments":
+    "payments/prod":
       required_approvals: 3
       approvers: ["@org/sre", "@org/security", "@org/payments-leads"]
       require_all_groups: true

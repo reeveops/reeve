@@ -4,7 +4,7 @@
 
 `iac.Engine` is the complete contract an adapter satisfies: `Name()`
 (display only - core **never branches** on it), `Capabilities()`, and the
-operational surface `EnumerateStacks`, `Preview`, `Apply`, `DriftCheck`,
+operational surface `EnumerateStacks`, `Preview`, `Apply`, `DriftCheck`, `Refresh`,
 composed from narrow per-operation interfaces (`Enumerator`, `Previewer`,
 `Applier`, `DriftChecker`) so consumers that need less depend on less.
 
@@ -24,7 +24,6 @@ type Capabilities struct {
     SupportsRefresh      bool
     SupportsPolicyNative bool
     SecretsProviderTypes []string
-    PreviewOutputFormat  Format
 }
 ```
 

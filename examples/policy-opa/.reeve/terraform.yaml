@@ -1,0 +1,20 @@
+version: 1
+config_type: engine
+engine:
+  type: terraform
+  stacks:
+    - pattern: "envs/*"
+      stacks: [dev, prod]
+  policy_hooks:
+    - name: prevent-production-deletes
+      command: [conftest, test, --policy, policies/prevent_deletes.rego, "{{plan_json}}"]
+      on_fail: block
+      required: true
+    - name: require-instance-tags
+      command: [conftest, test, --policy, policies/require_tags.rego, "{{plan_json}}"]
+      on_fail: block
+      required: true
+    - name: large-change
+      command: [python3, scripts/change-limit.py, "{{plan_json}}", "20"]
+      on_fail: warn
+      required: true

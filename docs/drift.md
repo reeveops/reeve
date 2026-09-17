@@ -16,8 +16,7 @@ resources come from the plan's `resource_drift`, so
 `refresh_before_check` needs no separate refresh step). Any non-zero
 change count on a stack means drift.
 
-reeve classifies each check into one of four events based on the prior
-state file:
+Reeve compares each result with prior state and emits these events:
 
 | Event | Meaning |
 |---|---|
@@ -42,21 +41,21 @@ dispatch is suppressed.
 
 ```bash
 reeve drift run                        # execute a drift check on default scope
-reeve drift run --pattern "prod/*"     # narrow to a glob
+reeve drift run --pattern "*/prod"     # narrow to a glob
 reeve drift run --schedule prod        # run a named schedule from drift.yaml
 reeve drift run --if-stale             # skip stacks within the freshness window
 
 reeve drift bootstrap                  # record current state as the baseline (no events)
 
 reeve drift status                     # print last-known state for every stack
-reeve drift status --stack prod/api    # limit to one stack
+reeve drift status --stack api/prod    # limit to one stack
 
 reeve drift report                     # render the latest report.md from the bucket
 reeve drift report --format json       # same run as JSON (manifest + per-stack results)
 
-reeve drift suppress add prod/api --until 7d --reason "known upstream change"
+reeve drift suppress add api/prod --until 7d --reason "known upstream change"
 reeve drift suppress list
-reeve drift suppress clear prod/api
+reeve drift suppress clear api/prod
 ```
 
 `--schedule` must name a schedule declared in `drift.yaml`; an unknown
@@ -64,106 +63,40 @@ name is an error (listing the configured names) rather than a silent
 fall-back to the global scope. `--until` accepts Go durations plus day
 and week units (`48h`, `7d`, `2w`).
 
-## Config (`.reeve/drift.yaml`)
+## Start with one scope
+
+Declare the stacks you want to check in `.reeve/drift.yaml`:
 
 ```yaml
 version: 1
 config_type: drift
-
 scope:
-  include_patterns: ["prod/*", "staging/*"]
-  exclude_patterns: ["*/scratch", "experiments/*"]
-
+  include_patterns: ["*/prod"]
 behavior:
-  refresh_before_check: true       # default for drift (off for PR preview)
-  max_parallel_stacks: 8
-  timeout_per_stack: 15m           # wall-clock bound per stack attempt; unset = no bound
-  retry_on_transient_error: 2      # 0 (default) = no retries
-
-  # timeout_per_stack caps a single stack's check attempt so one hung engine
-  # invocation can't stall the run. On overrun the engine process is cancelled
-  # and the stack is classified as a check error (check_failed) with the reason
-  # "stack check exceeded timeout_per_stack=15m"; the run continues with the
-  # other stacks. A timeout is a run error, NOT a transient - it is never
-  # retried, and because it bounds each attempt it also caps every retry.
-
-  # Flap damping (unset = off): after a drift alert goes out for a stack,
-  # further alerts stay silent until the drift resolves or this window
-  # elapses. See "Flap damping" below. Extended durations OK (24h, 3d, 1w).
-  renotify_after: 24h
-
-  # "Transient" = a network error reaching the engine or a cloud SDK, or
-  # expired credentials. A network error is retried up to this many times;
-  # expired credentials trigger a single rebind (re-resolve auth) + retry,
-  # bounded by the same budget. NOT retried: engine crash, plan-parse error,
-  # policy failure. A stack that succeeds on a retry is not an error; one
-  # that exhausts its retries classifies as `error` (fires `check_failed`).
-  # Context cancellation (Ctrl-C / SIGTERM) stops retrying immediately.
-
-  # Exit code control: when a condition below is true and occurred this
-  # run, `reeve drift run` exits nonzero (naming the condition) so CI can
-  # gate on it. All three default to false = always exit 0.
-  #   drift_detected -> any stack fired the drift_detected event
-  #   drift_ongoing  -> any stack fired the drift_ongoing event
-  #   run_error      -> any check failed (check_failed / outcome error)
-  exit_on:
-    drift_detected: false          # don't fail CI on drift - alert instead
-    drift_ongoing: false
-    run_error: true                # do fail CI on run-level errors
-
   state_bootstrap:
-    mode: require_manual           # baseline | alert_all | require_manual
-    baseline_max_age: 7d           # reserved — parsed but not yet enforced
-
-classification:
-  ignore_properties:
-    - resource_type: "aws:ec2/instance:Instance"
-      properties: ["tags.LastScanned", "tags.AutoManaged"]
-  ignore_resources:
-    - "urn:*:aws:autoscaling/group:*::*autoscaler-managed*"
-  treat_as_drift:
-    orphaned_state: true           # tracked in state, gone from the cloud
-    missing_state: true            # present in the cloud, untracked by state
-
-freshness:
-  enabled: true
-  window: 4h                       # skip stacks checked within 4h
-  respect_failures: true           # reserved — not yet enforced; failed stacks are always re-checked
-
-schedules:
-  critical:
-    patterns: ["prod/payments", "prod/auth"]
-  prod:
-    patterns: ["prod/*"]
-    exclude_patterns: ["prod/payments", "prod/auth"]   # covered by "critical"
-  slow-movers:
-    patterns: ["dev/*", "experiments/*"]
-
-channels:
-  - type: slack
-    channel: "#infra-drift"
-    on: [drift_detected, check_failed]
-
-  - type: pagerduty
-    integration_key: ${env:PD_CHANGE_EVENTS_KEY}
-    on: [drift_detected]
-    severity_map:
-      prod: error
-      staging: warning
-      dev: info
-
-  - type: github_issue
-    on: [drift_detected]
-    labels: [drift, infra]
-    assignees: ["@org/sre"]
-
-  - type: webhook
-    name: incident-system
-    url: https://api.incident.io/v2/alert_events/http/${env:INCIDENT_IO_TOKEN}
-    on: [drift_detected]
-    headers:
-      Content-Type: application/json
+    mode: require_manual
+  exit_on:
+    run_error: true
 ```
+
+References use `project/stack`, so `*/prod` selects the `prod` stack in each project.
+Bootstrap with the same bucket and engine/backend credentials that scheduled runs will use:
+
+```bash
+reeve drift bootstrap --pattern "*/prod"
+reeve drift run --pattern "*/prod"
+reeve drift status
+reeve drift report
+```
+
+Bootstrap records the current drift baseline without sending events; it does not correct infrastructure.
+Review the baseline, then enable [the scheduled caller](github-actions.md#drift-and-maintenance-callers) and add [notification channels](notifications.md#channel-types) if needed.
+
+An ordinary laptop cannot use a GitHub OIDC workload binding; run these commands in an appropriately authenticated environment with matching configuration.
+Changing an uncommitted local file does not change what a remotely dispatched Actions workflow reads.
+
+The sections below cover optional filtering, schedules, alerts, and reporting.
+The [scheduled example](../examples/drift-scheduled/README.md) combines them in a wiring recipe.
 
 ## Flap damping (`behavior.renotify_after`)
 
@@ -253,55 +186,13 @@ runs refuse until a human records the baseline:
 
 ```bash
 reeve drift bootstrap                 # record current state, emit no events
-reeve drift bootstrap --pattern "prod/*"   # or narrow the scope
+reeve drift bootstrap --pattern "*/prod"   # or narrow the scope
 ```
 
 ## Scheduling
 
-Drift runs are triggered by GitHub Actions cron workflows:
-
-```yaml
-# .github/workflows/drift.yml
-name: drift
-
-on:
-  schedule:
-    - cron: "17 */4 * * *"       # every 4 hours, off the hour
-    - cron: "0 3 * * *"          # 3am nightly for slow-movers
-  workflow_dispatch:
-    inputs:
-      schedule:
-        description: "Schedule name from drift.yaml"
-        required: false
-        default: prod
-
-permissions:
-  contents: read
-  id-token: write                # OIDC federation
-  issues: write                  # for github_issue channel
-
-jobs:
-  critical:
-    if: ${{ github.event.schedule == '17 */4 * * *' }}
-    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
-    with:
-      mode: drift
-      drift_schedule: critical
-
-  slow-movers:
-    if: ${{ github.event.schedule == '0 3 * * *' }}
-    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
-    with:
-      mode: drift
-      drift_schedule: slow-movers
-
-  manual:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
-    with:
-      mode: drift
-      drift_schedule: ${{ inputs.schedule }}
-```
+Use [the shared drift workflow](github-actions.md#drift-and-maintenance-callers) with a cron schedule or manual dispatch.
+For named schedules, pass `drift_schedule`; the [scheduling recipe](../examples/drift-scheduled/README.md) shows multiple cadences.
 
 The three scoping strategies compose:
 
@@ -331,20 +222,18 @@ providers:
     role_arn: arn:aws:iam::111:role/reeve-drift-readonly
 
 bindings:
-  - match: { stack: "prod/*" }
+  - match: { stack: "*/prod" }
     providers: [aws-prod]              # apply + preview
 
-  - match: { stack: "prod/*", mode: drift }
-    providers: [aws-prod-readonly]     # replaces aws-prod for drift runs
+  - match: { stack: "*/prod", mode: drift }
+    override: [aws-prod-readonly]      # replaces aws-prod for drift runs
 ```
 
-Grant the read-only role:
+Grant only the service-specific read permissions needed to inspect the resources your stacks manage.
+Do not treat action-name wildcards as a portable IAM policy; engine state operations may need separate backend permissions.
 
-- `*:Describe*`, `*:List*`, `*:Get*` on the resources your stacks manage.
-- Explicitly **no** `*:Create*`, `*:Update*`, `*:Delete*`.
-
-For Pulumi refresh to work, it does need read access to the state
-backend too (S3 bucket / KMS key).
+Pulumi refresh can write engine state before preview, so the state-backend identity needs permissions appropriate to that operation.
+Terraform/OpenTofu drift uses a refresh-only plan without writing state.
 
 ## Suppressions
 
@@ -352,12 +241,12 @@ Time-bounded silence for an expected-but-non-trivial change:
 
 ```bash
 # Suppress a stack for 48 hours with a reason (audited)
-reeve drift suppress add prod/api \
+reeve drift suppress add api/prod \
   --until 48h \
   --reason "INC-4271: emergency patch applied out-of-band, restoring IaC sync"
 
 reeve drift suppress list
-reeve drift suppress clear prod/api
+reeve drift suppress clear api/prod
 ```
 
 `--until` accepts Go durations plus day and week units (`48h`, `7d`,
@@ -371,9 +260,9 @@ in `drift.yaml`:
 
 ```yaml
 permanent_suppressions:
-  - stack: "prod/legacy-*"          # doublestar glob over project/stack
+  - stack: "legacy-*/prod"          # doublestar glob over project/stack
     reason: "Vendor-managed resources; tracked in TICKET-123"
-  - stack: "prod/frozen-vpc"
+  - stack: "frozen-vpc/prod"
     until: "2026-12-31T00:00:00Z"   # optional RFC3339 expiry; omit for permanent
     reason: "Freeze window; re-enable alerts in Q1"
 ```
@@ -458,121 +347,10 @@ point: `github_issue` (an issue is a per-stack incident to fix and close) and
 `otel_annotation` (one metric/annotation per stack regardless). An unknown
 `grouping:` value is a hard config error.
 
-### Slack
+### Destinations
 
-One message per run per channel, no state tracking. Use a dedicated
-channel (`#infra-drift`) - mixing drift with regular alerts gets noisy.
-
-```yaml
-- type: slack
-  channel: "#infra-drift"
-  on: [drift_detected, check_failed]
-  grouping: by_environment
-```
-
-### Webhook
-
-Generic HTTP POST with JSON body. In v1, the `raw` format is the only
-shape - no named presets.
-
-```yaml
-- type: webhook
-  name: incident-io
-  url: https://api.incident.io/v2/alert_events/http/${env:INCIDENT_IO_TOKEN}
-  on: [drift_detected]
-  headers:
-    Authorization: "Bearer ${env:INCIDENT_IO_TOKEN}"
-```
-
-Payload shape:
-
-```json
-{
-  "event": "drift_detected",
-  "project": "api",
-  "stack": "prod",
-  "env": "prod",
-  "outcome": "drift_detected",
-  "counts": {"add": 0, "change": 1, "delete": 0, "replace": 0},
-  "fingerprint": "a3f8e1...",
-  "error": "",
-  "run_id": "drift-20260421T153000Z"
-}
-```
-
-With `grouping: by_environment`, a grouped POST replaces the top-level stack
-fields with the environment key and a `stacks` array:
-
-```json
-{
-  "event": "drift_detected",
-  "group": "prod",
-  "stacks": [
-    {"project": "api", "stack": "prod", "env": "prod", "outcome": "drift_detected",
-     "counts": {"add": 0, "change": 1, "delete": 0, "replace": 0}, "fingerprint": "a3f8e1...", "error": ""}
-  ],
-  "run_id": "drift-20260421T153000Z"
-}
-```
-
-Named presets for `incident_io` / `rootly` / `opsgenie` are deliberately
-**not** built in. Template the payload in your webhook receiver instead -
-that's where the transformation logic belongs.
-
-### PagerDuty
-
-Events API v2 with automatic `trigger` / `resolve` action selection.
-Every stack gets two independent incident streams so a check failure
-never stomps a real drift incident (and vice versa):
-
-| Dedup key | Triggered by | Resolved by |
-|---|---|---|
-| `reeve-drift-<project>/<stack>` | `drift_detected`, `drift_ongoing` | `drift_resolved` |
-| `reeve-drift-check::<project>/<stack>` | `check_failed` | `check_recovered` |
-
-Subscribing to `check_failed` implicitly subscribes `check_recovered`, so
-check-failure incidents always resolve once the check heals.
-
-```yaml
-- type: pagerduty
-  integration_key: ${env:PD_CHANGE_EVENTS_KEY}
-  on: [drift_detected, drift_resolved]
-  severity_map:
-    prod: error
-    staging: warning
-    dev: info
-```
-
-### GitHub issue
-
-One open issue per drifted stack, identified by a hidden marker
-(`<!-- reeve:drift:<project>/<stack> -->`). On re-runs, the issue body
-updates. On `drift_resolved`, the issue closes.
-
-Check failures get their own issue per stack (marker
-`<!-- reeve:drift-check:<project>/<stack> -->`, title
-`drift check failed: <project>/<stack>`), opened on `check_failed` and
-closed on `check_recovered` — they never overwrite the drift issue.
-Subscribing to `check_failed` implicitly subscribes `check_recovered`.
-
-```yaml
-- type: github_issue
-  on: [drift_detected, drift_resolved]
-  labels: [drift, infra]
-  assignees: ["@org/sre"]
-```
-
-Requires `GITHUB_TOKEN` with `issues: write`.
-
-### OTEL annotation
-
-Emits an annotation event to the annotations module (Grafana / Datadog /
-Dash0). See [configuration.md](configuration.md#observabilityyaml).
-
-```yaml
-- type: otel_annotation
-  on: [drift_detected, drift_resolved]
-```
+See the [notification destination recipes](notifications.md#destination-recipes) for Slack, raw webhooks, PagerDuty trigger/resolve pairs, GitHub issues, and OTEL annotations.
+Keep channel configuration in one place to avoid duplicate delivery.
 
 ## Reports
 
@@ -660,7 +438,26 @@ Expected for any scope that hasn't been bootstrapped. Record the
 baseline explicitly:
 
 ```bash
-reeve drift bootstrap --pattern "prod/*"
+reeve drift bootstrap --pattern "*/prod"
 ```
 
 Subsequent drift runs compare against it; `require_manual` stays set.
+
+## Optional configuration fields
+
+The [drift schema](../internal/config/schemas/drift.go) defines the complete field set.
+Common controls are:
+
+| Field | Default / meaning | Detail |
+| --- | --- | --- |
+| `behavior.max_parallel_stacks` | Bounds concurrent checks. | Tune for provider/API limits. |
+| `behavior.timeout_per_stack` | Unset means unbounded by this setting. | A timeout is a check error and is not retried. |
+| `behavior.retry_on_transient_error` | `0` retries. | Network/auth-expiry retries; cancellation stops them. |
+| `behavior.renotify_after` | Unset means no damping. | [Flap damping](#flap-damping-behaviorrenotify_after). |
+| `behavior.exit_on` | Each condition defaults to `false`. | Set `run_error: true` to fail CI on a check error. |
+| `freshness.enabled`, `freshness.window` | Opt-in freshness filtering. | Failed or actively drifted stacks are rechecked. |
+| `classification` | No configured filters. | [Noise filtering](#classification-drift-noise-filtering). |
+| `permanent_suppressions` | None. | [Suppressions](#suppressions). |
+
+`baseline_max_age`, `respect_failures`, and unmanaged-resource `missing_state` have [reserved limitations](configuration.md#reserved-fields).
+Leave them out of a starter configuration.

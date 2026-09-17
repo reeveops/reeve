@@ -15,7 +15,7 @@ with a remediation plan within 7 days of acknowledgement.
 In scope:
 
 - The `reeve` binary and every package under `internal/` and `cmd/`.
-- The `action.yml` GitHub Action.
+- The `action.yml` GitHub Action and maintained reusable workflows.
 - Release tooling (goreleaser config, signing).
 - Auth provider adapters (`internal/auth/providers/*`) - especially
   anything involving credential exchange, token handling, or privilege
@@ -38,21 +38,19 @@ Out of scope:
 
 ## Our posture
 
-- **Zero-trust auth by default.** Federated credentials (OIDC, WIF,
-  Azure federated) acquire 1-hour tokens. Long-lived secrets are a
-  flagged opt-in (`env_passthrough` with
-  `i_understand_this_is_dangerous: true`).
-- **No telemetry.** reeve emits OpenTelemetry traces/metrics only when
+- **Federation preferred.** OIDC/WIF/federated providers acquire short-lived credentials with provider-configured lifetimes.
+  Secret managers and explicit environment mappings can supply longer-lived values; Reeve does not rotate those secrets.
+- **No phone-home.** reeve emits OpenTelemetry traces/metrics only when
   `observability.yaml` is present and enabled, and only to endpoints
   the user configures. reeve never phones home.
-- **Fork PR deny-by-default.** Fork PRs receive dry-run-only
-  credentials. Opt-in via `shared.yaml: apply.allow_fork_prs: true` is
-  an explicit, documented risk.
-- **All user-visible output runs through `internal/core/redact`.**
+- **Fork apply denied by default.** `apply.allow_fork_prs` gates apply and writing refresh; it does not reduce the permissions of preview credentials.
+  Configure preview identities explicitly and isolate untrusted workload execution; see [fork policy](docs/auth.md#fork-pr-policy).
+- **User-visible engine output is redacted.**
   Credential literals are registered with the redactor at acquire time
-  - leaks through engine stdout are scrubbed.
+  - known literal values are scrubbed from engine stdout.
+  Redaction does not guarantee masking transformed values; opaque saved plans remain sensitive and require protected storage.
 - **Audit log is write-once.** Entries are created with
-  `If-None-Match` preconditions. Overwrites are rejected.
+  `If-None-Match` preconditions. Reeve rejects overwrites, but bucket administrators can still delete objects unless storage policy prevents it.
 
 ## Supported versions
 
@@ -60,10 +58,13 @@ Only the latest release line receives security fixes. Fixes ship as a
 new release, not as backports.
 
 | Version | Supported |
-| ------- | --------- |
-| 0.2.x (latest release) | Yes |
-| < 0.2 | No - upgrade |
-| `<branch>-<sha>` edge prereleases | Not for production - signed but unversioned per-commit builds; pin a release |
+| --- | --- |
+| Latest stable release | Receives security fixes as a new release; no older-line backports. |
+| Older stable releases | Upgrade to the latest stable release. |
+| Exact-commit candidates and branch prereleases | Beta evaluation builds; report issues, but do not assume a stable-release support commitment. |
+
+See [Releases](https://github.com/reeveops/reeve/releases/latest) for the current stable version.
+A source pin makes a candidate reproducible; it does not turn that candidate into a supported stable release.
 
 ## Supply-chain controls
 
@@ -74,9 +75,8 @@ new release, not as backports.
   signed - verify a tarball's sha256 against the signed `checksums.txt`.
 - **Edge signing.** The per-push `<branch>-<sha>` prereleases that back the
   GitHub Action fast-path are cosign keyless-signed the same way
-  (`checksums.txt.bundle` alongside `checksums.txt`). The action verifies the
-  signature when `cosign` is available and rejects a signed-but-tampered
-  binary; `REEVE_REQUIRE_SIGNATURE=1` makes a valid signature mandatory. Edge
+  (`checksums.txt.bundle` alongside `checksums.txt`). The action requires cosign and a valid signature before using a downloaded binary.
+  Missing or failed verification falls back to building the checked action source. Edge
   prereleases are unversioned and follow a branch - pin `@vX.Y.Z` for
   reproducible, supported distribution.
 - **Vulnerability scanning on every PR:**

@@ -3,7 +3,7 @@
 ## Responsibility
 
 Locks, run artifacts, drift state, audit logs. The user owns the bucket -
-reeve never sees the data after delivery.
+Reeve writes and reads this state during later invocations; no Reeve-hosted service receives it.
 
 ## Adapters (v1)
 
@@ -12,31 +12,28 @@ for all core components.
 
 ## Layout
 
-```
-<bucket>/reeve/
-├── locks/
-│   └── {project}/{stack}.json
+```text
+<configured bucket prefix>/
+├── locks/{project}/{stack}.json
 ├── runs/
-│   └── pr-{number}/
-│       ├── {run-id}/
-│       │   ├── manifest.json
-│       │   ├── {project}-{stack}/
-│       │   │   ├── preview.json
-│       │   │   ├── plan.bin
-│       │   │   ├── summary.json
-│       │   │   └── stdout.log
-│       │   └── latest -> {run-id}
-│       └── applied/{sha}.json       # written after a clean apply
+│   ├── pr-{number}/{run-id}/manifest.json
+│   ├── pr-{number}/{run-id}/plans/{encoded-stack-ref}.plan
+│   ├── pr-{number}/applied/{sha}.json
+│   └── local/{run-id}/...
 ├── drift/
-│   ├── runs/{run-id}/
-│   │   ├── manifest.json
-│   │   ├── results/{project}-{stack}.json
-│   │   └── report.md
+│   ├── runs/{run-id}/manifest.json
+│   ├── runs/{run-id}/results/{project}-{stack}.json
+│   ├── runs/{run-id}/report.md
 │   ├── state/{project}/{stack}.json
-│   └── suppressions/{project}/{stack}.json
-├── notifications/pr-{number}/slack.json
+│   ├── suppressions/{project}/{stack}.json
+│   └── pending-events/...
+├── notifications/pr-{number}/...
 └── audit/{year}/{month}/{day}/{run-id}.json
 ```
+
+The manifest contains stack summaries; saved plans are opaque engine artifacts and may contain sensitive values.
+Storage controls and retention protect those artifacts; they cannot be redacted and remain executable.
+
 
 ## Conditional writes
 

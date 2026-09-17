@@ -2,7 +2,7 @@
 
 Break-glass is reeve's opt-in emergency apply: it skips the approvals gate
 (and freeze windows, by default) in exchange for a **mandatory
-justification** and a **loud, immutable audit trail**. It exists so the 3am
+justification** and a **visible, write-once audit trail**. It exists so the 3am
 "prod is down and both approvers are asleep" fix happens *inside* reeve —
 scoped, constrained, and recorded — instead of from someone's laptop with
 no gates at all.
@@ -57,9 +57,6 @@ break_glass:
       - myorg/sre
     codeowners: true               # anyone CODEOWNERS makes an owner of a changed path
     anyone: false                  # any actor (justification + audit still apply)
-    vcs_bypass: false              # GitHub ruleset bypass actors — NOT YET SUPPORTED (see below)
-    # groups:                      # phase 2 — parsed but rejected today
-    #   - "group:aws_iam:oncall"
   override_freeze: true            # default true; false keeps freezes binding
 ```
 
@@ -121,9 +118,8 @@ self-add cannot happen quietly.
 > **Known and intentional.** Same-PR self-authorization is a deliberate
 > tradeoff: at 3am the responder who needs to act may be the only one who
 > can grant access, and blocking that would defeat the purpose of
-> break-glass. It is safe *because* it is loud — every self-add is flagged
-> and written to the immutable audit trail. This is a documented property,
-> not a gap.
+> break-glass. Every self-add is flagged and recorded, but an audit trail does not prevent an unauthorized change.
+> Decide whether this availability tradeoff fits your trust model and consider `reject_self_authorization` below.
 
 ### Locking it down (`reject_self_authorization`)
 
@@ -197,3 +193,8 @@ Beyond the audit file:
   logins once an org-scoped credential path exists.
 - **Freeze interactive confirm** — an extra confirmation round-trip before
   overriding a freeze window.
+
+## Related operations
+
+[Operations](operations.md#preview-history-recovery) explains ordinary history recovery and artifact inspection.
+[PR workflow](pull-requests.md) covers normal approvals and apply commands.

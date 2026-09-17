@@ -277,8 +277,7 @@ preconditions:
 	b.WriteString(`
 apply:
   trigger: comment            # comment (default): apply on /reeve apply | merge: apply on PR merge
-  allow_fork_prs: false       # fork PRs stay dry-run only
-  # auto_ready: true          # notify for approval when a draft PR becomes ready
+  allow_fork_prs: false       # deny fork applies; preview permissions come from auth bindings
 
 # Break-glass: authorize an emergency apply that bypasses gates, with a
 # recorded reason and audit trail. Off unless configured. Example:

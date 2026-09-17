@@ -31,13 +31,12 @@ it goes to whatever endpoint the user configured.
 Stack names on a large monorepo blow up OTEL cardinality. Config flag:
 
 ```yaml
-observability:
-  otel:
-    stack_cardinality: hash   # allow | hash | drop
+otel:
+  stack_cardinality: hash   # allow | hash | drop
 ```
 
 - `hash` (default): emit a stable 64-bit fingerprint of `{project}/{stack}`
-  as the label. Dashboards can group without cardinality explosion.
+  as the label, hiding the raw name without reducing the number of distinct stack labels.
 - `allow`: raw stack names (opt-in for small deployments).
 - `drop`: no stack label at all.
 

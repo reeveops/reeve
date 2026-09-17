@@ -30,7 +30,7 @@ config_type: <type>
 
 Exactly one file per `config_type`. Multiple `engine` files (each with a
 unique `engine.type`) parse individually, but validation rejects more
-than one - reeve currently supports one engine per repo; multi-engine
+than one - reeve currently supports one engine per configured root; multi-engine
 routing is future work.
 
 ## Validation
@@ -39,7 +39,7 @@ routing is future work.
 - Schema validation per `config_type` against Go structs in
   `internal/config/schemas/`.
 - `version` is per-file - breaking changes to any schema bump only that
-  file's version. Migration handled by `reeve migrate-config` (Phase 10).
+  file's version. Migration is handled by `reeve migrate-config`.
 
 ## User config
 
@@ -47,8 +47,8 @@ routing is future work.
 No overlap with repo config fields. CLI flags override user config overrides
 defaults.
 
-`user.yaml` in v1 carries only rendering and local-auth preferences.
-Single-field concerns are kept to env vars.
+`user.yaml` currently reserves a header-only schema and does not implement rendering/local-auth preferences.
+Use the documented command flags and auth bindings for those behaviors.
 
 ## CLI / config parity
 

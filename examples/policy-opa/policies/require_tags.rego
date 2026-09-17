@@ -1,27 +1,32 @@
 package main
 
-# Every production stack must declare at least one resource tagged with
-# cost-center and owner. The reeve-generated plan JSON carries `env` and
-# `counts`; richer policies need to read the engine's own plan artifact.
+import rego.v1
 
-deny[msg] {
-  input.env == "prod"
-  input.counts.add + input.counts.change > 0
-  not plan_has_cost_center
-  msg := sprintf("prod stack %s/%s: new/changed resources require cost-center tag", [input.project, input.stack])
+# This recipe accepts Terraform/OpenTofu JSON, not Pulumi output.
+deny contains "expected a Terraform/OpenTofu plan.resource_changes array" if {
+    input.env == "prod"
+    not valid_plan
 }
 
-deny[msg] {
-  input.env == "prod"
-  input.counts.add + input.counts.change > 0
-  not plan_has_owner
-  msg := sprintf("prod stack %s/%s: new/changed resources require owner tag", [input.project, input.stack])
+deny contains sprintf("%s: required tag %s is missing or empty", [resource.address, tag]) if {
+    input.env == "prod"
+    some resource in input.plan.resource_changes
+    resource.mode == "managed"
+    resource.type == "aws_instance"
+    resource.change.after != null
+    some tag in {"cost-center", "owner"}
+    tags := object.get(resource.change.after, "tags", null)
+    not valid_tag(tags, tag)
 }
 
-plan_has_cost_center {
-  contains(input.plan_summary, "cost-center")
+valid_plan if {
+    is_object(input.plan)
+    is_array(input.plan.resource_changes)
 }
 
-plan_has_owner {
-  contains(input.plan_summary, "owner")
+valid_tag(tags, tag) if {
+    is_object(tags)
+    value := tags[tag]
+    is_string(value)
+    trim_space(value) != ""
 }

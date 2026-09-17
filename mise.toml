@@ -184,3 +184,11 @@ esac
 [tasks.ci]
 description = "Run the full CI check locally (fmt + vet + lint + security + test)"
 depends = ["fmt", "vet", "lint", "security", "test"]
+
+[tasks.docs-check]
+run = "go test ./cmd/reeve -run '^TestDocumentation' -count=1"
+description = "Validate documentation links, examples, selectors, and workflow inputs"
+
+[tasks.policy-example]
+run = "bash examples/policy-opa/check.sh"
+description = "Exercise synthetic policy fixtures (Conftest 0.70.0 and Python 3 required)"

@@ -34,7 +34,7 @@ into `openspec/specs/`.
 
 ## Principles
 
-1. **No control plane.** No server, no SaaS, no telemetry. Ever.
+1. **No control plane.** No server, no SaaS, and no phone-home analytics. Optional telemetry goes only to user-configured destinations.
 2. **Pure core, effectful edges.** `internal/core/*` imports only stdlib
    and sibling core packages. Enforced by `depguard` in `.golangci.yml`.
 3. **Small interfaces at use-sites.** No giant central interface.
@@ -58,10 +58,19 @@ into `openspec/specs/`.
 
 ## Docs
 
-- Nothing longer than 2 sentences; say more with less.
-- No qualifier language. State the facts.
-- Bullets over prose.
-- No em dashes.
+- Start with the task and expected result, then link optional detail.
+- Use short connected paragraphs, ordered steps, and tables where they help.
+- Keep defaults, limitations, examples, and current specs aligned with implementation.
+- Keep one canonical explanation and link to deeper scenarios; do not duplicate walkthroughs.
+- Treat reeve-test as an evolving harness and cite actual scenario coverage and source pins.
+
+### Documentation validation
+
+Run `mise run docs-check` for local links, heading anchors, complete example configurations, workflow inputs, and representative stack/auth selectors.
+Run `mise run policy-example` for the synthetic Conftest recipe; it needs Conftest 0.70.0 and Python 3.
+
+Behavior changes should update the current spec, relevant guide/reference, and affected examples together.
+Keep historical proposals separate, and record the source commit/run behind screenshots and acceptance claims.
 
 ## Dev setup
 
