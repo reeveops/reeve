@@ -158,6 +158,64 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
+// ListMetadata returns metadata already present in flat-list responses.
+func (s *Store) ListMetadata(ctx context.Context, prefix string) ([]reeveblob.ListedObject, error) {
+	fullPrefix := s.fullKey(prefix)
+	pager := s.client.ServiceClient().NewContainerClient(s.container).NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+		Prefix: &fullPrefix,
+	})
+	var out []reeveblob.ListedObject
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if page.Segment == nil {
+			continue
+		}
+		for _, item := range page.Segment.BlobItems {
+			if item.Name == nil {
+				continue
+			}
+			listed := reeveblob.ListedObject{Key: strings.TrimPrefix(*item.Name, s.prefix)}
+			if item.Properties != nil {
+				if item.Properties.ETag != nil {
+					listed.Version = strings.Trim(string(*item.Properties.ETag), `"`)
+				}
+				if item.Properties.LastModified != nil {
+					listed.LastModified = item.Properties.LastModified.Unix()
+				}
+				if item.Properties.ContentLength != nil {
+					listed.Size = *item.Properties.ContentLength
+				}
+			}
+			out = append(out, listed)
+		}
+	}
+	return out, nil
+}
+
+// DeleteIfMatch removes key only if its ETag still matches version.
+func (s *Store) DeleteIfMatch(ctx context.Context, key, version string) error {
+	if version == "" {
+		return reeveblob.ErrPreconditionFailed
+	}
+	etag := azcore.ETag(`"` + version + `"`)
+	conds := &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfMatch: &etag}}
+	blobCli := s.client.ServiceClient().NewContainerClient(s.container).NewBlobClient(s.fullKey(key))
+	_, err := blobCli.Delete(ctx, &blob.DeleteOptions{AccessConditions: conds})
+	if err != nil {
+		if isNotFound(err) {
+			return reeveblob.ErrNotFound
+		}
+		if isPreconditionFailed(err) {
+			return reeveblob.ErrPreconditionFailed
+		}
+		return err
+	}
+	return nil
+}
+
 // isNotFound reports whether err means "the blob is not there", which the
 // lock store reads as "this lock is free". Getting that wrong on a
 // transient error hands out a lock someone else already holds, so the
