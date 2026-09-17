@@ -83,6 +83,7 @@ func (s *retentionCountingStore) DeleteIfMatch(_ context.Context, key, version s
 }
 
 func TestPruneRunArtifactsUsesListingMetadata(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(10_000, 0)
 	store := &retentionCountingStore{
 		objects: []blob.ListedObject{

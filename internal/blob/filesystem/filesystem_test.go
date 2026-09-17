@@ -16,6 +16,7 @@ import (
 )
 
 func TestContract(t *testing.T) {
+	t.Parallel()
 	blobtest.RunContract(t, blobtest.Subject{
 		NewStore: func(t *testing.T) blob.Store {
 			t.Helper()

@@ -287,6 +287,10 @@ Run `reeve maintenance run` on a schedule to prune artifacts under `runs/`.
 - Go duration string; default `720h` (1 month).
 - `0` or negative disables pruning.
 - Age-based only. Merged-PR cleanup needs VCS wiring reeve does not have, so artifacts age out.
+- Remote stores use object age and version from provider listings without downloading artifact content.
+- Deletes require the listed version. An artifact replaced after listing is preserved.
+- Missing metadata or conditional-delete support stops the retention pass instead of falling back to an unsafe delete.
+- S3-compatible endpoints are probed before the first retention delete. An unsupported capability or failed probe stops the pass before reeve deletes a user object.
 
 ### Approval rule merging
 

@@ -9,6 +9,7 @@ import (
 )
 
 func TestContract(t *testing.T) {
+	t.Parallel()
 	bucket := os.Getenv("REEVE_S3_CONTRACT_BUCKET")
 	if bucket == "" {
 		t.Skip("REEVE_S3_CONTRACT_BUCKET is not set")
