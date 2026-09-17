@@ -47,6 +47,49 @@ POST/PATCH retries only on 429 or a secondary rate limit
 (403 + `Retry-After`), where GitHub documents the request was rejected
 before processing; any other non-2xx surfaces unchanged.
 
+## Comment lookup reuse
+
+The GitHub adapter MUST reuse one paginated issue-comment snapshot per PR for
+marker lookup and stale-part cleanup within an invocation. Successful creates,
+edits, and stale-part deletes MUST update that snapshot without mutating slices
+or comment values already returned to callers.
+
+Comment approval evaluation MUST fetch a fresh paginated snapshot at the gate.
+
+#### Scenario: Repeated marker updates
+
+- **WHEN** one invocation upserts the same or different markers on one PR
+- **THEN** the adapter lists that PR's comments once and reuses the snapshot
+
+#### Scenario: A cached comment was deleted
+
+- **WHEN** an edit by cached comment ID returns HTTP 404
+- **THEN** the adapter discards the snapshot, rediscovers the marker, and
+  performs one edit or create attempt against the current state
+
+#### Scenario: A comment approval changes during apply
+
+- **GIVEN** an earlier status update populated the issue-comment cache
+- **WHEN** the apply gate evaluates comment approvals
+- **THEN** the adapter fetches current comments from GitHub
+- **AND** an edited or deleted approval does not survive through the cache
+
+## Immutable PR workload identity
+
+The maintained action MUST resolve and checkout a full PR head commit SHA.
+The CLI MUST compare that identity with PR metadata before using it for gates or artifacts.
+
+#### Scenario: Event ref moves before checkout
+
+- **WHEN** an event identifies a PR whose head ref can move
+- **THEN** the action checks out the immutable head SHA resolved for that invocation
+- **AND** it verifies the working tree before credential or engine setup
+
+#### Scenario: Checked-out head no longer matches
+
+- **WHEN** the current PR head differs from the action-supplied checkout SHA
+- **THEN** PR commands fail closed instead of replacing the artifact identity
+
 ## GitHub Enterprise Server
 
 The adapter honors `GITHUB_API_URL` (set by the Actions runner on both

@@ -209,10 +209,77 @@ runners start empty, so locks don't persist across runs.
 ```yaml
 permissions:
   contents: read
+  checks: read            # required-check preconditions
   pull-requests: write      # upsert PR comment
   issues: write             # /reeve apply via issue_comment; github_issue drift channel
   id-token: write           # only when using aws_oidc / gcp_wif / azure_federated
 ```
+
+### Shared workflow modes
+
+- Use `mode: gitops` for pull request previews and commands.
+- Use `mode: drift` from a scheduled or manual workflow for drift detection.
+- Use `mode: maintenance` from a trusted schedule or manual workflow for lock reaping and artifact retention.
+
+```yaml
+jobs:
+  reeve:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: gitops
+```
+
+The shared workflow uses the composite action from the same pinned Reeve commit.
+Set `pulumi_version`, `opentofu_version`, or `terraform_version` to install the workload CLI after event classification.
+PR jobs resolve an immutable head SHA and verify it before authentication, engine setup, and Reeve execution.
+
+The standard `reeve` caller job publishes the stable `reeve / Reeve` check for branch protection.
+Reeve derives a custom caller check name from the current run; `self_check_names` remains available for nonstandard check publishers.
+
+The shared workflow accepts one `command_prefix` so unrelated comments skip before runner assignment.
+Use the composite action directly when multiple prefixes are required.
+
+The shared workflow inherits the caller's permissions so GitOps and drift callers can grant different minimum sets.
+Use the permissions shown above for GitOps and omit PR write access from drift callers.
+
+Named secrets include `reeve_token` and `slack_token`.
+Configure engine and state credentials through the federated or secret-manager providers in `.reeve/auth.yaml`.
+
+The exact-commit self reference requires GitHub.com and runner 2.336.0 or newer.
+GHES users can keep using the composite action directly until GitHub adds self references there.
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  id-token: write
+
+jobs:
+  drift:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: drift
+      drift_schedule: prod
+```
+
+Drift callers may set `drift_schedule`, `drift_pattern`, or `drift_if_stale`.
+Schedule and pattern are mutually exclusive; stale-only filtering composes with either.
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  maintenance:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: maintenance
+```
+
+Maintenance mode installs no IaC engine and runs only on `schedule` or `workflow_dispatch`.
+Grant `id-token: write` only when bucket access uses federation.
 
 ### Event triggers
 
@@ -222,9 +289,12 @@ reeve expects these events:
 - `pull_request` (`ready_for_review`) - fires `ready` (notifies for approval when a plan has succeeded)
 - `pull_request` (any other action, e.g. `labeled`, `assigned`, `edited`) - no-op
 - `pull_request_review` (`submitted`, state `approved`) - fires `approved` (Slack status update), **only** when the action input `run-on-approval` is `"true"`; skipped by default since the apply gate re-checks approvals anyway
-- `issue_comment` (`created`, first word matches a `command-prefix` entry - default `/reeve` only; `@reeve` is a real person's GitHub account and is no longer accepted by default - followed by `apply` (or `up`), `ready`, `preview` (or `plan`), `approve`, or `help`) - fires respective command; comments authored by bots (user type `Bot` or login ending in `[bot]`) are always skipped to prevent self-trigger loops. `approve` fires `approved` (the Slack "ready to apply" refresh) and only counts as an approval when the opt-in `pr_comment` source is enabled in `approvals.sources`; the apply gate re-reads the comment and re-checks `author_association` at apply time
+- `issue_comment` (`created`, comment begins with a `command-prefix` entry - default `/reeve` only; `@reeve` is a real person's GitHub account and is no longer accepted by default - followed by `apply` (or `up`), `ready`, `preview` (or `plan`), `approve`, or `help`) - fires respective command; comments authored by bots (user type `Bot` or login ending in `[bot]`) are always skipped to prevent self-trigger loops. `approve` fires `approved` (the Slack "ready to apply" refresh) and only counts as an approval when the opt-in `pr_comment` source is enabled in `approvals.sources`; the apply gate re-reads the comment and re-checks `author_association` at apply time
 - `schedule` - fires `drift run`
 - `workflow_dispatch` - manual re-runs
+
+The composite action classifies the event before restoring a binary, checking out code, authenticating, or installing an engine.
+Rejected comments, reviews, and PR actions stop after that classifier.
 
 For run coalescing, use a `concurrency` group keyed per PR with
 `cancel-in-progress` limited to preview runs: previews never take apply
@@ -308,7 +378,7 @@ overriding the workflow's default token.
 
 ## Distribution
 
-Tagged releases (`vX.Y.Z`) ship per-platform tarballs with a
+Tagged releases (`vX.Y.Z` and semantic-version prereleases) ship per-platform tarballs with a
 `checksums.txt` signed via cosign keyless, plus a container image on GHCR
 and a Homebrew cask push to `reeveops/homebrew-tap` - all produced by
 goreleaser from `.github/workflows/release.yml`. Building from source
@@ -320,22 +390,23 @@ The composite action resolves its binary in three tiers, cache first:
 
 | Pin                 | Binary source                                                                    |
 | ------------------- | -------------------------------------------------------------------------------- |
-| `@vX.Y.Z`           | Release tarball, verified against the release's cosign-signed `checksums.txt`    |
-| `@master` / `@next` | Newest per-push `<branch>-<sha>` prerelease binary, verified against its checksum + cosign signature (auto-fallback to source build) |
-| anything else       | Built from source on the runner (SHA pins, branches, forks)                      |
+| `@vX.Y.Z[-pre]`     | Release tarball, verified against the release's cosign-signed `checksums.txt`    |
+| `@master` / `@next` | Source-matched per-push prerelease, verified against its checksum and cosign signature |
+| full commit SHA     | That commit's retained source-matched prerelease, with source-build fallback     |
+| anything else       | Built from source on the runner (branches and forks)                             |
 
-A per-runner cache keyed `reeve-<os>-<arch>-<source hash>` fronts all
-three paths; only a cache miss triggers a download or build. The edge
-assets are published by `.github/workflows/edge-build.yml` on every push
-to `master`/`next` as a per-commit prerelease tagged `<branch>-<sha>`
-(the newest ten are kept). The action resolves the newest such prerelease,
-verifies its `checksums.txt` and keyless `checksums.txt.bundle`, then installs
-the binary; any failure silently
-falls back to a source build. Because it takes the *newest* prerelease, an
-edge binary can come from a slightly newer commit than the pinned action
-source. Prebuilt binaries save the ~30s+ Go toolchain + build cost on cache
-misses. For reproducible, version-pinned, always-signed distribution pin
-`@vX.Y.Z` (or a commit SHA, which always builds from the pinned source).
+A cache keyed `reeve-bin-v2-<action repo>-full-<os>-<arch>-<source hash>`
+fronts all three paths. Only a cache miss triggers a download or build.
+
+The edge workflow publishes a per-commit prerelease on every push to
+`master` and `next`, retaining the newest ten per branch.
+
+The action selects a prerelease whose signed source hash matches the action
+source already on disk, then verifies its checksum and keyless signature.
+Any mismatch or missing retained release falls back to a source build.
+The action saves the verified download or local build before workload checkout.
+
+Prebuilt binaries save the ~30s+ Go toolchain and build cost on cache misses.
 
 ---
 
@@ -433,9 +504,8 @@ Stable within a major version.
 
 reeve writes lock state → apply runs → writes result. If S3 goes away
 between the first two steps, the lock may be held indefinitely from
-reeve's perspective. The opportunistic reaper cleans up based on TTL;
-wait the configured TTL (default 4h), or use `reeve locks explain` +
-`reeve locks reap` once the bucket is back.
+reeve's perspective. Wait the configured TTL (default 4h), then run
+`reeve maintenance run` or `reeve locks reap` once the bucket is back.
 
 ### Clock skew
 

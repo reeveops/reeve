@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +79,7 @@ func TestApplyTriggerComment(t *testing.T) {
 		engine, fv := trigFixture()
 		store, _ := filesystem.New(t.TempDir())
 		in := trigApplyInput(t, engine, fv, "comment", "comment", store)
+		in.CommitSHA = strings.Repeat("f", 40)
 		out, err := Apply(context.Background(), in)
 		if err != nil {
 			t.Fatalf("Apply: %v", err)
@@ -87,6 +89,12 @@ func TestApplyTriggerComment(t *testing.T) {
 		}
 		if len(engine.applied) != 1 || engine.applied[0] != "api/prod" {
 			t.Fatalf("engine.Apply not invoked: %v", engine.applied)
+		}
+		if fv.getPRCalls != 1 {
+			t.Fatalf("PR metadata reads = %d, want 1", fv.getPRCalls)
+		}
+		if !strings.HasSuffix(out.RunID, bgSHA[:7]) {
+			t.Fatalf("run ID %q does not use authoritative PR head %s", out.RunID, bgSHA)
 		}
 	})
 
@@ -106,6 +114,9 @@ func TestApplyTriggerComment(t *testing.T) {
 		}
 		if fv.allComments() != "" {
 			t.Fatalf("no-op must not post any PR comment: %q", fv.allComments())
+		}
+		if fv.getPRCalls != 0 {
+			t.Fatalf("trigger mismatch read PR metadata %d times", fv.getPRCalls)
 		}
 	})
 
@@ -180,6 +191,23 @@ func TestApplyTriggerMergeStillEnforcesApprovals(t *testing.T) {
 	}
 }
 
+func TestApplyRunIdentityUsesAuthoritativeHeadAndAttempt(t *testing.T) {
+	engine, fv := trigFixture()
+	store, _ := filesystem.New(t.TempDir())
+	in := trigApplyInput(t, engine, fv, "comment", "comment", store)
+	in.CommitSHA = strings.Repeat("f", 40)
+	in.RunAttempt = 2
+
+	out, err := Apply(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "apply-3-2-" + bgSHA[:7]
+	if out.RunID != want {
+		t.Fatalf("run ID = %q, want %q", out.RunID, want)
+	}
+}
+
 func TestApplyBlockedGateDoesNotRunPolicyHook(t *testing.T) {
 	engine, fv := trigFixture()
 	fv.approvalsList = nil
@@ -220,6 +248,66 @@ func TestApplyBlockedGateDoesNotRunPolicyHook(t *testing.T) {
 	}
 	if stateAcquired {
 		t.Fatal("state credentials were acquired before independent gates passed")
+	}
+}
+
+func TestApplyReusesCredentialAcrossStateAndStacks(t *testing.T) {
+	provider := &countingCredentialProvider{}
+	registry := auth.NewRegistry()
+	if err := registry.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	stacks := []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+		{Project: "worker", Path: "projects/worker", Name: "prod", Env: "prod"},
+	}
+	engine := &bgEngine{enum: stacks}
+	fv := &bgVCS{
+		changed: []string{"projects/api/main.ts", "projects/worker/main.ts"}, headSHA: bgSHA, repoPrivate: true,
+		approvalsList: []approvals.Approval{{Source: "pr_review", Approver: "reviewer", CommitSHA: bgSHA, Pinned: true}},
+	}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifest(t.Context(), store, 21, "preview-1", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Env: "prod", Status: summary.StatusPlanned},
+		{Project: "worker", Stack: "prod", Env: "prod", Status: summary.StatusPlanned},
+	}, bgSHA); err != nil {
+		t.Fatal(err)
+	}
+	in := ApplyInput{
+		PRNumber: 21, TriggerSource: "comment", CommitSHA: bgSHA, RunNumber: 3,
+		CIRunURL: "https://ci.example/run/3", RepoRoot: "/nope", RepoFull: "org/repo", Actor: "alice",
+		Engine: engine,
+		Config: &schemas.Engine{Engine: schemas.EngineBody{
+			Type: "pulumi", State: schemas.EngineState{AuthProvider: "shared"},
+			Stacks: []schemas.StackDecl{
+				{Project: "api", Path: "projects/api", Stacks: []string{"prod"}},
+				{Project: "worker", Path: "projects/worker", Stacks: []string{"prod"}},
+			},
+		}},
+		Shared: &schemas.Shared{Bucket: schemas.BucketConfig{Type: "filesystem"}},
+		AuthConfig: &schemas.Auth{
+			Providers: map[string]schemas.ProviderYAML{"shared": {Type: "test"}},
+			Bindings: []schemas.BindingYAML{{
+				Match: schemas.BindingMatch{Stack: "*/*", Mode: "apply"}, Providers: []string{"shared"},
+			}},
+		},
+		AuthRegistry: registry, Blob: store, Locks: blocks.New(store), VCS: fv, AuditWriter: audit.NewWriter(store),
+	}
+	out, err := Apply(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Failed || out.Blocked || len(engine.applied) != 2 {
+		t.Fatalf("apply result = %+v, applied = %v", out, engine.applied)
+	}
+	if provider.acquires.Load() != 1 {
+		t.Fatalf("credential acquisitions = %d, want 1", provider.acquires.Load())
+	}
+	if provider.cleanups.Load() != 1 {
+		t.Fatalf("credential cleanups = %d, want 1", provider.cleanups.Load())
 	}
 }
 

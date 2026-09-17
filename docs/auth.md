@@ -89,6 +89,9 @@ The constructed environment contains:
 - `HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` from an isolated CI home or the existing local environment.
 - Credentials selected by auth bindings for the current stack and mode.
 - Credentials selected by `engine.state.auth_provider` for backend access.
+- `PULUMI_CONFIG_PASSPHRASE` when `engine.state.secrets_provider.type` is `passphrase` and a configured value exists.
+- A state auth provider may supply the variable through a secret manager or acknowledged `env_passthrough` mapping.
+- Reeve never copies the controller's ambient passphrase or expands an environment reference from engine config.
 - `TF_IN_AUTOMATION=1` for Terraform and OpenTofu commands.
 - `PULUMI_EXPERIMENTAL=true` for Pulumi saved-plan commands.
 
@@ -100,9 +103,12 @@ Apply waits until approvals, checks, preview, lock, freeze, fork, draft, and pol
 
 Stack credentials override state credentials when both explicitly provide the same environment key.
 
-- Each acquired credential set is cleaned after use.
-- Drift cleans an expired credential set before acquiring its replacement.
-- Drift cleans the replacement credential set after the final attempt.
+- One command reuses each provider credential across state access and every matching stack.
+- Concurrent requests for one provider share one acquisition.
+- Concurrent waiters share one acquisition failure; a later request may retry.
+- A credential expiring within 30 seconds is replaced before a new consumer receives it.
+- Drift invalidates the cached generation before rebinding after an expired-credential failure.
+- Every acquired generation is cleaned once when the command ends, including replaced and invalidated generations.
 
 This boundary prevents accidental ambient inheritance but is not an operating-system sandbox.
 Run approved untrusted code under a separate user, container, VM, or job boundary.

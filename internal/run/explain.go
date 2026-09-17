@@ -36,18 +36,20 @@ type explainVCS interface {
 
 // ExplainInput wires dependencies for a report-only run.
 type ExplainInput struct {
-	PRNumber       int
-	CommitSHA      string
-	CIRunID        int64
-	CIRunURL       string
-	SelfCheckNames []string
-	RepoRoot       string
-	Engine         Engine
-	Config         *schemas.Engine
-	Shared         *schemas.Shared
-	Blob           blob.Store
-	Locks          *blocks.Store
-	VCS            explainVCS
+	PRNumber        int
+	CommitSHA       string
+	ExpectedHeadSHA string
+	CIRunID         int64
+	CIRunURL        string
+	SelfCheckNames  []string
+	RepoRoot        string
+	RepoPath        string // RepoRoot relative to the VCS repository root.
+	Engine          Engine
+	Config          *schemas.Engine
+	Shared          *schemas.Shared
+	Blob            blob.Store
+	Locks           *blocks.Store
+	VCS             explainVCS
 	// StackFilter limits the report to one project/stack ref. Empty covers
 	// every stack the PR maps to.
 	StackFilter string
@@ -82,6 +84,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list changed files: %w", err)
 	}
+	changed, _ = scopeChangedFiles(changed, in.RepoPath)
 	cm := changeMappingFromConfig(in.Config)
 	target := discovery.AffectedDetailed(declared, changed, cm).Stacks
 
@@ -94,7 +97,15 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 		return nil, fmt.Errorf("get pr: %w", err)
 	}
 	commitSHA := in.CommitSHA
-	if pr.HeadSHA != "" {
+	if err := validateExpectedPRHead(in.ExpectedHeadSHA); err != nil {
+		return nil, err
+	}
+	if in.ExpectedHeadSHA != "" {
+		if err := comparePRHead(pr, in.ExpectedHeadSHA); err != nil {
+			return nil, err
+		}
+		commitSHA = in.ExpectedHeadSHA
+	} else if pr.HeadSHA != "" {
 		commitSHA = pr.HeadSHA
 	}
 

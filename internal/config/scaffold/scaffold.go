@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/reeveops/reeve/internal/config"
 	"github.com/reeveops/reeve/internal/core/discovery"
 )
+
+var fullCommitRE = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
 // Approval-mode values for Options.ApprovalMode.
 const (
@@ -67,6 +70,72 @@ type File struct {
 	// fill-only-missing check against an existing .reeve/.
 	ConfigType string
 	Content    []byte
+}
+
+// GitHubWorkflowOptions controls the caller generated for the public reusable
+// workflow.
+type GitHubWorkflowOptions struct {
+	Engine       string
+	Ref          string
+	ApplyTrigger string
+	NeedsOIDC    bool
+}
+
+// RenderGitHubWorkflow produces the GitOps caller for the public reusable
+// workflow. Ref must be a full commit SHA so generated CI never follows a
+// moving branch or tag.
+func RenderGitHubWorkflow(opts GitHubWorkflowOptions) ([]byte, error) {
+	engine := opts.Engine
+	if engine == "" {
+		engine = "pulumi"
+	}
+	if engine != "pulumi" && engine != "terraform" && engine != "tofu" {
+		return nil, fmt.Errorf("unknown engine %q (pulumi | terraform | tofu)", engine)
+	}
+	if !fullCommitRE.MatchString(opts.Ref) {
+		return nil, fmt.Errorf("workflow ref must be a full 40-character commit SHA")
+	}
+
+	versionInput := "pulumi_version: latest"
+	switch engine {
+	case "terraform":
+		versionInput = "terraform_version: latest"
+	case "tofu":
+		versionInput = "opentofu_version: latest"
+	}
+
+	pullRequestTypes := "opened, reopened, synchronize, ready_for_review"
+	if opts.ApplyTrigger == "merge" {
+		pullRequestTypes += ", closed"
+	}
+	idTokenPermission := ""
+	if opts.NeedsOIDC {
+		idTokenPermission = "  id-token: write\n" // #nosec G101 -- GitHub permission name, not a credential.
+	}
+
+	return []byte(fmt.Sprintf(`name: reeve
+
+on:
+  pull_request:
+    types: [%s]
+  merge_group:
+    types: [checks_requested]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  checks: read
+%s  pull-requests: write
+  issues: write
+
+jobs:
+  reeve:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@%s
+    with:
+      mode: gitops
+      %s
+`, pullRequestTypes, idTokenPermission, strings.ToLower(opts.Ref), versionInput)), nil
 }
 
 // Validate rejects option combinations that would render broken config.

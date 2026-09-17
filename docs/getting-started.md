@@ -55,6 +55,12 @@ pre-filled, every optional gate off. Existing `.reeve/` files are never
 overwritten - `init` only fills in missing config types unless you pass
 `--force` (which keeps `*.bak` backups).
 
+Release binaries also write `.github/workflows/reeve.yml` with the detected
+engine and pin the shared workflow to the release's exact source commit.
+Development builds accept the same pin through `--workflow-ref <full-commit-sha>`.
+
+An existing workflow is preserved.
+
 Then check the result:
 
 ```bash
@@ -63,8 +69,8 @@ reeve lint
 
 ### What it wrote
 
-Two files (plus `notifications.yaml` if you configured Slack). You can also
-write these by hand - `reeve init` is just a shortcut.
+Two config files, the GitHub Actions caller, and `notifications.yaml` when you
+configure Slack. You can also write these by hand.
 
 **`.reeve/shared.yaml`** - bucket, approvals, preconditions:
 
@@ -143,9 +149,11 @@ name: reeve
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  merge_group:
+    types: [checks_requested]
   issue_comment:
     types: [created]
-  # Only add pull_request_review if you set run-on-approval: "true" below -
+  # Only add pull_request_review if you set run_on_approval: true below -
   # otherwise the action skips review events, so subscribing to them just
   # burns runner minutes.
   # pull_request_review:
@@ -153,32 +161,33 @@ on:
 
 permissions:
   contents: read
+  checks: read
   pull-requests: write
   issues: write
-  id-token: write
-
-# Coalesce runs per PR. Cancelling an in-flight preview is safe and saves CI:
-# previews never take apply locks (locks are acquired only during apply), so
-# a cancelled preview releases nothing that matters - the next push's preview
-# supersedes it. Applies are different: an apply holds per-stack locks that
-# are released by the run itself, so cancelling one mid-run is dangerous.
-# Hence two groups: pull_request runs (previews) coalesce and cancel each
-# other; comment-dispatched runs (which include /reeve apply) get their own
-# group and are never cancelled - not even by a push that lands mid-apply.
-concurrency:
-  group: reeve-${{ github.event_name == 'pull_request' && 'preview' || 'comment' }}-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   reeve:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: reeveops/reeve@master
-        with:
-          pulumi-version: latest
-          # slack-token: ${{ secrets.SLACK_BOT_TOKEN }}   # optional: enables Slack notifications
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: gitops
+      pulumi_version: latest
 ```
+
+Pin the workflow call to a reviewed full commit SHA.
+The shared workflow owns routing, checkout, caching, tool setup, timeout, and safe preview concurrency.
+For PR work, it checks out one immutable head SHA and verifies the live head before setup and command execution.
+
+Scheduled bucket cleanup uses the same workflow with `mode: maintenance` and runs no IaC engine.
+It executes `reeve maintenance run` for expired locks and configured artifact retention.
+
+Use `opentofu_version` or `terraform_version` instead of `pulumi_version` for an HCL engine.
+Configure engine and state credentials through the federated or secret-manager providers in `.reeve/auth.yaml`.
+`reeve init` adds `id-token: write` when the loaded config declares AWS OIDC, GCP WIF, or Azure federated auth.
+
+It adds the `closed` pull request type only when `apply.trigger` is `merge`.
+
+Keep the caller job ID `reeve` and require the `reeve / Reeve` check in branch protection.
+Reeve derives a custom caller check name from the current run and excludes its prior results from apply gates.
 
 That's it. The action auto-detects the command from the event:
 
@@ -186,6 +195,7 @@ That's it. The action auto-detects the command from the event:
 | -------------------------------------------------- | ------------------------ |
 | `pull_request` (opened / reopened / synchronize)   | `reeve run preview`      |
 | `pull_request` (ready_for_review)                  | `reeve run ready`        |
+| `pull_request` (closed and merged, when enabled)   | `reeve run apply`        |
 | `pull_request` (any other action: labeled, ...)    | silent no-op             |
 | `/reeve ready` comment                             | `reeve run ready`        |
 | `/reeve apply` comment                             | `reeve run apply`        |
@@ -194,6 +204,19 @@ That's it. The action auto-detects the command from the event:
 | `/reeve explain [project/stack]` comment           | `reeve run explain` - report-only why: rules, locks, gate trace |
 | `/reeve help` comment                              | posts available commands |
 | Any other comment, or any bot-authored comment     | silent no-op             |
+
+Event classification runs before binary setup, checkout, authentication, and engine installation.
+Skipped events do not run those setup steps.
+
+### Repository roots and change scope
+
+`--root` may point at a nested infrastructure directory in the checkout.
+Reeve converts repository-relative changed files to paths under that root before preview, apply, refresh, explain, and notification-policy checks.
+
+- Changes outside the configured root select no stacks.
+- Documentation-only or outside-root previews do not open blob storage, acquire engine credentials, initialize an engine session, or dispatch lifecycle notifications.
+- Apply stays bound to the stack set in the preview manifest for the PR head, even if GitHub's live changed-file list moves while the PR is open.
+- The maintained action checks out one immutable PR head and fails if the PR moves before gates, artifacts, apply, or refresh use it.
 
 **`reeve run preview` exit behavior**:
 
@@ -210,12 +233,11 @@ green):
 | `0`  | Every targeted stack applied cleanly or was a no-op — or every stack was **blocked** by preconditions/locks. Blocked is a deliberate non-failure: the gates held the apply back, nothing was attempted, and a later re-run can proceed. |
 | `1`  | One or more stacks **failed** to apply (engine, auth, or lock-storage error), the run was cancelled by a signal, post-apply persistence failed, or the run errored before applying (config, VCS, storage). The error message names the failed stacks. A failed apply never renders as a green check. |
 
-Accepted comment prefixes are configurable via the `command-prefix` input
-(default `"/reeve"`). Mention style (`@reeve apply`) is **not** accepted by
-default: `github.com/reeve` is a real person's account, so every such comment
-pinged someone with no connection to your repo. You can add `@reeve` back —
-`command-prefix: "/reeve,@reeve"` — but a handle your org actually owns is the
-better answer. Comments authored by bots (user type `Bot` or a
+The reusable workflow accepts one `command_prefix` (default `"/reeve"`) so
+unrelated comments skip before GitHub assigns a runner. The composite action
+still accepts multiple comma-separated `command-prefix` values when used
+directly. Mention style (`@reeve apply`) is **not** accepted by default because
+`github.com/reeve` is a real person's account. Comments authored by bots (user type `Bot` or a
 login ending in `[bot]`) are always skipped, so reeve's own PR comments can
 never re-trigger a run.
 
@@ -236,25 +258,22 @@ every stack touched by the changed files.
 
 ### Pinning and binaries
 
-The `uses:` ref decides where the action gets its `reeve` binary. A
-per-runner cache keyed on the action's source hash always comes first - on a
-cache hit nothing is downloaded or built:
+The `uses:` ref decides where the action gets its `reeve` binary. A cache
+keyed by the action repository, build variant, platform, and source hash comes
+first. On a cache hit nothing is downloaded or built:
 
-- **`@vX.Y.Z`** - downloads that release's signed tarball and verifies it
+- **`@vX.Y.Z[-prerelease]`** - downloads that release's signed tarball and verifies it
   against the release's `checksums.txt`.
-- **`@master` / `@next`** - downloads the newest per-push `<branch>-<sha>`
-  prerelease (one is published per commit to that branch). The action verifies
-  the binary against the prerelease's `checksums.txt` and requires its keyless
-  signature (`checksums.txt.bundle`). Because
-  it resolves the *newest* prerelease, the binary may be built from a slightly
-  newer commit than the action source you pinned - the `vX.Y.Z` releases are
-  the reproducible, version-pinned distribution.
-- **Anything else** (a SHA pin, a feature branch, a fork) - builds from
-  source on the runner, as does any download or checksum failure. Fallback
-  is automatic and logged; a missing binary never fails your run.
+- **`@master` / `@next`** - downloads the per-push prerelease whose signed
+  source hash matches the action source already on disk.
+- **A full commit SHA** - downloads that commit's retained prerelease when its
+  signed source hash matches, then falls back to a source build when unavailable.
+- **Anything else** (a feature branch or fork) - builds from source on the
+  runner. Any missing asset or verification failure also falls back safely.
 
 The prebuilt paths skip the Go toolchain setup + compile, saving ~30s+ on
 first runs and cache misses.
+The action publishes a verified download or local build before workload code runs.
 
 ## 5. Move the bucket to real storage
 
@@ -320,7 +339,7 @@ approvals:
       require_all_groups: true    # one from each group, not 2-of-any
 
 locking:
-  ttl: 4h                         # opportunistic reaper cleans up expired locks
+  ttl: 4h                         # maintenance reaps expired locks
   queue: fifo
 ```
 
@@ -360,25 +379,15 @@ permissions:
 
 jobs:
   drift:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with: { repository: reeveops/reeve, path: _reeve }
-      - uses: actions/checkout@v6
-        with: { path: _src }
-      - uses: actions/setup-go@v6
-        with: { go-version-file: _reeve/go.mod }
-      - run: go build -o /usr/local/bin/reeve ./cmd/reeve
-        working-directory: _reeve
-      - uses: pulumi/actions@v6
-        with: { pulumi-version: "3.231.0" }
-      - run: reeve drift run --schedule prod
-        working-directory: _src
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: drift
+      pulumi_version: "3.231.0"
+      drift_schedule: prod
 ```
 
 Configure schedules + channels in `.reeve/drift.yaml` - see [drift.md](drift.md).
+Use `drift_pattern` for a shard or `drift_if_stale: true` to skip fresh stacks.
 
 ## Troubleshooting
 

@@ -2,6 +2,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +14,7 @@ import (
 )
 
 func TestActionRunBlocksContainNoExpressions(t *testing.T) {
-	data := readRepoFile(t, "action.yml")
+	data := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
 	scanner := bufio.NewScanner(strings.NewReader(data))
 	inRun := false
 	runIndent := 0
@@ -35,9 +38,23 @@ func TestActionRunBlocksContainNoExpressions(t *testing.T) {
 	}
 }
 
+func TestPreviewRejectsNegativeParallelism(t *testing.T) {
+	t.Parallel()
+
+	cmd := newRunCmd()
+	cmd.SetArgs([]string{"preview", "--max-parallel-stacks=-1"})
+	err := cmd.Execute()
+	if !errors.Is(err, errInvalidMaxParallelStacks) {
+		t.Fatalf("negative preview parallelism must be rejected, got %v", err)
+	}
+}
+
 func TestWorkflowActionsArePinned(t *testing.T) {
 	sha := regexp.MustCompile(`^[0-9a-f]{40}$`)
-	paths := []string{repoPath(t, "action.yml")}
+	paths := []string{
+		repoPath(t, "action.yml"),
+		repoPath(t, ".github", "actions", "reeve", "action.yml"),
+	}
 	workflows, err := filepath.Glob(repoPath(t, ".github", "workflows", "*.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +77,8 @@ func TestWorkflowActionsArePinned(t *testing.T) {
 				continue
 			}
 			ref := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "uses:")))[0]
-			if strings.HasPrefix(ref, "./") || strings.HasPrefix(ref, "docker://") {
+			// Self-repository refs resolve to the workflow's exact commit.
+			if strings.HasPrefix(ref, "./") || strings.HasPrefix(ref, "$/") || strings.HasPrefix(ref, "docker://") {
 				continue
 			}
 			at := strings.LastIndexByte(ref, '@')
@@ -71,8 +89,131 @@ func TestWorkflowActionsArePinned(t *testing.T) {
 	}
 }
 
+func TestReleaseEmbedsFullCommitForGeneratedWorkflow(t *testing.T) {
+	release := readRepoFile(t, ".goreleaser.yaml")
+	if !strings.Contains(release, "-X main.commit={{.Commit}}") {
+		t.Fatal("release binary must embed the full source commit")
+	}
+	if strings.Contains(release, "main.commit={{.ShortCommit}}") {
+		t.Fatal("short source commits cannot pin a generated workflow")
+	}
+}
+
+func TestReusableWorkflowContract(t *testing.T) {
+	t.Parallel()
+	workflow := readRepoFile(t, ".github", "workflows", "reeve.yml")
+	for _, want := range []string{
+		"workflow_call:",
+		"inputs.mode == 'gitops'",
+		"inputs.mode == 'drift'",
+		"inputs.mode == 'maintenance'",
+		"uses: $/.github/actions/reeve",
+		"github.event.action == 'created'",
+		"startsWith(github.event.comment.body, format('{0} ', inputs.command_prefix))",
+		"!contains(inputs.command_prefix, ',')",
+		"cancel-in-progress:",
+		"opentofu-version:",
+		"terraform-version:",
+		"reeve_token:",
+		"name: Reeve",
+		"REEVE_SELF_CHECK_NAMES:",
+		"source-ref: ${{ job.workflow_sha }}",
+		"source-repository: ${{ job.workflow_repository }}",
+		"drift_schedule:",
+		"drift-schedule: ${{ inputs.drift_schedule }}",
+		"command: maintenance run",
+		"group: reeve-maintenance-${{ github.repository_id }}",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Errorf("reusable workflow is missing %q", want)
+		}
+	}
+	if strings.Contains(workflow, "secrets: inherit") {
+		t.Fatal("reusable workflow must map named secrets")
+	}
+	for _, credential := range []string{
+		"pulumi_access_token",
+		"pulumi_config_passphrase",
+		"terraform_cloud_token",
+		"PULUMI_ACCESS_TOKEN",
+		"PULUMI_CONFIG_PASSPHRASE",
+		"TF_TOKEN_app_terraform_io",
+	} {
+		if strings.Contains(workflow, credential) {
+			t.Errorf("reusable workflow must resolve engine credentials through configured auth providers: found %q", credential)
+		}
+	}
+	if strings.Contains(workflow, "contains(github.event.comment.body") {
+		t.Fatal("reusable workflow must not admit commands quoted inside ordinary comments")
+	}
+	if strings.Contains(workflow, "contains(inputs.command_prefix, ',') ||") {
+		t.Fatal("multiple prefixes must not bypass the pre-runner comment gate")
+	}
+	if strings.Contains(workflow, "pull-requests: write") {
+		t.Fatal("reusable workflow must inherit mode-specific caller permissions")
+	}
+	maintenanceAt := strings.Index(workflow, "  maintenance:")
+	if maintenanceAt < 0 {
+		t.Fatal("reusable workflow is missing maintenance mode")
+	}
+	maintenance := workflow[maintenanceAt:]
+	for _, unwanted := range []string{"pulumi-version:", "opentofu-version:", "terraform-version:"} {
+		if strings.Contains(maintenance, unwanted) {
+			t.Errorf("maintenance mode must not install an IaC engine: found %q", unwanted)
+		}
+	}
+	implementation := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
+	if !strings.Contains(implementation, "persist-credentials: false") {
+		t.Fatal("composite action checkout must not persist credentials")
+	}
+	action := implementation
+	for _, want := range []string{"Install Pulumi CLI", "Install OpenTofu CLI", "Install Terraform CLI"} {
+		if !strings.Contains(action, want) {
+			t.Errorf("composite action is missing %q", want)
+		}
+		if strings.Index(action, "name: Classify event") > strings.Index(action, "name: "+want) {
+			t.Errorf("%s must run after event classification", want)
+		}
+	}
+	for _, want := range []string{"tofu_wrapper: false", "terraform_wrapper: false"} {
+		if !strings.Contains(action, want) {
+			t.Errorf("composite action is missing %q", want)
+		}
+	}
+}
+
+func TestPublicActionForwardsInputs(t *testing.T) {
+	t.Parallel()
+	wrapper := readRepoFile(t, "action.yml")
+	implementation := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
+	if !strings.Contains(wrapper, "uses: $/.github/actions/reeve") {
+		t.Fatal("public action must invoke the pinned internal implementation")
+	}
+	for _, want := range []string{
+		"source-ref: ${{ github.action_ref }}",
+		"source-repository: ${{ github.action_repository }}",
+	} {
+		if !strings.Contains(wrapper, want) {
+			t.Errorf("public action is missing source identity %q", want)
+		}
+	}
+	for _, input := range []string{
+		"command", "root", "pulumi-version", "opentofu-version", "terraform-version",
+		"github-token", "slack-token", "gcp-workload-identity-provider", "gcp-service-account",
+		"extra-args", "drift-schedule", "drift-pattern", "drift-if-stale",
+		"allowed-associations", "command-prefix", "run-on-approval", "log-level",
+	} {
+		if !strings.Contains(implementation, "  "+input+":") {
+			t.Errorf("internal action is missing input %q", input)
+		}
+		if !strings.Contains(wrapper, input+": ${{ inputs."+input+" }}") {
+			t.Errorf("public action does not forward input %q", input)
+		}
+	}
+}
+
 func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
-	script := extractRunReeveScript(t, readRepoFile(t, "action.yml"))
+	script := extractRunReeveScript(t, readRepoFile(t, ".github", "actions", "reeve", "action.yml"))
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "injected")
 	argsPath := filepath.Join(dir, "args")
@@ -91,9 +232,12 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 		"REEVE_INPUT_ROOT":           dir,
 		"REEVE_INPUT_COMMAND":        "lint",
 		"REEVE_INPUT_EXTRA_ARGS":     "$(touch " + marker + ") ; touch " + marker,
-		"REEVE_RUN_ON_APPROVAL":      "false",
 		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER",
 		"REEVE_COMMAND_PREFIXES":     "/reeve",
+		"REEVE_DISPATCH_COMMAND":     "lint",
+		"REEVE_DISPATCH_AUTO_ARGS":   "[]",
+		"REEVE_DISPATCH_UNLOCK_REF":  "",
+		"REEVE_DISPATCH_BREAK_GLASS": "false",
 		"ARGS_OUT":                   argsPath,
 	} {
 		t.Setenv(key, value)
@@ -114,6 +258,425 @@ func TestActionInputsCannotExecuteShellSyntax(t *testing.T) {
 	}
 }
 
+func TestActionDriftScopeInputs(t *testing.T) {
+	tests := []struct {
+		name      string
+		command   string
+		schedule  string
+		pattern   string
+		ifStale   string
+		want      []string
+		wantError bool
+	}{
+		{
+			name:     "named schedule and freshness",
+			command:  "drift run",
+			schedule: "critical fleet",
+			ifStale:  "true",
+			want:     []string{"drift", "run", "--schedule", "critical fleet", "--if-stale"},
+		},
+		{
+			name:    "pattern shard",
+			command: "drift run",
+			pattern: "prod/*",
+			ifStale: "false",
+			want:    []string{"drift", "run", "--pattern", "prod/*"},
+		},
+		{
+			name:      "mutually exclusive scope",
+			command:   "drift run",
+			schedule:  "critical",
+			pattern:   "prod/*",
+			ifStale:   "false",
+			wantError: true,
+		},
+		{
+			name:      "invalid boolean",
+			command:   "drift run",
+			ifStale:   "sometimes",
+			wantError: true,
+		},
+		{
+			name:      "scope on non-drift command",
+			command:   "lint",
+			schedule:  "critical",
+			ifStale:   "false",
+			wantError: true,
+		},
+		{
+			name:      "multiline schedule",
+			command:   "drift run",
+			schedule:  "critical\nother",
+			ifStale:   "false",
+			wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, output, err := runActionDrift(t, tt.command, tt.schedule, tt.pattern, tt.ifStale)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("want error, got args %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("run action: %v\n%s", err, output)
+			}
+			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
+				t.Fatalf("args = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func runActionDrift(t *testing.T, command, schedule, pattern, ifStale string) ([]string, string, error) {
+	t.Helper()
+	script := extractRunReeveScript(t, readRepoFile(t, ".github", "actions", "reeve", "action.yml"))
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	argsPath := filepath.Join(dir, "args")
+	fake := filepath.Join(dir, "reeve")
+	if err := os.WriteFile(eventPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGS_OUT\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// #nosec G204 -- bash executes the repository-owned action script with fixed test inputs.
+	cmd := exec.Command("bash", "-c", script)
+	for key, value := range map[string]string{
+		"GITHUB_WORKSPACE":           dir,
+		"GITHUB_EVENT_NAME":          "workflow_dispatch",
+		"GITHUB_EVENT_PATH":          eventPath,
+		"REEVE_BIN":                  fake,
+		"REEVE_INPUT_ROOT":           dir,
+		"REEVE_INPUT_EXTRA_ARGS":     "",
+		"REEVE_DRIFT_SCHEDULE":       schedule,
+		"REEVE_DRIFT_PATTERN":        pattern,
+		"REEVE_DRIFT_IF_STALE":       ifStale,
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+		"REEVE_DISPATCH_COMMAND":     command,
+		"REEVE_DISPATCH_AUTO_ARGS":   "[]",
+		"REEVE_DISPATCH_UNLOCK_REF":  "",
+		"REEVE_DISPATCH_BREAK_GLASS": "false",
+		"ARGS_OUT":                   argsPath,
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, string(output), err
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		return nil, string(output), err
+	}
+	return strings.Split(strings.TrimSuffix(string(args), "\n"), "\n"), string(output), nil
+}
+
+func TestActionClassifier(t *testing.T) {
+	tests := []struct {
+		name          string
+		eventName     string
+		eventJSON     string
+		command       string
+		runOnApproval string
+		wantRun       bool
+		wantCommand   string
+		wantArgs      []string
+		wantUnlockRef string
+	}{
+		{
+			name:      "ordinary comment",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"looks good","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:      "plain issue command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"number":42},"comment":{"body":"/reeve apply","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:      "bot command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve apply","author_association":"OWNER","user":{"type":"Bot","login":"reeve[bot]"}}}`,
+		},
+		{
+			name:      "unauthorized command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve apply","author_association":"NONE","user":{"type":"User","login":"stranger"}}}`,
+		},
+		{
+			name:      "unknown command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve deploy","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:      "irrelevant pull request action",
+			eventName: "pull_request",
+			eventJSON: `{"action":"labeled","pull_request":{"number":42}}`,
+		},
+		{
+			name:          "review disabled",
+			eventName:     "pull_request_review",
+			eventJSON:     `{"action":"submitted","review":{"state":"approved","author_association":"OWNER"}}`,
+			runOnApproval: "false",
+		},
+		{
+			name:          "authorized review",
+			eventName:     "pull_request_review",
+			eventJSON:     `{"action":"submitted","review":{"state":"approved","author_association":"OWNER"}}`,
+			runOnApproval: "true",
+			wantRun:       true,
+			wantCommand:   "approved",
+		},
+		{
+			name:      "edited command",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"edited","issue":{"pull_request":{}},"comment":{"body":"/reeve apply","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:        "authorized apply flags",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve apply --force --refresh","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "apply",
+			wantArgs:    []string{"--trigger-source", "comment", "--force", "--refresh"},
+		},
+		{
+			name:        "CRLF apply flags",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve apply --force\r\nquoted text","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "apply",
+			wantArgs:    []string{"--trigger-source", "comment", "--force"},
+		},
+		{
+			name:        "refresh flags",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve refresh --dry-run --all","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "refresh",
+			wantArgs:    []string{"--dry-run", "--all"},
+		},
+		{
+			name:          "scoped unlock",
+			eventName:     "issue_comment",
+			eventJSON:     `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve unlock project/prod --force","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:       true,
+			wantCommand:   "unlock",
+			wantArgs:      []string{"--force"},
+			wantUnlockRef: "project/prod",
+		},
+		{
+			name:        "scoped explain",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve explain project/prod","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "run explain",
+			wantArgs:    []string{"--stack", "project/prod"},
+		},
+		{
+			name:        "break glass reaches cli parser",
+			eventName:   "issue_comment",
+			eventJSON:   `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve breakglass \"incident 42\" apply","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+			wantRun:     true,
+			wantCommand: "apply",
+			wantArgs:    []string{"--break-glass"},
+		},
+		{
+			name:      "malformed explain",
+			eventName: "issue_comment",
+			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve explain one two","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
+		},
+		{
+			name:        "merged pull request",
+			eventName:   "pull_request",
+			eventJSON:   `{"action":"closed","pull_request":{"number":42,"merged":true}}`,
+			wantRun:     true,
+			wantCommand: "apply",
+			wantArgs:    []string{"--trigger-source", "merge"},
+		},
+		{
+			name:        "explicit scheduled command",
+			eventName:   "schedule",
+			eventJSON:   `{}`,
+			command:     "drift run",
+			wantRun:     true,
+			wantCommand: "drift run",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dispatch := classifyActionEvent(t, tt.eventName, tt.eventJSON, tt.command, tt.runOnApproval)
+			if dispatch.Run != tt.wantRun || dispatch.Command != tt.wantCommand {
+				t.Fatalf("dispatch = %+v, want run=%v command=%q", dispatch, tt.wantRun, tt.wantCommand)
+			}
+			if strings.Join(dispatch.Args, " ") != strings.Join(tt.wantArgs, " ") {
+				t.Fatalf("args = %q, want %q", dispatch.Args, tt.wantArgs)
+			}
+			if dispatch.UnlockRef != tt.wantUnlockRef {
+				t.Fatalf("unlock ref = %q, want %q", dispatch.UnlockRef, tt.wantUnlockRef)
+			}
+		})
+	}
+}
+
+func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
+	action := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
+	for _, name := range []string{
+		"Resolve immutable workload revision",
+		"Hash reeve source",
+		"Restore reeve binary cache",
+		"Classify prebuilt binary eligibility",
+		"Install cosign for binary verification",
+		"Fetch prebuilt binary",
+		"Set up Go (from reeve's go.mod)",
+		"Build reeve",
+		"Add reeve to PATH",
+		"Checkout workload",
+		"Verify immutable workload revision",
+		"Authenticate to GCP",
+		"Install Pulumi CLI",
+		"Install OpenTofu CLI",
+		"Install Terraform CLI",
+		"Run reeve",
+	} {
+		marker := "- name: " + name
+		start := strings.Index(action, marker)
+		if start < 0 {
+			t.Fatalf("missing action step %q", name)
+		}
+		rest := action[start+len(marker):]
+		end := strings.Index(rest, "\n    - name:")
+		if end >= 0 {
+			rest = rest[:end]
+		}
+		if !strings.Contains(rest, "steps.reeve-dispatch.outputs.run == 'true'") {
+			t.Errorf("action step %q is not guarded by early dispatch", name)
+		}
+	}
+}
+
+func TestActionUsesImmutableWorkloadRevision(t *testing.T) {
+	t.Parallel()
+	action := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
+	for _, want := range []string{
+		"ref: ${{ steps.reeve-workload.outputs.sha }}",
+		"persist-credentials: false",
+		"REEVE_EXPECTED_HEAD_SHA:",
+		"resolve-workload-ref.sh\" verify",
+		"HEAD_ARGS+=(--sha \"$REEVE_WORKLOAD_SHA\")",
+	} {
+		if !strings.Contains(action, want) {
+			t.Errorf("action is missing immutable workload binding %q", want)
+		}
+	}
+	if strings.Contains(action, "refs/pull/") {
+		t.Fatal("action must not checkout a moving pull request ref")
+	}
+}
+
+func TestResolveWorkloadRevision(t *testing.T) {
+	const eventHead = "1111111111111111111111111111111111111111"
+	const apiHead = "2222222222222222222222222222222222222222"
+	const scheduledHead = "3333333333333333333333333333333333333333"
+	tests := []struct {
+		name         string
+		eventName    string
+		eventJSON    string
+		githubSHA    string
+		curlResponse string
+		wantSHA      string
+		wantPR       string
+		wantIsPR     string
+	}{
+		{
+			name:      "pull request payload",
+			eventName: "pull_request",
+			eventJSON: `{"pull_request":{"number":17,"head":{"sha":"` + eventHead + `"}}}`,
+			wantSHA:   eventHead,
+			wantPR:    "17",
+			wantIsPR:  "true",
+		},
+		{
+			name:         "issue comment API snapshot",
+			eventName:    "issue_comment",
+			eventJSON:    `{"issue":{"number":18,"pull_request":{}}}`,
+			curlResponse: `{"head":{"sha":"` + apiHead + `"}}`,
+			wantSHA:      apiHead,
+			wantPR:       "18",
+			wantIsPR:     "true",
+		},
+		{
+			name:      "scheduled commit",
+			eventName: "schedule",
+			eventJSON: `{}`,
+			githubSHA: scheduledHead,
+			wantSHA:   scheduledHead,
+			wantIsPR:  "false",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := runWorkloadResolver(t, "resolve", tt.eventName, tt.eventJSON, tt.githubSHA, tt.curlResponse, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["sha"] != tt.wantSHA || got["pr_number"] != tt.wantPR || got["is_pr"] != tt.wantIsPR {
+				t.Fatalf("outputs = %#v, want sha=%s pr=%s is_pr=%s", got, tt.wantSHA, tt.wantPR, tt.wantIsPR)
+			}
+		})
+	}
+}
+
+func TestVerifyWorkloadRevision(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "config", "user.name", "Reeve Test")
+	runGit(t, repo, "config", "user.email", "reeve@example.invalid")
+	if err := os.WriteFile(filepath.Join(repo, "fixture"), []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "fixture")
+	runGit(t, repo, "commit", "-qm", "fixture")
+	head := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+	moved := strings.Repeat("b", 40)
+
+	tests := []struct {
+		name         string
+		expected     string
+		isPR         string
+		curlResponse string
+		wantError    string
+	}{
+		{name: "matching checkout and PR", expected: head, isPR: "true", curlResponse: `{"head":{"sha":"` + head + `"}}`},
+		{name: "PR moved", expected: head, isPR: "true", curlResponse: `{"head":{"sha":"` + moved + `"}}`, wantError: "pull request head moved"},
+		{name: "checkout mismatch", expected: strings.Repeat("a", 40), isPR: "false", wantError: "checkout is"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := runWorkloadResolver(t, "verify", "issue_comment", `{"issue":{"number":18,"pull_request":{}}}`, "", tt.curlResponse, map[string]string{
+				"REEVE_WORKLOAD_SHA":   tt.expected,
+				"REEVE_WORKLOAD_PR":    "18",
+				"REEVE_WORKLOAD_IS_PR": tt.isPR,
+				"REEVE_WORKLOAD_ROOT":  repo,
+			})
+			switch {
+			case tt.wantError == "" && err != nil:
+				t.Fatal(err)
+			case tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)):
+				t.Fatalf("verify error = %v, want text %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestActionPreviewRouting(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -125,6 +688,7 @@ func TestActionPreviewRouting(t *testing.T) {
 			name:      "plan comment marks explicit request",
 			eventName: "issue_comment",
 			eventJSON: `{
+				"action":"created",
 				"issue":{"number":42,"pull_request":{}},
 				"comment":{"body":"/reeve plan","author_association":"OWNER","user":{"type":"User","login":"operator"}}
 			}`,
@@ -174,7 +738,11 @@ func TestPlanRequestedFlagIsPreviewOnly(t *testing.T) {
 
 func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
 	t.Helper()
-	script := extractRunReeveScript(t, readRepoFile(t, "action.yml"))
+	dispatch := classifyActionEvent(t, eventName, eventJSON, "", "false")
+	if !dispatch.Run {
+		t.Fatal("preview event was skipped by classifier")
+	}
+	script := extractRunReeveScript(t, readRepoFile(t, ".github", "actions", "reeve", "action.yml"))
 	dir := t.TempDir()
 	eventPath := filepath.Join(dir, "event.json")
 	argsPath := filepath.Join(dir, "args")
@@ -199,9 +767,12 @@ func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
 		"REEVE_INPUT_ROOT":           dir,
 		"REEVE_INPUT_COMMAND":        "",
 		"REEVE_INPUT_EXTRA_ARGS":     "",
-		"REEVE_RUN_ON_APPROVAL":      "false",
 		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER",
 		"REEVE_COMMAND_PREFIXES":     "/reeve",
+		"REEVE_DISPATCH_COMMAND":     dispatch.Command,
+		"REEVE_DISPATCH_AUTO_ARGS":   mustJSON(t, dispatch.Args),
+		"REEVE_DISPATCH_UNLOCK_REF":  dispatch.UnlockRef,
+		"REEVE_DISPATCH_BREAK_GLASS": "false",
 		"ARGS_OUT":                   argsPath,
 	} {
 		t.Setenv(key, value)
@@ -215,6 +786,75 @@ func runActionPreview(t *testing.T, eventName, eventJSON string) []string {
 		t.Fatal(err)
 	}
 	return strings.Fields(string(args))
+}
+
+type actionDispatch struct {
+	Run       bool
+	Command   string
+	Args      []string
+	UnlockRef string
+}
+
+func classifyActionEvent(t *testing.T, eventName, eventJSON, command, runOnApproval string) actionDispatch {
+	t.Helper()
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	outputPath := filepath.Join(dir, "output")
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runOnApproval == "" {
+		runOnApproval = "false"
+	}
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script and fixtures travel through environment variables.
+	cmd := exec.Command(script)
+	for key, value := range map[string]string{
+		"GITHUB_OUTPUT":              outputPath,
+		"GITHUB_EVENT_NAME":          eventName,
+		"GITHUB_EVENT_PATH":          eventPath,
+		"REEVE_INPUT_COMMAND":        command,
+		"REEVE_RUN_ON_APPROVAL":      runOnApproval,
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("classifier failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(values["auto_args"]), &args); err != nil {
+		t.Fatalf("parse classifier args %q: %v", values["auto_args"], err)
+	}
+	return actionDispatch{
+		Run:       values["run"] == "true",
+		Command:   values["command"],
+		Args:      args,
+		UnlockRef: values["unlock_ref"],
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestBinaryFetchRejectsMissingSignatureVerifier(t *testing.T) {
@@ -260,6 +900,102 @@ func extractRunReeveScript(t *testing.T, action string) string {
 	}
 	t.Fatal("Run reeve script not found")
 	return ""
+}
+
+func runWorkloadResolver(t *testing.T, mode, eventName, eventJSON, githubSHA, curlResponse string, extraEnv map[string]string) (map[string]string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	outputPath := filepath.Join(dir, "output")
+	responsePath := filepath.Join(dir, "response.json")
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(responsePath, []byte(curlResponse), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte("#!/bin/sh\ncat \"$FAKE_CURL_RESPONSE\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	script := repoPath(t, ".github", "scripts", "resolve-workload-ref.sh")
+	// #nosec G204 -- the executable is a repository-owned script and all fixtures travel through environment variables.
+	cmd := exec.Command(script, mode)
+	env := append(isolatedGitEnv(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GITHUB_OUTPUT="+outputPath,
+		"GITHUB_EVENT_NAME="+eventName,
+		"GITHUB_EVENT_PATH="+eventPath,
+		"GITHUB_REPOSITORY=org/repo",
+		"GITHUB_API_URL=https://api.github.test",
+		"GITHUB_TOKEN=test-token",
+		"GITHUB_SHA="+githubSHA,
+		"FAKE_CURL_RESPONSE="+responsePath,
+	)
+	for key, value := range extraEnv {
+		env = append(env, key+"="+value)
+	}
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	values := map[string]string{}
+	data, readErr := os.ReadFile(outputPath)
+	if readErr != nil {
+		if mode == "verify" && os.IsNotExist(readErr) {
+			return values, nil
+		}
+		t.Fatal(readErr)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	return values, nil
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	// #nosec G204 -- tests execute git with fixed arguments against a temporary repository.
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = isolatedGitEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
+}
+
+func isolatedGitEnv() []string {
+	repositoryVars := map[string]struct{}{
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
+		"GIT_COMMON_DIR":                   {},
+		"GIT_DIR":                          {},
+		"GIT_GRAFT_FILE":                   {},
+		"GIT_IMPLICIT_WORK_TREE":           {},
+		"GIT_INDEX_FILE":                   {},
+		"GIT_NO_REPLACE_OBJECTS":           {},
+		"GIT_OBJECT_DIRECTORY":             {},
+		"GIT_PREFIX":                       {},
+		"GIT_REPLACE_REF_BASE":             {},
+		"GIT_SHALLOW_FILE":                 {},
+		"GIT_WORK_TREE":                    {},
+	}
+	env := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, found := repositoryVars[key]; !found {
+			env = append(env, entry)
+		}
+	}
+	return env
 }
 
 func readRepoFile(t *testing.T, parts ...string) string {

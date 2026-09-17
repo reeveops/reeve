@@ -75,6 +75,37 @@ engine:
 	}
 }
 
+func TestLoadPulumiPassphraseLiteral(t *testing.T) {
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": `version: 1
+config_type: shared
+bucket: {type: filesystem, name: ./.reeve-state}
+`,
+		"pulumi.yaml": `version: 1
+config_type: engine
+engine:
+  type: pulumi
+  state:
+    url: file://./pulumi-state
+    secrets_provider:
+      type: passphrase
+      passphrase: configured-passphrase
+  stacks:
+    - project: api
+      path: projects/api
+      stacks: [dev]
+`,
+	})
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	provider := cfg.Engines[0].Engine.State.SecretsProvider
+	if provider.Type != "passphrase" || provider.Passphrase != "configured-passphrase" {
+		t.Fatalf("Pulumi passphrase provider was not loaded: %#v", provider)
+	}
+}
+
 func TestStackViewAndRetentionParse(t *testing.T) {
 	root := writeReeve(t, map[string]string{
 		"shared.yaml": `version: 1
@@ -188,6 +219,27 @@ apply:
 	}
 	if err := load("mrege"); err == nil || !strings.Contains(err.Error(), "apply.trigger") {
 		t.Fatalf("invalid apply.trigger must be rejected, got %v", err)
+	}
+}
+
+func TestNegativePreviewParallelismRejected(t *testing.T) {
+	root := writeReeve(t, map[string]string{
+		"shared.yaml": minimalShared(),
+		"pulumi.yaml": `version: 1
+config_type: engine
+engine:
+  type: pulumi
+  execution:
+    max_parallel_stacks: -1
+`,
+	})
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "max_parallel_stacks") {
+		t.Fatalf("negative max_parallel_stacks must be rejected, got %v", err)
 	}
 }
 

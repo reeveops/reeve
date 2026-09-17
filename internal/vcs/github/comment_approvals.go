@@ -117,20 +117,9 @@ func resolveApprovedCommit(arg, headSHA string) (sha string, pinned bool) {
 
 // listIssueComments returns all issue comments on the PR (paginated).
 func (c *Client) listIssueComments(ctx context.Context, number int) ([]*gh.IssueComment, error) {
-	var out []*gh.IssueComment
-	opt := &gh.IssueListCommentsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
-	for {
-		page, resp, err := c.gh.Issues.ListComments(ctx, c.owner, c.repo, number, opt)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, page...)
-		if resp.NextPage == 0 {
-			break
-		}
-		opt.Page = resp.NextPage
-	}
-	return out, nil
+	c.commentMu.Lock()
+	defer c.commentMu.Unlock()
+	return c.issueCommentsLocked(ctx, number, true)
 }
 
 // parseCommentTrigger derives the accepted command prefixes and the verb from

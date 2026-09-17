@@ -283,23 +283,24 @@ permissions:
 jobs:
   critical:
     if: ${{ github.event.schedule == '17 */4 * * *' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: reeveops/reeve@master
-        with:
-          command: "drift run"
-          extra-args: "--schedule critical"
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: drift
+      drift_schedule: critical
 
   slow-movers:
     if: ${{ github.event.schedule == '0 3 * * *' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: reeveops/reeve@master
-        with:
-          command: "drift run"
-          extra-args: "--schedule slow-movers"
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: drift
+      drift_schedule: slow-movers
+
+  manual:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
+    with:
+      mode: drift
+      drift_schedule: ${{ inputs.schedule }}
 ```
 
 The three scoping strategies compose:
@@ -311,6 +312,8 @@ The three scoping strategies compose:
   across overlapping schedules.
 
 Small teams use none of these. Large monorepos use all three.
+
+The shared workflow exposes them as `drift_pattern`, `drift_schedule`, and `drift_if_stale`.
 
 ## Drift-specific auth
 

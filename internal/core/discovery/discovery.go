@@ -1,11 +1,53 @@
 package discovery
 
 import (
+	"path"
 	"sort"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
+
+// ScopeChangedFiles converts repository-relative VCS paths to paths relative
+// to the configured reeve root. Files outside that root are excluded.
+func ScopeChangedFiles(files []string, root string) []string {
+	root = cleanRepoPath(root)
+	if root == "" {
+		root = "."
+	}
+
+	scoped := make([]string, 0, len(files))
+	for _, file := range files {
+		file = cleanRepoPath(file)
+		if file == "" {
+			continue
+		}
+		if root == "." {
+			scoped = append(scoped, file)
+			continue
+		}
+		if file == root {
+			scoped = append(scoped, ".")
+			continue
+		}
+		if strings.HasPrefix(file, root+"/") {
+			scoped = append(scoped, strings.TrimPrefix(file, root+"/"))
+		}
+	}
+	return scoped
+}
+
+func cleanRepoPath(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	if value == "" || strings.HasPrefix(value, "/") {
+		return ""
+	}
+	clean := path.Clean(value)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return ""
+	}
+	return strings.TrimPrefix(clean, "./")
+}
 
 // Stack is the normalized shape produced by the engine adapter. Core owns
 // filtering and change-mapping over a flat []Stack.

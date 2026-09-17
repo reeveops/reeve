@@ -34,10 +34,9 @@ Default TTL: 4h. Configurable per `shared.yaml` `locking.ttl`. The
 configured TTL also bounds the lease granted to a holder promoted from
 the queue.
 
-**Reaper is opportunistic** - there is no daemon. Every `reeve` invocation
-scans `locks/` for expired TTLs before acquiring. Quiet repos may run an
-optional scheduled GH Actions workflow (`reeve locks reap`) to sweep.
-No control plane.
+There is no daemon. Lock acquisition evicts an expired holder for the target
+stack, while `reeve maintenance run` or `reeve locks reap` sweeps every lock.
+Repositories SHOULD schedule maintenance independently of PR runs.
 
 ## Maintenance reads and writes
 
@@ -55,7 +54,7 @@ No control plane.
   or `reeve locks unlock [project/stack] --pr N` removes the PR from
   holder/queue (all locks when the stack is omitted). PR-scoped removal
   only touches that PR's own entries and is not admin-gated.
-- TTL expiry (opportunistic reaper).
+- TTL expiry during stack acquisition or explicit maintenance.
 - Manual force-unlock: `reeve locks unlock [project/stack]` (no `--pr`)
   clears holders regardless of PR - gated by `shared.yaml`
   `locking.admin_override`.

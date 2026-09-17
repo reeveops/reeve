@@ -36,10 +36,7 @@ func TestApplyHelpDocumentsExitCodes(t *testing.T) {
 }
 
 // TestApplyRejectsUnknownAnnotationTypeBeforeStoreWork pins that an invalid
-// annotation type is caught before the command touches the store. The
-// emitters used to be built after the opportunistic lock reap and artifact
-// prune, so a typo in observability.yaml did that maintenance first and
-// only then failed.
+// annotation type is caught before the command touches the store.
 func TestApplyRejectsUnknownAnnotationTypeBeforeStoreWork(t *testing.T) {
 	root := driftRepo(t)
 	mustWrite(t, filepath.Join(root, ".reeve", "observability.yaml"), `version: 1
@@ -55,10 +52,7 @@ annotations:
 	if !strings.Contains(err.Error(), "graphana") {
 		t.Fatalf("error should name the offending type: %v", err)
 	}
-	// And it must fail before the store is touched. Opening the bucket is
-	// what creates this directory, and it is immediately followed by the
-	// opportunistic lock reap and artifact prune - none of which should run
-	// for a config that cannot be loaded.
+	// It must fail before opening the store, which creates this directory.
 	if _, statErr := os.Stat(filepath.Join(root, ".reeve-state")); statErr == nil {
 		t.Error("apply opened the store before validating the annotation config")
 	}

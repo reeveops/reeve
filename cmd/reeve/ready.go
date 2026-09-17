@@ -80,7 +80,13 @@ func runReady(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("get pr: %w", err)
 	}
-	if prMeta.HeadSHA != "" {
+	expectedHead := os.Getenv("REEVE_EXPECTED_HEAD_SHA")
+	if err := run.VerifyExpectedPRHead(prMeta, expectedHead); err != nil {
+		return err
+	}
+	if expectedHead != "" {
+		sha = expectedHead
+	} else if prMeta.HeadSHA != "" {
 		sha = prMeta.HeadSHA
 	}
 
@@ -89,7 +95,7 @@ func runReady(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	channels, reason := run.BuildPRNotifyChannels(ctx, cfg.Notifications, cfg.ChannelSourceFiles, store, client, pr)
+	channels, reason := run.BuildPRNotifyChannels(ctx, cfg.Notifications, cfg.ChannelSourceFiles, store, client, pr, repoPathForRoot(root))
 	if reason != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "notify: channels suppressed (%s)\n", reason)
 	}

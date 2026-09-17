@@ -77,31 +77,30 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 	cfg, root, store, engine, authReg := env.cfg, env.root, env.store, env.engine, env.authReg
 
 	lockStore := blocks.New(store)
-	if n, _ := lockStore.ReapAll(ctx, run.LockTTL(cfg.Shared)); n > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "reaped %d expired lock(s)\n", n)
-	}
 
 	engineCfg := env.engineCfg
 
 	in := run.RefreshInput{
-		PRNumber:     pr,
-		CommitSHA:    sha,
-		RunNumber:    runNum,
-		CIRunURL:     runURL,
-		RepoRoot:     root,
-		RepoFull:     repoFull,
-		Actor:        actor,
-		Engine:       engine,
-		Config:       engineCfg,
-		Shared:       cfg.Shared,
-		AuthConfig:   cfg.Auth,
-		AuthRegistry: authReg,
-		Blob:         store,
-		Locks:        lockStore,
-		AuditWriter:  audit.NewWriter(store),
-		DryRun:       flagBool(cmd, "dry-run"),
-		All:          flagBool(cmd, "all"),
-		Local:        local,
+		PRNumber:        pr,
+		CommitSHA:       sha,
+		ExpectedHeadSHA: os.Getenv("REEVE_EXPECTED_HEAD_SHA"),
+		RunNumber:       runNum,
+		CIRunURL:        runURL,
+		RepoRoot:        root,
+		RepoPath:        repoPathForRoot(root),
+		RepoFull:        repoFull,
+		Actor:           actor,
+		Engine:          engine,
+		Config:          engineCfg,
+		Shared:          cfg.Shared,
+		AuthConfig:      cfg.Auth,
+		AuthRegistry:    authReg,
+		Blob:            store,
+		Locks:           lockStore,
+		AuditWriter:     audit.NewWriter(store),
+		DryRun:          flagBool(cmd, "dry-run"),
+		All:             flagBool(cmd, "all"),
+		Local:           local,
 	}
 
 	if !local {
@@ -112,9 +111,6 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 		client, cerr := gh.New(ctx, token, parts[0], parts[1])
 		if cerr != nil {
 			return cerr
-		}
-		if prMeta, gerr := client.GetPR(ctx, pr); gerr == nil && prMeta.HeadSHA != "" {
-			in.CommitSHA = prMeta.HeadSHA
 		}
 		in.VCS = client
 	}

@@ -22,6 +22,23 @@ provider surface: `notify.IssueClient` and `notify.CommentClient` are the
 reference examples — the `github_issue` and `timeline_github` channels get
 GitHub access without importing a VCS SDK.
 
+## Shared workflow check identity
+
+The maintained GitOps reusable workflow MUST publish a stable called-job name.
+Reeve MUST derive the current published check name from the workflow run and
+exclude prior results with that name from its own apply gate.
+
+#### Scenario: Standard reusable workflow caller
+
+- **WHEN** a consumer calls the workflow from `jobs.reeve`
+- **THEN** the GitOps result is published as `reeve / Reeve` without a second
+  aggregate runner job
+
+#### Scenario: Custom reusable workflow caller
+
+- **WHEN** a consumer calls the workflow from another caller job ID
+- **THEN** Reeve derives that check's full published name without manual input
+
 ## Concrete SDKs stay in their provider package
 
 A provider's third-party SDK is imported only within that provider's own

@@ -25,7 +25,12 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 
 ## Requirements
 
-- Preview runs in parallel across stacks; apply serializes per-stack via locks.
+- Preview runs independent project directories concurrently up to
+  `engine.execution.max_parallel_stacks`; zero or omission defaults to one.
+- A positive `--max-parallel-stacks` value overrides the config for one run.
+- Stacks sharing one project directory run serially because their engine
+  working data and workspace selection share that directory.
+- Preview results, failure lists, and manifests retain discovery order.
 - Preview artifacts persist under `runs/pr-{n}/{run-id}/` for the PR lifetime.
 - Apply does **not** replay a plan saved by the earlier preview. Preview
   freshness is a gate, not plan reuse: apply requires a successful preview on
@@ -37,14 +42,69 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   risk; fork PRs otherwise get dry-run-only credentials.
 - Notifications run last in the pipeline so upstream failures are captured
   accurately in the authoritative "what happened" surface.
-- SHA resolution: `apply`, `ready`, and `approved` commands resolve the commit
-  SHA from the PR HEAD via the VCS API (`GetPR`), not from `GITHUB_SHA`. This
-  ensures manifests and plan lookups use the branch tip SHA regardless of what
-  the CI runner checked out.
+- SHA resolution: the maintained action MUST check out one immutable PR HEAD
+  SHA and supply it to the CLI. PR commands MUST fail when the live PR snapshot
+  disagrees with that checkout identity.
+- Apply and refresh MUST reuse one PR metadata snapshot for head identity, fork
+  and draft policy, approvals, and gate evaluation. When the action supplies an
+  immutable checkout identity, each command MUST revalidate the live head once
+  after read-only gates and before lock, credential, or engine operations.
+- Preview MUST reuse one PR metadata snapshot for head-SHA resolution and
+  notification title and author fields within an invocation.
+- Apply MUST bind its target stacks to the preview manifest for the resolved
+  HEAD before a live changed-file result can classify the run as empty.
+
+#### Scenario: PR head moves after checkout
+
+- **GIVEN** the maintained action checked out an immutable PR head
+- **WHEN** the PR head changes before a command binds its artifacts and gates
+- **THEN** the command fails without using the newer head with the older tree
+
+#### Scenario: PR head moves during gate evaluation
+
+- **GIVEN** apply or refresh passed its initial checkout comparison
+- **WHEN** the PR head changes before state-changing work begins
+- **THEN** the command fails before acquiring a lock, workload credential, or invoking the engine
+
+#### Scenario: Base movement changes the live file list
+
+- **GIVEN** the preview manifest for the resolved HEAD contains a stack
+- **AND** the live PR file list now reports every change outside the configured root
+- **WHEN** apply resolves its target scope
+- **THEN** it keeps the stack recorded by the preview manifest
+
+#### Scenario: Independent projects overlap
+
+- **GIVEN** at least two affected stacks in different project directories
+- **AND** the preview parallelism limit is at least two
+- **WHEN** preview executes
+- **THEN** up to the configured number of engine previews run concurrently
+
+#### Scenario: Workspaces sharing a directory stay serial
+
+- **GIVEN** affected stacks share one project directory
+- **WHEN** preview executes with a parallelism limit greater than one
+- **THEN** engine previews for those stacks do not overlap
+- **AND** their results remain in discovery order
+
+#### Scenario: Preview publishes completion metadata
+
+- **WHEN** preview needs the PR head SHA, title, and author
+- **THEN** it reads the PR once and uses that coherent snapshot for the run
 - Stacks declared with `path: .` (repo root) are triggered by any changed file
   that survives `ignore_changes` filtering.
 - Docs/asset-only changes (skip globs) run nothing; preview/apply report
   "Documentation/asset-only changes".
+- A preview with no target stacks MUST finish without acquiring state or
+  workload credentials, opening the blob backend, or initializing an engine
+  backend session.
+
+#### Scenario: Documentation-only preview
+
+- **WHEN** discovery maps the changed files to no stacks
+- **THEN** preview reports success through its PR comment and CI result without
+  blob access, notification dispatch, state authentication, or engine backend
+  login
 - Files mapping to no stack broaden to all stacks under `scope: auto` (default);
   `scope: pulumi_only` disables broadening. See discovery spec.
 

@@ -49,19 +49,30 @@ func (f *bgEngine) Apply(ctx context.Context, s discovery.Stack, opts iac.ApplyO
 type bgVCS struct {
 	changed       []string
 	headSHA       string
+	headSHAs      []string
 	codeowners    string
 	repoPrivate   bool // reported as vcs.PR.RepoPrivate
 	forkPR        bool // reported as vcs.PR.IsFork
 	approvalsList []approvals.Approval
 	comments      map[string][]string // marker → bodies (upserts)
 	posted        []string            // plain PostComment bodies
+	getPRCalls    int
 }
 
 func (f *bgVCS) ListChangedFiles(ctx context.Context, _ int) ([]string, error) {
 	return f.changed, nil
 }
 func (f *bgVCS) GetPR(ctx context.Context, n int) (*vcs.PR, error) {
-	return &vcs.PR{Number: n, HeadSHA: f.headSHA, BaseRef: "main", Author: "author", RepoPrivate: f.repoPrivate, IsFork: f.forkPR}, nil
+	f.getPRCalls++
+	headSHA := f.headSHA
+	if len(f.headSHAs) > 0 {
+		index := f.getPRCalls - 1
+		if index >= len(f.headSHAs) {
+			index = len(f.headSHAs) - 1
+		}
+		headSHA = f.headSHAs[index]
+	}
+	return &vcs.PR{Number: n, HeadSHA: headSHA, BaseRef: "main", Author: "author", RepoPrivate: f.repoPrivate, IsFork: f.forkPR}, nil
 }
 func (f *bgVCS) UpsertComment(ctx context.Context, _ int, body, marker string) error {
 	if f.comments == nil {

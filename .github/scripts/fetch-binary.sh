@@ -4,18 +4,18 @@
 # error path logs why and reports fetched=false so the action falls back to
 # building from source.
 #
-# Ref semantics (github.action_ref):
-#   vX.Y.Z        -> that release's goreleaser tarball, verified against the
+# Ref semantics (the wrapper's action ref or reusable workflow SHA):
+#   vX.Y.Z[-pre]  -> that release's goreleaser tarball, verified against the
 #                    release's checksums.txt (signed release pipeline).
-#   master | next -> the newest <branch>-<sha> per-push prerelease published by
-#                    edge-build.yml; download its linux binary + checksum. No
-#                    matching prerelease yet (edge build still running) falls
-#                    back to source.
-#   anything else -> source build (SHA pins, feature branches, forks).
+#   master | next -> the per-push prerelease whose signed source hash matches
+#                    the action source already on disk.
+#   full git SHA  -> that commit's retained per-push prerelease when available.
+#   anything else -> source build (feature branches, forks).
 #
 # Inputs (env):
-#   REEVE_REF      github.action_ref       (may be empty, e.g. local runs)
-#   REEVE_REPO     github.action_repository ("owner/repo"; empty on some runners)
+#   REEVE_REF      exact action ref or reusable workflow SHA
+#   REEVE_REPO     action or reusable workflow owner/repo
+#   REEVE_SOURCE_HASH canonical hash of the action source already on disk
 #   REEVE_OS       runner.os   (Linux, macOS, Windows)
 #   REEVE_ARCH     runner.arch (X64, ARM64, ...)
 #   REEVE_DEST     where to place the binary (the cached path)
@@ -24,15 +24,55 @@
 # Output: fetched=true|false appended to $GITHUB_OUTPUT (stdout if unset).
 set -euo pipefail
 
-# classify_ref <ref> -> version | edge | other
+# classify_ref <ref> -> version | edge | commit | other
 classify_ref() {
   local ref="${1:-}"
-  if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
     echo version
   elif [[ "$ref" == "master" || "$ref" == "next" ]]; then
     echo edge
+  elif [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo commit
   else
     echo other
+  fi
+}
+
+# prebuilt_eligible reports whether this invocation can possibly use a
+# published binary. It performs no network access and keeps unsupported refs
+# and platforms from installing the verifier before the source-build fallback.
+prebuilt_eligible() {
+  local ref="${REEVE_REF:-}" repo="${REEVE_REPO:-}" kind
+  [[ -n "$ref" && -n "$repo" ]] || return 1
+  [[ "${REEVE_OS:-}" == "Linux" ]] || return 1
+  [[ -n "$(map_arch "${REEVE_ARCH:-}")" ]] || return 1
+  kind=$(classify_ref "$ref")
+  [[ "$kind" != "other" ]] || return 1
+  [[ "$kind" == "version" || "${REEVE_SOURCE_HASH:-}" =~ ^[0-9a-f]{64}$ ]]
+}
+
+classify_main() {
+  local out="${GITHUB_OUTPUT:-/dev/stdout}"
+  if prebuilt_eligible; then
+    echo "eligible=true" >> "$out"
+  else
+    echo "eligible=false" >> "$out"
+  fi
+}
+
+# verify_source_hash <source-hash-file>
+# Requires the signed release metadata to identify the exact source tree
+# already checked out for this action invocation.
+verify_source_hash() {
+  local file="$1" expected="${REEVE_SOURCE_HASH:-}" actual
+  if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "canonical action source hash is unavailable or invalid" >&2
+    return 1
+  fi
+  actual=$(tr -d '[:space:]' < "$file")
+  if [[ "$actual" != "$expected" ]]; then
+    echo "release source hash mismatch: expected $expected, got $actual" >&2
+    return 1
   fi
 }
 
@@ -101,7 +141,7 @@ fetch_main() {
   local out="${GITHUB_OUTPUT:-/dev/stdout}"
   local ref="${REEVE_REF:-}" repo="${REEVE_REPO:-}"
   local dest="${REEVE_DEST:?REEVE_DEST is required}"
-  local arch kind workdir asset sums ok=false
+  local arch kind workdir asset sums source_hash_file tag ok=false
 
   fallback() {
     echo "$1 - falling back to source build"
@@ -130,8 +170,16 @@ fetch_main() {
 
   kind=$(classify_ref "$ref")
   if [[ "$kind" == "other" ]]; then
-    fallback "ref '$ref' is not a release tag or edge branch"
+    fallback "ref '$ref' is not a release tag, edge branch, or full commit SHA"
     return 0
+  fi
+
+  if [[ "$kind" != "version" && ! "${REEVE_SOURCE_HASH:-}" =~ ^[0-9a-f]{64}$ ]]; then
+    fallback "canonical action source hash is unavailable or invalid"
+    return 0
+  fi
+  if [[ "$kind" == "commit" ]]; then
+    ref=${ref,,}
   fi
 
   workdir=$(mktemp -d)
@@ -153,18 +201,37 @@ fetch_main() {
     edge)
       asset="reeve_linux_${arch}.tar.gz"
       sums="checksums.txt"
-      # Resolve the newest <branch>-<sha> per-push prerelease. gh returns
-      # releases newest-first, so pick the first prerelease whose tag is
-      # prefixed with "<ref>-".
-      local tag
+      source_hash_file="source-hash.txt"
+      # Resolve the release for the source tree GitHub already checked out.
+      # A branch may advance during a run, so "newest" alone is not enough.
       tag=$(gh api "repos/${repo}/releases?per_page=100" \
-        --jq "[.[] | select(.prerelease and (.tag_name | startswith(\"${ref}-\")))] | sort_by(.created_at) | reverse | .[0].tag_name" 2> /dev/null || true)
+        --jq "[.[] | select(.prerelease and (.tag_name | startswith(\"${ref}-\")) and ((.body // \"\") | contains(\"reeve-source-hash: ${REEVE_SOURCE_HASH}\")))] | sort_by(.created_at) | reverse | .[0].tag_name" 2> /dev/null || true)
       if [[ -z "$tag" || "$tag" == "null" ]]; then
-        echo "no ${ref}-* prerelease found (edge build may still be running)" >&2
+        echo "no ${ref}-* prerelease matches this action source (edge build may still be running)" >&2
       else
-        echo "Edge ref '$ref': newest prerelease is $tag; downloading $asset from $repo"
+        echo "Edge ref '$ref': source-matched prerelease is $tag; downloading $asset from $repo"
         if gh release download "$tag" --repo "$repo" \
-          --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" --dir "$workdir"; then
+          --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" \
+          --pattern "$source_hash_file" --dir "$workdir"; then
+          ok=true
+        else
+          echo "download failed for $tag (missing asset or network error)" >&2
+        fi
+      fi
+      ;;
+    commit)
+      asset="reeve_linux_${arch}.tar.gz"
+      sums="checksums.txt"
+      source_hash_file="source-hash.txt"
+      tag=$(gh api "repos/${repo}/releases?per_page=100" \
+        --jq "[.[] | select(.prerelease and .target_commitish == \"${ref}\" and ((.body // \"\") | contains(\"reeve-source-hash: ${REEVE_SOURCE_HASH}\")))] | sort_by(.created_at) | reverse | .[0].tag_name" 2> /dev/null || true)
+      if [[ -z "$tag" || "$tag" == "null" ]]; then
+        echo "no retained prerelease matches commit $ref and this action source" >&2
+      else
+        echo "Commit ref '${ref:0:12}': prerelease is $tag; downloading $asset from $repo"
+        if gh release download "$tag" --repo "$repo" \
+          --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" \
+          --pattern "$source_hash_file" --dir "$workdir"; then
           ok=true
         else
           echo "download failed for $tag (missing asset or network error)" >&2
@@ -177,6 +244,10 @@ fetch_main() {
     if ! verify_sha256 "$workdir/$asset" "$workdir/$sums"; then
       ok=false
     elif ! verify_signature "$workdir/$sums" "$workdir/${sums}.bundle"; then
+      ok=false
+    elif [[ "$kind" != "version" ]] && ! verify_sha256 "$workdir/$source_hash_file" "$workdir/$sums"; then
+      ok=false
+    elif [[ "$kind" != "version" ]] && ! verify_source_hash "$workdir/$source_hash_file"; then
       ok=false
     elif ! tar -xzf "$workdir/$asset" -C "$workdir" reeve; then
       echo "could not extract reeve from $asset" >&2
@@ -204,5 +275,9 @@ fetch_main() {
 
 # Run only when executed, so tests can source the helper functions.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  fetch_main
+  if [[ "${1:-}" == "classify" ]]; then
+    classify_main
+  else
+    fetch_main
+  fi
 fi

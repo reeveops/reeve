@@ -1,0 +1,221 @@
+name: Reeve
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Run PR GitOps, drift detection, or bucket maintenance.
+        required: true
+        type: string
+      runner:
+        description: GitHub-hosted or self-hosted runner label.
+        required: false
+        type: string
+        default: ubuntu-latest
+      timeout_minutes:
+        description: Maximum job duration.
+        required: false
+        type: number
+        default: 60
+      root:
+        description: Path containing the consumer repository's .reeve directory.
+        required: false
+        type: string
+        default: ""
+      pulumi_version:
+        description: Pulumi CLI version, or blank to skip installation.
+        required: false
+        type: string
+        default: ""
+      opentofu_version:
+        description: OpenTofu CLI version, or blank to skip installation.
+        required: false
+        type: string
+        default: ""
+      terraform_version:
+        description: Terraform CLI version, or blank to skip installation.
+        required: false
+        type: string
+        default: ""
+      command_prefix:
+        description: Accepted PR comment prefix. Use one prefix so unrelated comments skip before runner assignment.
+        required: false
+        type: string
+        default: /reeve
+      allowed_associations:
+        description: Comma-separated associations allowed to run PR commands.
+        required: false
+        type: string
+        default: OWNER,MEMBER,COLLABORATOR
+      run_on_approval:
+        description: Run approval notifications for approved reviews.
+        required: false
+        type: boolean
+        default: false
+      log_level:
+        description: Reeve log level.
+        required: false
+        type: string
+        default: ""
+      self_check_names:
+        description: Optional additional Reeve check names excluded from apply gates.
+        required: false
+        type: string
+        default: ""
+      drift_schedule:
+        description: Named drift.yaml schedule.
+        required: false
+        type: string
+        default: ""
+      drift_pattern:
+        description: Stack pattern for this drift shard.
+        required: false
+        type: string
+        default: ""
+      drift_if_stale:
+        description: Skip stacks within the configured freshness window.
+        required: false
+        type: boolean
+        default: false
+      gcp_workload_identity_provider:
+        description: GCP Workload Identity Provider resource name.
+        required: false
+        type: string
+        default: ""
+      gcp_service_account:
+        description: GCP service account email to impersonate.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      reeve_token:
+        description: Optional GitHub token override.
+        required: false
+      slack_token:
+        description: Optional Slack bot token.
+        required: false
+
+jobs:
+  invalid-mode:
+    if: inputs.mode != 'gitops' && inputs.mode != 'drift' && inputs.mode != 'maintenance'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Reject unsupported mode
+        env:
+          REEVE_MODE: ${{ inputs.mode }}
+        run: |
+          printf 'unsupported Reeve workflow mode: %s\n' "$REEVE_MODE" >&2
+          exit 1
+
+  invalid-command-prefix:
+    if: inputs.mode == 'gitops' && contains(inputs.command_prefix, ',')
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Reject multiple comment prefixes
+        run: |
+          printf 'command_prefix accepts one prefix so unrelated comments can skip before runner assignment\n' >&2
+          exit 1
+
+  gitops:
+    name: Reeve
+    if: >-
+      inputs.mode == 'gitops' && !contains(inputs.command_prefix, ',') && (
+        (
+          github.event_name == 'pull_request' && (
+            contains(fromJSON('["opened","reopened","synchronize","ready_for_review"]'), github.event.action) ||
+            (github.event.action == 'closed' && github.event.pull_request.merged == true)
+          )
+        ) ||
+        (
+          github.event_name == 'pull_request_review' &&
+          inputs.run_on_approval &&
+          github.event.action == 'submitted' &&
+          github.event.review.state == 'approved'
+        ) ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.action == 'created' &&
+          github.event.issue.pull_request &&
+          github.event.comment.user.type != 'Bot' &&
+          !endsWith(github.event.comment.user.login, '[bot]') &&
+          startsWith(github.event.comment.body, format('{0} ', inputs.command_prefix))
+        )
+      )
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      REEVE_SELF_CHECK_NAMES: ${{ inputs.self_check_names }}
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) && format('reeve-preview-{0}-{1}', github.repository_id, github.event.pull_request.number) || format('reeve-command-{0}-{1}', github.repository_id, github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) }}
+    steps:
+      - name: Run Reeve GitOps
+        uses: $/.github/actions/reeve
+        with:
+          source-ref: ${{ job.workflow_sha }}
+          source-repository: ${{ job.workflow_repository }}
+          root: ${{ inputs.root }}
+          pulumi-version: ${{ inputs.pulumi_version }}
+          opentofu-version: ${{ inputs.opentofu_version }}
+          terraform-version: ${{ inputs.terraform_version }}
+          github-token: ${{ secrets.reeve_token || github.token }}
+          slack-token: ${{ secrets.slack_token }}
+          gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
+          gcp-service-account: ${{ inputs.gcp_service_account }}
+          allowed-associations: ${{ inputs.allowed_associations }}
+          command-prefix: ${{ inputs.command_prefix }}
+          run-on-approval: ${{ inputs.run_on_approval }}
+          log-level: ${{ inputs.log_level }}
+
+  drift:
+    name: Reeve drift
+    if: inputs.mode == 'drift' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: reeve-drift-${{ github.repository_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Run Reeve drift detection
+        uses: $/.github/actions/reeve
+        with:
+          source-ref: ${{ job.workflow_sha }}
+          source-repository: ${{ job.workflow_repository }}
+          command: drift run
+          root: ${{ inputs.root }}
+          pulumi-version: ${{ inputs.pulumi_version }}
+          opentofu-version: ${{ inputs.opentofu_version }}
+          terraform-version: ${{ inputs.terraform_version }}
+          github-token: ${{ secrets.reeve_token || github.token }}
+          slack-token: ${{ secrets.slack_token }}
+          gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
+          gcp-service-account: ${{ inputs.gcp_service_account }}
+          drift-schedule: ${{ inputs.drift_schedule }}
+          drift-pattern: ${{ inputs.drift_pattern }}
+          drift-if-stale: ${{ inputs.drift_if_stale }}
+          log-level: ${{ inputs.log_level }}
+
+  maintenance:
+    name: Reeve maintenance
+    if: inputs.mode == 'maintenance' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: reeve-maintenance-${{ github.repository_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Run Reeve bucket maintenance
+        uses: $/.github/actions/reeve
+        with:
+          source-ref: ${{ job.workflow_sha }}
+          source-repository: ${{ job.workflow_repository }}
+          command: maintenance run
+          root: ${{ inputs.root }}
+          github-token: ${{ secrets.reeve_token || github.token }}
+          gcp-workload-identity-provider: ${{ inputs.gcp_workload_identity_provider }}
+          gcp-service-account: ${{ inputs.gcp_service_account }}
+          log-level: ${{ inputs.log_level }}

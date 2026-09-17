@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
 // fakeTTY overrides the injected TTY probe for one test.
@@ -68,7 +69,7 @@ func TestInitNonInteractiveScaffolds(t *testing.T) {
 		"wrote   .reeve/shared.yaml",
 		"wrote   .reeve/pulumi.yaml",
 		"reeve lint",
-		"reeveops/reeve@master", // GitHub Action snippet
+		"reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
@@ -88,6 +89,170 @@ func TestInitNonInteractiveScaffolds(t *testing.T) {
 	}
 	if len(cfg.Engines[0].Engine.Stacks) != 1 || cfg.Engines[0].Engine.Stacks[0].Pattern != "projects/*" {
 		t.Errorf("discovered stacks not pre-filled: %+v", cfg.Engines[0].Engine.Stacks)
+	}
+}
+
+func TestInitWritesPinnedWorkflowForReleaseBuild(t *testing.T) {
+	fakeTTY(t, false)
+	root := pulumiRepo(t)
+	originalCommit := commit
+	commit = "0123456789abcdef0123456789abcdef01234567"
+	t.Cleanup(func() { commit = originalCommit })
+
+	out, err := runReeve(t, "init")
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "wrote   .github/workflows/reeve.yml") {
+		t.Fatalf("workflow write not reported:\n%s", out)
+	}
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "reeve.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"reeve.yml@0123456789abcdef0123456789abcdef01234567",
+		"merge_group:",
+		"types: [checks_requested]",
+		"mode: gitops",
+		"pulumi_version: latest",
+	} {
+		if !strings.Contains(string(workflow), want) {
+			t.Errorf("workflow missing %q:\n%s", want, workflow)
+		}
+	}
+}
+
+func TestConfigNeedsOIDC(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  string
+		want bool
+	}{
+		{name: "none"},
+		{name: "AWS OIDC", typ: "aws_oidc", want: true},
+		{name: "GCP WIF", typ: "gcp_wif", want: true},
+		{name: "Azure federation", typ: "azure_federated", want: true},
+		{name: "GitHub App", typ: "github_app"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			if tc.typ != "" {
+				cfg.Auth = &schemas.Auth{Providers: map[string]schemas.ProviderYAML{
+					"provider": {Type: tc.typ},
+				}}
+			}
+			if got := configNeedsOIDC(cfg); got != tc.want {
+				t.Fatalf("configNeedsOIDC() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInitWorkflowMatchesPreservedConfig(t *testing.T) {
+	fakeTTY(t, false)
+	root := pulumiRepo(t)
+	if out, err := runReeve(t, "init", "-n"); err != nil {
+		t.Fatalf("baseline init: %v\n%s", err, out)
+	}
+
+	sharedPath := filepath.Join(root, ".reeve", "shared.yaml")
+	shared, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared = []byte(strings.Replace(string(shared), "trigger: comment", "trigger: merge", 1))
+	mustWrite(t, sharedPath, string(shared))
+	mustWrite(t, filepath.Join(root, ".reeve", "auth.yaml"), `version: 1
+config_type: auth
+providers:
+  aws-prod:
+    type: aws_oidc
+    role_arn: arn:aws:iam::111111111111:role/reeve-prod
+bindings:
+  - match: {stack: "*"}
+    providers: [aws-prod]
+`)
+
+	const ref = "0123456789abcdef0123456789abcdef01234567"
+	out, err := runReeve(t, "init", "-n", "--workflow-ref", ref)
+	if err != nil {
+		t.Fatalf("init with existing config: %v\n%s", err, out)
+	}
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "reeve.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ready_for_review, closed", "id-token: write"} {
+		if !strings.Contains(string(workflow), want) {
+			t.Errorf("workflow missing %q:\n%s", want, workflow)
+		}
+	}
+}
+
+func TestInitWorkflowRefSelectsDetectedEngineAndPreservesExisting(t *testing.T) {
+	fakeTTY(t, false)
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "main.tf"), "terraform {}\n")
+	t.Chdir(root)
+	const ref = "89abcdef0123456789abcdef0123456789abcdef"
+
+	out, err := runReeve(t, "init", "--workflow-ref", ref)
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	workflowPath := filepath.Join(root, ".github", "workflows", "reeve.yml")
+	workflow, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(workflow), "terraform_version: latest") {
+		t.Fatalf("terraform workflow input missing:\n%s", workflow)
+	}
+
+	mustWrite(t, workflowPath, "name: custom\n")
+	out, err = runReeve(t, "init", "--workflow-ref", ref, "--force")
+	if err != nil {
+		t.Fatalf("second init: %v\n%s", err, out)
+	}
+	workflow, err = os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(workflow) != "name: custom\n" {
+		t.Fatalf("existing workflow was overwritten:\n%s", workflow)
+	}
+	if !strings.Contains(out, "existing workflow is never overwritten") {
+		t.Errorf("preserved workflow not reported:\n%s", out)
+	}
+}
+
+func TestInitRejectsUnpinnedWorkflowRefBeforeWriting(t *testing.T) {
+	fakeTTY(t, false)
+	root := pulumiRepo(t)
+
+	if out, err := runReeve(t, "init", "--workflow-ref", "master"); err == nil {
+		t.Fatalf("want error for moving workflow ref:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".reeve")); !os.IsNotExist(err) {
+		t.Fatalf("invalid ref wrote config: %v", err)
+	}
+}
+
+func TestInitWorkflowWriteRejectsSymlinkedGitHubDirectory(t *testing.T) {
+	fakeTTY(t, false)
+	root := pulumiRepo(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, ".github")); err != nil {
+		t.Fatal(err)
+	}
+
+	const ref = "0123456789abcdef0123456789abcdef01234567"
+	if out, err := runReeve(t, "init", "--workflow-ref", ref); err == nil {
+		t.Fatalf("want error for symlinked .github directory:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "workflows", "reeve.yml")); !os.IsNotExist(err) {
+		t.Fatalf("workflow escaped repository root: %v", err)
 	}
 }
 
@@ -278,7 +443,7 @@ func TestInitHelpMentionsModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init --help: %v", err)
 	}
-	for _, want := range []string{"--non-interactive", "--force", "wizard", "*.bak", "reeve lint"} {
+	for _, want := range []string{"--non-interactive", "--force", "--workflow-ref", "wizard", "*.bak", "reeve lint"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing %q", want)
 		}

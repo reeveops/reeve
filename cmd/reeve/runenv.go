@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -48,10 +49,22 @@ type runEnv struct {
 	emitters []annotations.Emitter
 }
 
-// loadRunEnv resolves the repo root, loads and validates config, installs
-// the logger, opens the blob store, constructs the engine adapter and
-// builds the auth registry.
+// loadRunEnv resolves configuration and constructs every runtime dependency.
 func loadRunEnv(cmd *cobra.Command) (*runEnv, error) {
+	env, err := loadRunEnvWithoutStore(cmd)
+	if err != nil {
+		return nil, err
+	}
+	env.store, err = openRunStore(env.ctx, env.cfg.Shared.Bucket, env.root)
+	if err != nil {
+		return nil, err
+	}
+	return env, nil
+}
+
+// loadRunEnvWithoutStore constructs local dependencies while leaving the blob
+// backend unopened. Preview uses this path until change mapping finds work.
+func loadRunEnvWithoutStore(cmd *cobra.Command) (*runEnv, error) {
 	ctx := cmd.Context()
 
 	root, err := resolveRoot(cmd)
@@ -82,23 +95,11 @@ func loadRunEnv(cmd *cobra.Command) (*runEnv, error) {
 		return nil, err
 	}
 
-	// Each construction step below can block on the network - opening the
-	// bucket, and especially the federated credential exchange - so each
-	// one reports its own duration. Without these the run shows a single
-	// multi-minute gap after "config loaded" with nothing to attribute it
-	// to.
-	t := time.Now()
-	store, err := factory.Open(ctx, cfg.Shared.Bucket, root)
-	if err != nil {
-		return nil, err
-	}
-	slog.Debug("blob store opened", "type", cfg.Shared.Bucket.Type, "ms", time.Since(t).Milliseconds())
-
 	// The one place a repo-context command resolves which engine to use.
 	// Single-engine today - config.Validate rejects multi-engine configs -
 	// so this is the seam a multi-engine config would widen.
 	engineCfg := cfg.Engines[0]
-	t = time.Now()
+	t := time.Now()
 	engine, err := iac.New(engineCfg.Engine)
 	if err != nil {
 		return nil, err
@@ -113,9 +114,19 @@ func loadRunEnv(cmd *cobra.Command) (*runEnv, error) {
 	slog.Debug("auth registry built", "ms", time.Since(t).Milliseconds())
 
 	return &runEnv{
-		ctx: ctx, cfg: cfg, root: root, store: store,
+		ctx: ctx, cfg: cfg, root: root,
 		engine: engine, engineCfg: engineCfg, authReg: authReg, emitters: emitters,
 	}, nil
+}
+
+func openRunStore(ctx context.Context, bucket schemas.BucketConfig, root string) (blob.Store, error) {
+	t := time.Now()
+	store, err := factory.Open(ctx, bucket, root)
+	if err != nil {
+		return nil, err
+	}
+	slog.Debug("blob store opened", "type", bucket.Type, "ms", time.Since(t).Milliseconds())
+	return store, nil
 }
 
 // resolveRoot returns the absolute repo root: --root, else the working
@@ -134,4 +145,18 @@ func resolveRoot(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("resolve repo root %q: %w", root, err)
 	}
 	return abs, nil
+}
+
+// repoPathForRoot returns root relative to the repository checkout used by
+// GitHub Actions. Outside Actions, VCS paths retain their existing behavior.
+func repoPathForRoot(root string) string {
+	workspace := os.Getenv("GITHUB_WORKSPACE")
+	if workspace == "" {
+		return "."
+	}
+	rel, err := filepath.Rel(workspace, root)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "."
+	}
+	return filepath.ToSlash(rel)
 }
