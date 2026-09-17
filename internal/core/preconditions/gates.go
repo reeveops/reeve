@@ -101,12 +101,13 @@ type Inputs struct {
 
 	// Break-glass emergency override (already authorized by
 	// core/breakglass before it reaches here). It overrides the approvals
-	// gate always, overrides freeze only when BreakGlassOverrideFreeze,
-	// and NEVER touches any other gate - locks, checks, preview
-	// freshness, policy, fork/draft all still apply. Break-glass replaces
-	// human sign-off; it is not a license to apply stale/unchecked code.
-	BreakGlass               bool
-	BreakGlassOverrideFreeze bool
+	// gate always and overrides freeze only when BreakGlassOverrideFreeze.
+	// An explicit PreviewHistoryUnavailable signal permits preview gates to
+	// be overridden only when history could not be read or decoded.
+	BreakGlass                bool
+	BreakGlassOverrideFreeze  bool
+	PreviewHistoryUnavailable bool
+	PreviewHistoryError       string
 }
 
 // Result aggregates gate outcomes for a single stack.
@@ -175,6 +176,18 @@ func evalGate(g GateID, cfg Config, in Inputs) (GateResult, bool) {
 		case GateFreeze:
 			if in.InFreeze && in.BreakGlassOverrideFreeze {
 				return warn(g, fmt.Sprintf("in freeze window %q - overridden by break-glass", in.FreezeName)), true
+			}
+		case GatePreviewOK, GatePreviewFresh:
+			if in.PreviewHistoryUnavailable {
+				base := evalGateBase(g, cfg, in)
+				if base.Outcome == OutcomeFail {
+					reason := "preview history unavailable"
+					if in.PreviewHistoryError != "" {
+						reason += ": " + in.PreviewHistoryError
+					}
+					return warn(g, reason+" - overridden by break-glass"), true
+				}
+				return base, false
 			}
 		}
 	}

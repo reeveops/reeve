@@ -118,6 +118,39 @@ func TestApplyCleanRunNotFailed(t *testing.T) {
 	}
 }
 
+func TestApplyLoadsPreviewManifestOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine := &failEngine{bgEngine: bgEngine{enum: []discovery.Stack{
+		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+		{Project: "worker", Path: "projects/worker", Name: "prod", Env: "prod"},
+	}}}
+	fv := &bgVCS{
+		changed: []string{"projects/api/main.ts", "projects/worker/main.ts"},
+		headSHA: bgSHA,
+	}
+	base, _ := filesystem.New(t.TempDir())
+	store := &previewListCounter{Store: base, lists: map[string]int{}}
+	in := plainApplyInput(t, engine, fv, store)
+	in.Config.Engine.Stacks = []schemas.StackDecl{
+		{Project: "api", Path: "projects/api", Stacks: []string{"prod"}},
+		{Project: "worker", Path: "projects/worker", Stacks: []string{"prod"}},
+	}
+	if err := writeManifest(ctx, store, 18, "preview-2", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+		{Project: "worker", Stack: "prod", Status: summary.StatusPlanned},
+	}, bgSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Apply(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.lists["runs/pr-18/"]; got != 1 {
+		t.Fatalf("apply manifest list calls = %d, want 1", got)
+	}
+}
+
 // TestApplySamePRActiveHolderBlockedWithExpiry: an actively acquired holder
 // from another run of the same PR blocks this run (not queued, not applied)
 // and the refusal names the holder run and its lease expiry.

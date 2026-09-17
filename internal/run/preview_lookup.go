@@ -3,8 +3,10 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +14,8 @@ import (
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	"github.com/reeveops/reeve/internal/core/summary"
 )
+
+var errInvalidPreviewManifest = errors.New("invalid preview manifest")
 
 // PreviewStatus is what apply needs to know about a prior preview for a
 // given (PR, commit SHA, stack ref). Filled from the most recent matching
@@ -29,80 +33,112 @@ type PreviewStatus struct {
 	Plan *summary.StackSummary
 }
 
-// PlanSucceededForPR returns true if the most recent preview manifest for the
-// given PR and commit SHA exists and has no stacks in error state.
-//
-// Selection goes through newestPreviewManifest for the same reason
-// FindPreviewForStack does: if the "which manifest is authoritative"
-// answers ever disagreed, `reeve ready` could report a green plan from one
-// run while apply gated against another. This function used to re-implement
-// the scan and had already drifted - it was missing the RunID tie-break for
-// manifests written in the same second.
-func PlanSucceededForPR(ctx context.Context, store blob.Store, prNumber int, commitSHA string) bool {
-	if store == nil || prNumber == 0 {
-		return false
-	}
-	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
-	if best == nil {
-		return false
-	}
-	for _, ss := range best.Stacks {
-		if ss.Status == summary.StatusError {
-			return false
-		}
-	}
-	return len(best.Stacks) > 0
+// PreviewSnapshot is the authoritative preview manifest for one PR and
+// commit, indexed once for all stack-level gates in an invocation.
+type PreviewSnapshot struct {
+	statuses     map[string]PreviewStatus
+	stackCount   int
+	allSucceeded bool
 }
 
-// FindPreviewForStack scans runs/pr-{n}/ for manifests, picks the most
-// recent one whose commit_sha + op=preview matches, and reports whether
-// the named stack was present and successful there.
-func FindPreviewForStack(ctx context.Context, store blob.Store, prNumber int, commitSHA, stackRef string) (PreviewStatus, error) {
+// LoadPreviewSnapshot scans the PR's manifests once and indexes the newest
+// preview for the requested commit.
+func LoadPreviewSnapshot(ctx context.Context, store blob.Store, prNumber int, commitSHA string) (PreviewSnapshot, error) {
 	if store == nil || prNumber == 0 {
-		return PreviewStatus{}, nil
+		return PreviewSnapshot{}, nil
 	}
-	// Same selection as PreviewedStackRefs, deliberately: if these two
-	// disagreed about which manifest is authoritative, apply could target a
-	// stack from one manifest and then gate it against another.
-	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
+	best, err := newestPreviewManifest(ctx, store, prNumber, commitSHA)
+	if err != nil {
+		return PreviewSnapshot{}, err
+	}
 	if best == nil {
 		slog.Debug("preview lookup: no matching preview manifest for sha", "pr", prNumber, "sha", commitSHA)
-		return PreviewStatus{}, nil
+		return PreviewSnapshot{}, nil
 	}
 	slog.Debug("preview lookup: best manifest", "run_id", best.RunID, "created_at", best.CreatedAt, "stack_count", len(best.Stacks))
 
 	createdAt, err := time.Parse(time.RFC3339, best.CreatedAt)
 	if err != nil {
-		createdAt = time.Now()
+		return PreviewSnapshot{}, fmt.Errorf("preview manifest %q has invalid created_at %q: %w", best.RunID, best.CreatedAt, err)
 	}
-	st := PreviewStatus{
-		Found:     true,
-		Age:       time.Since(createdAt),
-		Succeeded: true,
-		RunID:     best.RunID,
+	age := time.Since(createdAt)
+	snapshot := PreviewSnapshot{
+		statuses:     make(map[string]PreviewStatus, len(best.Stacks)),
+		stackCount:   len(best.Stacks),
+		allSucceeded: len(best.Stacks) > 0,
 	}
 	for _, ss := range best.Stacks {
-		if ss.Ref() != stackRef {
-			continue
+		if strings.TrimSpace(ss.Project) == "" || strings.TrimSpace(ss.Stack) == "" {
+			return PreviewSnapshot{}, fmt.Errorf("%w %q: invalid stack reference", errInvalidPreviewManifest, best.RunID)
 		}
-		if ss.Status == summary.StatusError {
-			st.Succeeded = false
-			st.ErrorMessage = ss.Error
+		ref := ss.Ref()
+		if _, exists := snapshot.statuses[ref]; exists {
+			return PreviewSnapshot{}, fmt.Errorf("%w %q: duplicate stack %q", errInvalidPreviewManifest, best.RunID, ref)
 		}
-		if ss.Counts.Total() > 0 {
-			st.HasChanges = true
+		succeeded := false
+		switch ss.Status {
+		case summary.StatusPlanned, summary.StatusNoOp:
+			succeeded = true
+		case summary.StatusError:
+			snapshot.allSucceeded = false
+		default:
+			return PreviewSnapshot{}, fmt.Errorf("%w %q: invalid status %q for stack %q", errInvalidPreviewManifest, best.RunID, ss.Status, ref)
+		}
+		status := PreviewStatus{
+			Found:      true,
+			Age:        age,
+			Succeeded:  succeeded,
+			HasChanges: ss.Counts.Total() > 0,
+			RunID:      best.RunID,
+		}
+		if !status.Succeeded {
+			status.ErrorMessage = ss.Error
+			snapshot.allSucceeded = false
 		}
 		plan := ss
-		st.Plan = &plan
-		return st, nil
+		status.Plan = &plan
+		snapshot.statuses[ref] = status
 	}
-	// Manifest exists for this SHA but doesn't cover this stack - treat as
-	// "no fresh preview for this stack".
-	return PreviewStatus{Found: false}, nil
+	return snapshot, nil
 }
 
-// PreviewedStackRefs returns the set of stack refs the newest preview for
-// this exact commit SHA covered, and whether such a preview exists.
+// StackStatus returns the selected manifest's result for one stack.
+func (s PreviewSnapshot) StackStatus(stackRef string) PreviewStatus {
+	return s.statuses[stackRef]
+}
+
+// StackRefs returns every stack covered by the selected manifest.
+func (s PreviewSnapshot) StackRefs() (map[string]bool, bool) {
+	if s.stackCount == 0 {
+		return nil, false
+	}
+	refs := make(map[string]bool, len(s.statuses))
+	for ref := range s.statuses {
+		refs[ref] = true
+	}
+	return refs, true
+}
+
+// Succeeded reports whether the selected manifest exists, covers at least one
+// stack, and contains no stack errors.
+func (s PreviewSnapshot) Succeeded() bool {
+	return s.allSucceeded
+}
+
+// PlanSucceededForPR reports whether the shared snapshot for one PR and commit
+// exists and has no stack errors.
+func PlanSucceededForPR(ctx context.Context, store blob.Store, prNumber int, commitSHA string) (bool, error) {
+	snapshot, err := LoadPreviewSnapshot(ctx, store, prNumber, commitSHA)
+	return snapshot.Succeeded(), err
+}
+
+// FindPreviewForStack loads the shared snapshot and returns one stack status.
+func FindPreviewForStack(ctx context.Context, store blob.Store, prNumber int, commitSHA, stackRef string) (PreviewStatus, error) {
+	snapshot, err := LoadPreviewSnapshot(ctx, store, prNumber, commitSHA)
+	return snapshot.StackStatus(stackRef), err
+}
+
+// PreviewedStackRefs returns the stack refs in the selected snapshot.
 //
 // This is what binds apply's blast radius to what was actually planned and
 // approved. Apply must not re-derive its target set from the PR's changed
@@ -111,49 +147,139 @@ func FindPreviewForStack(ctx context.Context, store blob.Store, prNumber int, co
 // which changes which stacks map, which silently changes what apply touches.
 // The manifest is pinned to the commit SHA and is immutable, so it is the
 // only honest answer to "what was reviewed".
-func PreviewedStackRefs(ctx context.Context, store blob.Store, prNumber int, commitSHA string) (map[string]bool, bool) {
+func PreviewedStackRefs(ctx context.Context, store blob.Store, prNumber int, commitSHA string) (map[string]bool, bool, error) {
 	if store == nil || prNumber == 0 || commitSHA == "" {
-		return nil, false
+		return nil, false, nil
 	}
-	best := newestPreviewManifest(ctx, store, prNumber, commitSHA)
-	if best == nil || len(best.Stacks) == 0 {
-		return nil, false
-	}
-	refs := make(map[string]bool, len(best.Stacks))
-	for _, ss := range best.Stacks {
-		refs[ss.Ref()] = true
-	}
-	return refs, true
+	snapshot, err := LoadPreviewSnapshot(ctx, store, prNumber, commitSHA)
+	refs, ok := snapshot.StackRefs()
+	return refs, ok, err
 }
 
 // newestPreviewManifest returns the most recent preview manifest for the
-// (PR, commit SHA) pair, or nil.
-func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, commitSHA string) *manifest {
-	keys, err := store.List(ctx, fmt.Sprintf("runs/pr-%d/", prNumber))
+// (PR, commit SHA) pair, or nil. An unreadable object fails the lookup because
+// it may be the authoritative candidate for this commit.
+func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, commitSHA string) (*manifest, error) {
+	prefix := fmt.Sprintf("runs/pr-%d/", prNumber)
+	keys, err := store.List(ctx, prefix)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list preview manifests: %w", err)
 	}
 	var best *manifest
+	var bestCreatedAt time.Time
 	for _, k := range keys {
-		if !strings.HasSuffix(k, "/manifest.json") {
+		runID, identityBound, candidate := previewManifestCandidate(k, prefix, commitSHA)
+		if !candidate {
 			continue
 		}
 		data, _, err := filesystem.ReadBytes(ctx, store, k)
 		if err != nil {
-			continue
+			if !identityBound {
+				slog.Debug("skip unreadable unbound preview manifest", "key", k, "err", err)
+				continue
+			}
+			return nil, fmt.Errorf("read preview manifest %q: %w", k, err)
 		}
 		var m manifest
 		if err := json.Unmarshal(data, &m); err != nil {
-			continue
+			if !identityBound {
+				slog.Debug("skip malformed unbound preview manifest", "key", k, "err", err)
+				continue
+			}
+			return nil, fmt.Errorf("decode preview manifest %q: %w", k, err)
 		}
 		if m.Op != "preview" || m.CommitSHA != commitSHA {
+			if identityBound {
+				return nil, fmt.Errorf("%w %q: content does not match artifact identity", errInvalidPreviewManifest, k)
+			}
 			continue
 		}
-		if best == nil || m.CreatedAt > best.CreatedAt ||
-			(m.CreatedAt == best.CreatedAt && m.RunID > best.RunID) {
+		if m.PR != prNumber {
+			return nil, fmt.Errorf("%w %q: PR %d, want %d", errInvalidPreviewManifest, k, m.PR, prNumber)
+		}
+		if m.RunID != runID {
+			return nil, fmt.Errorf("%w %q: run_id %q, want %q", errInvalidPreviewManifest, k, m.RunID, runID)
+		}
+		createdAt, parseErr := time.Parse(time.RFC3339, m.CreatedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("preview manifest %q has invalid created_at %q: %w", k, m.CreatedAt, parseErr)
+		}
+		if best == nil || createdAt.After(bestCreatedAt) ||
+			(createdAt.Equal(bestCreatedAt) && newerPreviewRunID(m.RunID, best.RunID, commitSHA)) {
 			c := m
 			best = &c
+			bestCreatedAt = createdAt
 		}
 	}
-	return best
+	return best, nil
+}
+
+func newerPreviewRunID(candidate, current, commitSHA string) bool {
+	candidateRun, candidateAttempt, candidateOK := previewRunOrder(candidate, commitSHA)
+	currentRun, currentAttempt, currentOK := previewRunOrder(current, commitSHA)
+	if candidateOK && currentOK {
+		if candidateRun != currentRun {
+			return candidateRun > currentRun
+		}
+		if candidateAttempt != currentAttempt {
+			return candidateAttempt > currentAttempt
+		}
+	}
+	return candidate > current
+}
+
+func previewRunOrder(runID, commitSHA string) (int, int, bool) {
+	const prefix = "run-"
+	if !strings.HasPrefix(runID, prefix) {
+		return 0, 0, false
+	}
+	suffix := "-" + artifactSHA(commitSHA)
+	if !strings.HasSuffix(runID, suffix) {
+		suffix = "-" + shortSHA(commitSHA)
+		if !strings.HasSuffix(runID, suffix) {
+			return 0, 0, false
+		}
+	}
+
+	identity := strings.TrimSuffix(strings.TrimPrefix(runID, prefix), suffix)
+	parts := strings.Split(identity, "-")
+	if len(parts) < 1 || len(parts) > 2 {
+		return 0, 0, false
+	}
+	runNumber, err := strconv.Atoi(parts[0])
+	if err != nil || runNumber < 0 {
+		return 0, 0, false
+	}
+	if len(parts) == 1 {
+		return runNumber, 0, true
+	}
+	runAttempt, err := strconv.Atoi(parts[1])
+	if err != nil || runAttempt <= 0 {
+		return 0, 0, false
+	}
+	return runNumber, runAttempt, true
+}
+
+func previewManifestCandidate(key, prefix, commitSHA string) (string, bool, bool) {
+	if commitSHA == "" || !strings.HasPrefix(key, prefix) {
+		return "", false, false
+	}
+	relative := strings.TrimPrefix(key, prefix)
+	runID, rest, ok := strings.Cut(relative, "/")
+	if !ok || rest != "manifest.json" {
+		return "", false, false
+	}
+	if strings.HasPrefix(runID, "apply-") || strings.HasPrefix(runID, "refresh-") {
+		return "", false, false
+	}
+	if strings.HasPrefix(runID, "run-") {
+		if strings.HasSuffix(runID, "-"+artifactSHA(commitSHA)) {
+			return runID, true, true
+		}
+		if strings.HasSuffix(runID, "-"+shortSHA(commitSHA)) {
+			return runID, false, true
+		}
+		return "", false, false
+	}
+	return runID, false, true
 }

@@ -33,7 +33,7 @@ or unchecked code:
 | Per-stack locks | **NEVER bypassed** — a held lock still blocks |
 | Required checks green | Still enforced — **when enabled**; `require_checks_passing` defaults to off, see [configuration.md](configuration.md#preconditions) |
 | Up-to-date with base | Still enforced — **when enabled**; `require_up_to_date` defaults to off, see [configuration.md](configuration.md#preconditions) |
-| Preview succeeded / preview freshness | Still enforced |
+| Preview succeeded / preview freshness | Still enforced unless selected preview history is unreadable or malformed; authorized recovery is loud and audited |
 | Policy hooks | Still enforced |
 | Fork-PR / draft-PR gates | Still enforced |
 

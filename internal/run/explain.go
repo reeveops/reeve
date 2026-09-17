@@ -79,6 +79,9 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	}
 	decls, filter := declarationsFromConfig(in.Config)
 	declared := discovery.Resolve(enum, decls, filter)
+	if err := discovery.ValidateUniqueRefs(declared); err != nil {
+		return nil, fmt.Errorf("stack discovery: %w", err)
+	}
 
 	changed, err := in.VCS.ListChangedFiles(ctx, in.PRNumber)
 	if err != nil {
@@ -184,9 +187,19 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	preCfg := toPreconditionsConfig(in.Shared)
 	hooksConfigured := len(HooksFromEngine(in.Config)) > 0
 	now := time.Now()
+	previewSnapshot, err := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, commitSHA)
+	previewReason := ""
+	if err != nil {
+		previewReason = "could not be evaluated: " + BuildRedactor(in.Shared).Redact(err.Error())
+		slog.Warn("explain: preview history unavailable", "error", previewReason, "pr", in.PRNumber, "sha", commitSHA)
+		previewSnapshot = PreviewSnapshot{}
+	}
 
 	// 3. Per stack: rules + lock read + report-only gates.
 	out := render.ExplainInput{CommitSHA: commitSHA, RunURL: in.CIRunURL}
+	if previewReason != "" {
+		out.Notice = "Preview history is unavailable. Preview gates fail closed below; no preview success is assumed. " + previewReason
+	}
 	blocked := false
 	for _, s := range target {
 		rules := approvals.Resolve(appCfg, s.Ref())
@@ -206,11 +219,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 			freezeName = name
 		}
 
-		prev, lookupErr := FindPreviewForStack(ctx, in.Blob, in.PRNumber, commitSHA, s.Ref())
-		if lookupErr != nil {
-			slog.Warn("explain: preview lookup failed", "stack", s.Ref(), "err", lookupErr)
-			prev = PreviewStatus{}
-		}
+		prev := previewSnapshot.StackStatus(s.Ref())
 
 		// Lock: a plain read. Acquirable means free/expired, or already
 		// held by this PR (a re-run would be refused, but the lock is not
@@ -274,6 +283,10 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 			case string(preconditions.GateChecksGreen):
 				if checksReason != "" {
 					es.Gates[i].Reason = checksReason
+				}
+			case string(preconditions.GatePreviewOK), string(preconditions.GatePreviewFresh):
+				if previewReason != "" {
+					es.Gates[i].Reason = previewReason
 				}
 			case string(preconditions.GateUpToDate):
 				if upToDateReason != "" {

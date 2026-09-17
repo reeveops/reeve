@@ -208,6 +208,18 @@ That's it. The action auto-detects the command from the event:
 Event classification runs before binary setup, checkout, authentication, and engine installation.
 Skipped events do not run those setup steps.
 
+### Run attempts and preview history
+
+- `--run-attempt` defaults to `GITHUB_RUN_ATTEMPT`; an explicit flag takes precedence.
+- A supplied attempt must be a positive integer.
+- New artifacts use the full commit SHA; legacy short-SHA artifacts remain readable.
+- Workflow retries keep separate artifacts, audit records, and lock identities.
+- A retry waits for an earlier attempt's live lock lease to expire before it can proceed.
+- Apply stops when selected preview history is unreadable or invalid, including an already-applied commit.
+- Ready skips its success notification, while explain posts a fail-closed diagnostic report.
+- Authorized break-glass can recover unreadable preview history and records the override in the comment and audit trail.
+- Without break-glass, remove the object key named in the error or push a new commit to create a new preview identity.
+
 ### Repository roots and change scope
 
 `--root` may point at a nested infrastructure directory in the checkout.
@@ -346,12 +358,17 @@ locking:
 `ttl` bounds every lease - including holders promoted from the queue when
 the previous holder releases or expires.
 
-Locks identify their holder by **PR + run**: re-running the same workflow
-run refreshes the lease, but a *second concurrent run of the same PR*
+Locks identify their holder by **PR + run attempt**. Re-running a workflow
+creates a new holder identity, and a *second concurrent run of the same PR*
 (double `/reeve apply`, workflow re-run while the first is still going) is
 refused with "another run of this PR holds the lock" instead of applying
-concurrently. Once the first run finishes - or its lease expires - the
+concurrently. Once the first run finishes or its lease expires, the
 next attempt proceeds normally.
+
+Locks created by an older reeve binary use the previous holder identity and
+remain binding after an upgrade until their lease expires. After confirming
+the old runner has stopped, use `reeve locks unlock --pr N --force` or comment
+`/reeve unlock --force` on the PR to clear its active holders.
 
 `reeve locks list` inspects the live state. `reeve locks explain <stack>`
 shows holder + queue. `reeve locks unlock <project/stack> --pr N` removes a

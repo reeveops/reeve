@@ -1,10 +1,40 @@
 package discovery
 
 import (
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
 )
+
+func TestValidateUniqueRefs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		stacks []Stack
+		want   bool
+	}{
+		{name: "unique", stacks: []Stack{{Project: "api", Name: "prod", Path: "infra/api"}, {Project: "web", Name: "prod", Path: "infra/web"}}},
+		{name: "same path duplicate", stacks: []Stack{{Project: "api", Name: "prod", Path: "infra/api"}, {Project: "api", Name: "prod", Path: "infra/api"}}, want: true},
+		{name: "duplicate ref", stacks: []Stack{{Project: "api", Name: "prod", Path: "infra/a"}, {Project: "api", Name: "prod", Path: "infra/b"}}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateUniqueRefs(tt.stacks)
+			var duplicate *DuplicateStackRefError
+			if errors.As(err, &duplicate) != tt.want {
+				t.Fatalf("ValidateUniqueRefs() error = %v, want duplicate = %t", err, tt.want)
+			}
+			if duplicate != nil && duplicate.Ref != "api/prod" {
+				t.Fatalf("duplicate = %+v", duplicate)
+			}
+			if duplicate != nil && tt.name == "duplicate ref" && !reflect.DeepEqual(duplicate.Paths, []string{"infra/a", "infra/b"}) {
+				t.Fatalf("duplicate paths = %v", duplicate.Paths)
+			}
+		})
+	}
+}
 
 func TestScopeChangedFiles(t *testing.T) {
 	t.Parallel()

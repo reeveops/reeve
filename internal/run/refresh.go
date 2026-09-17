@@ -128,6 +128,9 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	}
 	decls, filter := declarationsFromConfig(in.Config)
 	declared := discovery.Resolve(enum, decls, filter)
+	if err := discovery.ValidateUniqueRefs(declared); err != nil {
+		return nil, fmt.Errorf("stack discovery: %w", err)
+	}
 
 	target := declared
 	if pr != nil {

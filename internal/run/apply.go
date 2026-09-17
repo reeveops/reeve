@@ -139,6 +139,17 @@ type ApplyOutput struct {
 	FailedStacks []string
 }
 
+type previewSnapshotLoadError struct {
+	cause  error
+	detail string
+}
+
+func (e *previewSnapshotLoadError) Error() string {
+	return "load preview snapshot: " + e.detail + "; remove the named object or push a new commit, or use authorized break-glass to recover"
+}
+
+func (e *previewSnapshotLoadError) Unwrap() error { return e.cause }
+
 // Apply runs apply for stacks affected by the PR. For each stack:
 // 1. Acquire lock (or queue).
 // 2. Evaluate preconditions.
@@ -224,6 +235,19 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	timeline := newApplyTimeline(in.VCS, in.Blob, in.PRNumber, runID, in.RunNumber, in.CommitSHA, in.CIRunURL)
 	timeline.add(ctx, "🚀", "apply starting", "")
 
+	previewSnapshot, err := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, in.CommitSHA)
+	var previewLoadErr error
+	previewLoadReason := ""
+	if err != nil {
+		previewLoadReason = BuildRedactor(in.Shared).Redact(err.Error())
+		if in.BreakGlass == nil {
+			return nil, &previewSnapshotLoadError{cause: err, detail: previewLoadReason}
+		}
+		previewLoadErr = err
+		previewSnapshot = PreviewSnapshot{}
+		slog.Warn("BREAK-GLASS requested with unavailable preview history", "error", previewLoadReason, "pr", in.PRNumber, "sha", in.CommitSHA)
+	}
+
 	// Already-applied guard: if this exact commit was fully applied before and
 	// the caller didn't pass --force, there is nothing new to ship. Record it
 	// on the timeline and exit success rather than re-running side effects.
@@ -244,7 +268,10 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 	decls, filter := declarationsFromConfig(in.Config)
 	declared := discovery.Resolve(enum, decls, filter)
-	previewed, hasPreview := PreviewedStackRefs(ctx, in.Blob, in.PRNumber, in.CommitSHA)
+	if err := discovery.ValidateUniqueRefs(declared); err != nil {
+		return nil, fmt.Errorf("stack discovery: %w", err)
+	}
+	previewed, hasPreview := previewSnapshot.StackRefs()
 
 	changed, err := in.VCS.ListChangedFiles(ctx, in.PRNumber)
 	if err != nil {
@@ -290,13 +317,20 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 		target = bound
 	} else if mapRes.Reason == discovery.ReasonBroadened {
-		// No preview manifest for this commit: every stack will fail the
-		// preview gate anyway, but do not silently widen the blast radius
-		// on the way there. Report it and keep the precise matches.
-		timeline.add(ctx, "📡", "scope broadened", fmt.Sprintf(
-			"changed files map to no specific stack (%s) and no plan exists for %s; not widening the apply to every stack",
-			strings.Join(mapRes.Unmapped, ", "), shortSHA(in.CommitSHA)))
-		target = mapRes.Matched
+		if previewLoadErr != nil {
+			timeline.add(ctx, "⚠️", "scope reconstructed", fmt.Sprintf(
+				"preview history is unavailable; apply targets the %d stack(s) the current changed-file mapping matched precisely, not every declared stack, because %s maps to no specific stack",
+				len(mapRes.Matched), strings.Join(mapRes.Unmapped, ", ")))
+			target = mapRes.Matched
+		} else {
+			// No preview manifest for this commit: every stack will fail the
+			// preview gate anyway, but do not silently widen the blast radius
+			// on the way there. Report it and keep the precise matches.
+			timeline.add(ctx, "📡", "scope broadened", fmt.Sprintf(
+				"changed files map to no specific stack (%s) and no plan exists for %s; not widening the apply to every stack",
+				strings.Join(mapRes.Unmapped, ", "), shortSHA(in.CommitSHA)))
+			target = mapRes.Matched
+		}
 	}
 
 	// A live PR file list is a diff against a moving base. It may report no
@@ -428,6 +462,9 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			detail += fmt.Sprintf(" — ⚠️ authorizing config modified in this PR (%s)", strings.Join(bgTouched, ", "))
 		}
 		timeline.add(ctx, "🚨", "break-glass override", detail)
+		if previewLoadErr != nil {
+			timeline.add(ctx, "⚠️", "preview history unavailable", "continuing under authorized break-glass: "+previewLoadReason)
+		}
 
 		// Break-glass intent audit: an emergency override MUST leave a
 		// durable trace even if the process dies mid-apply, so the intent
@@ -618,13 +655,8 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			freezeName = name
 		}
 
-		// Look up the prior preview manifest from blob for this SHA + stack.
-		prev, lookupErr := FindPreviewForStack(ctx, in.Blob, in.PRNumber, in.CommitSHA, s.Ref())
-		if lookupErr != nil {
-			// Not fatal - treat as "no preview" so the gate fails cleanly.
-			slog.Debug("preview lookup failed", "stack", s.Ref(), "sha", in.CommitSHA, "err", lookupErr)
-			prev = PreviewStatus{}
-		}
+		// Reuse the invocation-level preview snapshot for every stack gate.
+		prev := previewSnapshot.StackStatus(s.Ref())
 		slog.Debug("preview status", "stack", s.Ref(), "found", prev.Found, "succeeded", prev.Succeeded, "age", prev.Age)
 
 		// Evaluate every independent gate before repository-controlled policy
@@ -646,8 +678,10 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			InFreeze:           inFreeze,
 			FreezeName:         freezeName,
 
-			BreakGlass:               bgDecision != nil,
-			BreakGlassOverrideFreeze: bgCfg.OverrideFreeze,
+			BreakGlass:                bgDecision != nil,
+			BreakGlassOverrideFreeze:  bgCfg.OverrideFreeze,
+			PreviewHistoryUnavailable: previewLoadErr != nil,
+			PreviewHistoryError:       previewLoadReason,
 		}
 		pcResult := preconditions.Evaluate(preCfg, pcInputs)
 

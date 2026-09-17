@@ -154,6 +154,51 @@ func TestExplainNilLockStore(t *testing.T) {
 	}
 }
 
+func TestExplainLoadsPreviewManifestOnce(t *testing.T) {
+	t.Parallel()
+	engine, _, in := explainFixture(t)
+	engine.enum = append(engine.enum,
+		discovery.Stack{Project: "api", Name: "staging", Env: "staging", Path: "projects/api"})
+	in.Config.Engine.Stacks[0].Stacks = append(in.Config.Engine.Stacks[0].Stacks, "staging")
+	base := in.Blob
+	store := &previewListCounter{Store: base, lists: map[string]int{}}
+	in.Blob = store
+	if err := writeManifest(context.Background(), store, 18, "preview-2", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+		{Project: "api", Stack: "staging", Status: summary.StatusPlanned},
+	}, bgSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Explain(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.lists["runs/pr-18/"]; got != 1 {
+		t.Fatalf("explain manifest list calls = %d, want 1", got)
+	}
+}
+
+func TestExplainReportsUnavailablePreviewHistory(t *testing.T) {
+	_, fv, in := explainFixture(t)
+	putRawManifest(t, in.Blob, 18, "run-999", bgSHA, "{not-json")
+
+	out, err := Explain(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Blocked {
+		t.Fatal("unavailable preview history must fail preview gates closed")
+	}
+	for _, want := range []string{"Preview history is unavailable", "could not be evaluated", "preview_succeeded", "preview_fresh"} {
+		if !strings.Contains(out.Body, want) {
+			t.Fatalf("explain report missing %q:\n%s", want, out.Body)
+		}
+	}
+	if len(fv.comments[render.ExplainMarker(shortSHA(bgSHA))]) != 1 {
+		t.Fatal("expected degraded explain report to be posted")
+	}
+}
+
 func TestExplainForkPRIdenticalPath(t *testing.T) {
 	// Fork PRs run explain identically: no credentials involved, gate
 	// trace still renders (with the fork gate failing closed by default).

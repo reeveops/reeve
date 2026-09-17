@@ -45,6 +45,7 @@ type ExplainStack struct {
 type ExplainInput struct {
 	CommitSHA string
 	RunURL    string
+	Notice    string
 	Stacks    []ExplainStack
 }
 
@@ -60,6 +61,9 @@ func Explain(in ExplainInput) string {
 		fmt.Fprintf(&b, "### 🔎 reeve · explain · commit %s\n\n", shortSHA(in.CommitSHA))
 	}
 	b.WriteString("Report-only: nothing below ran an engine, took a lock, or wrote state.\n\n")
+	if in.Notice != "" {
+		fmt.Fprintf(&b, "> [!WARNING]\n> %s\n\n", in.Notice)
+	}
 
 	for _, s := range in.Stacks {
 		fmt.Fprintf(&b, "---\n\n#### %s\n\n", s.Ref)

@@ -73,12 +73,11 @@ func newLintCmd() *cobra.Command {
 			// reeve's codeowners gate ignores them. Flag them here so a
 			// path owned only by emails isn't silently unenforced.
 			lintCodeownersEmails(root)
-			// Auth lint: surfaces conflicts and dangerous providers.
-			if cfg.Auth != nil {
-				// Collect declared stack refs for the conflict check.
-				var stacks []string
-				engineCfg := cfg.Engines[0]
-				engine := engines[0]
+			// Stack discovery is part of lint even when auth is absent. One
+			// project/stack ref cannot safely identify two program paths.
+			var stacks []string
+			for i, engineCfg := range cfg.Engines {
+				engine := engines[i]
 				enum, err := engine.EnumerateStacks(cmd.Context(), root)
 				if err != nil {
 					return fmt.Errorf("enumerate stacks (is %s installed and the project valid?): %w", engine.Name(), err)
@@ -89,10 +88,25 @@ func newLintCmd() *cobra.Command {
 						Project: s.Project, Path: s.Path, Pattern: s.Pattern, Stacks: s.Stacks,
 					})
 				}
-				resolved := discovery.Resolve(enum, decls, discovery.Filter{})
+				var filter discovery.Filter
+				for _, excluded := range engineCfg.Engine.Filters.Exclude {
+					if excluded.Stack != "" {
+						filter.StackPatterns = append(filter.StackPatterns, excluded.Stack)
+					}
+					if excluded.Pattern != "" {
+						filter.PathPatterns = append(filter.PathPatterns, excluded.Pattern)
+					}
+				}
+				resolved := discovery.Resolve(enum, decls, filter)
+				if err := discovery.ValidateUniqueRefs(resolved); err != nil {
+					return fmt.Errorf("stack discovery: %w", err)
+				}
 				for _, s := range resolved {
 					stacks = append(stacks, s.Ref())
 				}
+			}
+			// Auth lint: surfaces conflicts and dangerous providers.
+			if cfg.Auth != nil {
 				if err := authfac.ValidateLint(cfg.Auth, stacks); err != nil {
 					return fmt.Errorf("auth lint: %w", err)
 				}

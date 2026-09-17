@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"fmt"
 	"path"
 	"sort"
 	"strings"
@@ -167,6 +168,42 @@ func Resolve(enumerated []Stack, decls []Declaration, filter Filter) []Stack {
 	}
 	sort.Slice(keep, func(i, j int) bool { return keep[i].Ref() < keep[j].Ref() })
 	return keep
+}
+
+// DuplicateStackRefError reports one canonical stack reference discovered
+// more than once. A reference must identify exactly one program.
+type DuplicateStackRefError struct {
+	Ref   string
+	Paths []string
+}
+
+func (e *DuplicateStackRefError) Error() string {
+	return fmt.Sprintf("duplicate stack ref %q resolves from multiple discovery entries at paths %s; project and stack names must form a unique ref",
+		e.Ref, strings.Join(e.Paths, ", "))
+}
+
+// ValidateUniqueRefs rejects ambiguous project/stack references.
+func ValidateUniqueRefs(stacks []Stack) error {
+	pathsByRef := make(map[string][]string, len(stacks))
+	for _, stack := range stacks {
+		pathsByRef[stack.Ref()] = append(pathsByRef[stack.Ref()], stack.Path)
+	}
+
+	refs := make([]string, 0, len(pathsByRef))
+	for ref, paths := range pathsByRef {
+		if len(paths) > 1 {
+			refs = append(refs, ref)
+		}
+	}
+	sort.Strings(refs)
+	if len(refs) == 0 {
+		return nil
+	}
+
+	ref := refs[0]
+	paths := pathsByRef[ref]
+	sort.Strings(paths)
+	return &DuplicateStackRefError{Ref: ref, Paths: paths}
 }
 
 func declared(s Stack, byPath map[string][]string, patterns []Declaration) bool {

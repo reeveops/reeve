@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/factory"
 	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/notify"
 	"github.com/reeveops/reeve/internal/run"
 	gh "github.com/reeveops/reeve/internal/vcs/github"
@@ -90,8 +94,9 @@ func runReady(cmd *cobra.Command, _ []string) error {
 		sha = prMeta.HeadSHA
 	}
 
-	if !run.PlanSucceededForPR(ctx, store, pr, sha) {
-		fmt.Fprintf(cmd.OutOrStdout(), "no successful plan found for PR #%d at %s - skipping ready\n", pr, sha[:7])
+	planSucceeded := readyPlanSucceeded(ctx, store, pr, sha, cfg.Shared, cmd.ErrOrStderr())
+	if !planSucceeded {
+		fmt.Fprintf(cmd.OutOrStdout(), "no successful plan found for PR #%d at %s - skipping ready\n", pr, shortReadySHA(sha))
 		return nil
 	}
 
@@ -113,4 +118,21 @@ func runReady(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "PR #%d marked ready\n", pr)
 	return nil
+}
+
+func readyPlanSucceeded(ctx context.Context, store blob.Store, pr int, sha string, shared *schemas.Shared, errOut io.Writer) bool {
+	succeeded, err := run.PlanSucceededForPR(ctx, store, pr, sha)
+	if err != nil {
+		detail := run.BuildRedactor(shared).Redact(err.Error())
+		fmt.Fprintf(errOut, "preview history unavailable for PR #%d at %s; skipping ready notification: %s\n", pr, shortReadySHA(sha), detail)
+		return false
+	}
+	return succeeded
+}
+
+func shortReadySHA(sha string) string {
+	if len(sha) <= 7 {
+		return sha
+	}
+	return sha[:7]
 }

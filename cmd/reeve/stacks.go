@@ -53,6 +53,9 @@ func newStacksCmd() *cobra.Command {
 				}
 			}
 			stacks := discovery.Resolve(enum, decls, filter)
+			if err := discovery.ValidateUniqueRefs(stacks); err != nil {
+				return fmt.Errorf("stack discovery: %w", err)
+			}
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "%d stack(s):\n", len(stacks))
 			for _, s := range stacks {

@@ -40,6 +40,15 @@ for all core components.
 
 ## Conditional writes
 
+Run IDs for CI invocations include the provider's run number, commit identity,
+and attempt when available. This keeps reruns in separate artifact and audit
+prefixes.
+
+New run IDs use the full commit SHA. Legacy short-SHA run IDs remain readable.
+
+Apply and refresh lock-holder IDs include the attempt. A retry cannot adopt an
+unexpired lease from an earlier attempt, and can acquire it after expiry.
+
 All adapters must implement atomic conditional writes (If-Match on ETag,
 GCS generation preconditions, filesystem flock+rename). `ErrPreconditionFailed`
 signals "someone else got there first" - lock state machine re-reads.

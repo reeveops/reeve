@@ -522,9 +522,9 @@ func TestPreviewSHAOverriddenFromPRHead(t *testing.T) {
 		t.Fatalf("Preview: %v", err)
 	}
 
-	// RunID embeds the short SHA -- must be from headSHA, not envSHA.
-	if !strings.HasSuffix(out.RunID, shortSHA(headSHA)) {
-		t.Errorf("RunID %q should end with shortSHA(%q)=%q", out.RunID, headSHA, shortSHA(headSHA))
+	// RunID embeds the full SHA and must use headSHA rather than envSHA.
+	if out.RunID != runIdentity("run", 1, 0, headSHA) {
+		t.Errorf("RunID %q should use authoritative head SHA %q", out.RunID, headSHA)
 	}
 	if fvcs.getPRCall != 1 {
 		t.Fatalf("GetPR calls = %d, want one coherent preview snapshot", fvcs.getPRCall)
@@ -840,8 +840,8 @@ func TestPreviewLocalSkipsSHAOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(out.RunID, shortSHA(sha)) {
-		t.Errorf("RunID %q should end with shortSHA(%q)=%q", out.RunID, sha, shortSHA(sha))
+	if out.RunID != runIdentity("run", 1, 0, sha) {
+		t.Errorf("RunID %q should use commit SHA %q", out.RunID, sha)
 	}
 }
 
