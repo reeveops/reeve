@@ -93,7 +93,7 @@ func TestApplyTriggerComment(t *testing.T) {
 		if fv.getPRCalls != 1 {
 			t.Fatalf("PR metadata reads = %d, want 1", fv.getPRCalls)
 		}
-		if !strings.HasSuffix(out.RunID, bgSHA[:7]) {
+		if out.RunID != runIdentity("apply", 3, 0, bgSHA) {
 			t.Fatalf("run ID %q does not use authoritative PR head %s", out.RunID, bgSHA)
 		}
 	})
@@ -202,7 +202,7 @@ func TestApplyRunIdentityUsesAuthoritativeHeadAndAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "apply-3-2-" + bgSHA[:7]
+	want := runIdentity("apply", 3, 2, bgSHA)
 	if out.RunID != want {
 		t.Fatalf("run ID = %q, want %q", out.RunID, want)
 	}

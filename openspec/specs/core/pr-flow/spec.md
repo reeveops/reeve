@@ -35,6 +35,9 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 - A CI run ID includes the provider's run attempt when one is available. A
   rerun of the same run number MUST write a distinct manifest, saved-plan
   prefix, and audit record.
+- New run IDs MUST include the full commit SHA. Preview selection MUST accept
+  legacy short-SHA IDs and skip them when the manifest names a different full
+  commit SHA.
 - Apply and refresh lock-holder identity MUST remain stable across attempts of
   one provider run so a retry can resume a lock left by a cancelled earlier
   attempt.
@@ -127,6 +130,15 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   other attempt's manifest or saved plans
 - **AND** both attempts use the same apply or refresh lock-holder identity
 
+#### Scenario: Commits share a short SHA
+
+- **GIVEN** two commits share the same seven-character SHA prefix
+- **AND** preview history contains a legacy short-SHA manifest for the other
+  commit
+- **WHEN** apply, readiness, or explain loads the selected commit's preview
+- **THEN** the legacy manifest for the other full commit is ignored
+- **AND** new artifacts use the full commit SHA
+
 #### Scenario: Invalid run attempt
 
 - **GIVEN** a run attempt flag or environment value is present
@@ -143,6 +155,7 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 - **WHEN** apply, readiness, or explain selects the authoritative preview
 - **THEN** the operation fails closed
 - **AND** it does not accept an older manifest
+- **AND** apply does not bypass the failure when the commit was already applied
 
 #### Scenario: Unrelated manifest is unavailable
 

@@ -19,9 +19,9 @@ func TestRunIdentity(t *testing.T) {
 		sha        string
 		want       string
 	}{
-		{name: "first attempt", op: "run", runNumber: 42, runAttempt: 1, sha: "abcdef1234567890", want: "run-42-1-abcdef1"},
-		{name: "second attempt", op: "run", runNumber: 42, runAttempt: 2, sha: "abcdef1234567890", want: "run-42-2-abcdef1"},
-		{name: "direct caller", op: "apply", runNumber: 7, sha: "abc123456789", want: "apply-7-abc1234"},
+		{name: "first attempt", op: "run", runNumber: 42, runAttempt: 1, sha: "abcdef1234567890", want: "run-42-1-abcdef1234567890"},
+		{name: "second attempt", op: "run", runNumber: 42, runAttempt: 2, sha: "abcdef1234567890", want: "run-42-2-abcdef1234567890"},
+		{name: "direct caller", op: "apply", runNumber: 7, sha: "abc123456789", want: "apply-7-abc123456789"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -33,6 +33,9 @@ func TestRunIdentity(t *testing.T) {
 	}
 	if runIdentity("run", 42, 1, "abcdef1234567890") == runIdentity("run", 42, 2, "abcdef1234567890") {
 		t.Fatal("rerun attempts share one artifact identity")
+	}
+	if runIdentity("run", 42, 1, "abcdef1aaaaaaaaa") == runIdentity("run", 42, 1, "abcdef1bbbbbbbbb") {
+		t.Fatal("commits with the same short SHA share one artifact identity")
 	}
 }
 

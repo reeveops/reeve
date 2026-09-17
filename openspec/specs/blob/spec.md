@@ -44,6 +44,8 @@ Run IDs for CI invocations include the provider's run number, commit identity,
 and attempt when available. This keeps reruns in separate artifact and audit
 prefixes.
 
+New run IDs use the full commit SHA. Legacy short-SHA run IDs remain readable.
+
 Apply and refresh lock-holder IDs omit the attempt. Retries of one provider
 run therefore resume the same lock while artifact and audit identities remain
 separate.

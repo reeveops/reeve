@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -13,6 +14,8 @@ import (
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	"github.com/reeveops/reeve/internal/core/summary"
 )
+
+var errInvalidPreviewManifest = errors.New("invalid preview manifest")
 
 // PreviewStatus is what apply needs to know about a prior preview for a
 // given (PR, commit SHA, stack ref). Filled from the most recent matching
@@ -66,11 +69,11 @@ func LoadPreviewSnapshot(ctx context.Context, store blob.Store, prNumber int, co
 	}
 	for _, ss := range best.Stacks {
 		if strings.TrimSpace(ss.Project) == "" || strings.TrimSpace(ss.Stack) == "" {
-			return PreviewSnapshot{}, fmt.Errorf("preview manifest %q contains an invalid stack reference", best.RunID)
+			return PreviewSnapshot{}, fmt.Errorf("%w %q: invalid stack reference", errInvalidPreviewManifest, best.RunID)
 		}
 		ref := ss.Ref()
 		if _, exists := snapshot.statuses[ref]; exists {
-			return PreviewSnapshot{}, fmt.Errorf("preview manifest %q contains duplicate stack %q", best.RunID, ref)
+			return PreviewSnapshot{}, fmt.Errorf("%w %q: duplicate stack %q", errInvalidPreviewManifest, best.RunID, ref)
 		}
 		succeeded := false
 		switch ss.Status {
@@ -79,7 +82,7 @@ func LoadPreviewSnapshot(ctx context.Context, store blob.Store, prNumber int, co
 		case summary.StatusError:
 			snapshot.allSucceeded = false
 		default:
-			return PreviewSnapshot{}, fmt.Errorf("preview manifest %q has invalid status %q for stack %q", best.RunID, ss.Status, ref)
+			return PreviewSnapshot{}, fmt.Errorf("%w %q: invalid status %q for stack %q", errInvalidPreviewManifest, best.RunID, ss.Status, ref)
 		}
 		status := PreviewStatus{
 			Found:      true,
@@ -189,15 +192,15 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 		}
 		if m.Op != "preview" || m.CommitSHA != commitSHA {
 			if identityBound {
-				return nil, fmt.Errorf("preview manifest %q does not match its artifact identity", k)
+				return nil, fmt.Errorf("%w %q: content does not match artifact identity", errInvalidPreviewManifest, k)
 			}
 			continue
 		}
 		if m.PR != prNumber {
-			return nil, fmt.Errorf("preview manifest %q has PR %d, want %d", k, m.PR, prNumber)
+			return nil, fmt.Errorf("%w %q: PR %d, want %d", errInvalidPreviewManifest, k, m.PR, prNumber)
 		}
 		if m.RunID != runID {
-			return nil, fmt.Errorf("preview manifest %q has run_id %q, want %q", k, m.RunID, runID)
+			return nil, fmt.Errorf("%w %q: run_id %q, want %q", errInvalidPreviewManifest, k, m.RunID, runID)
 		}
 		createdAt, parseErr := time.Parse(time.RFC3339, m.CreatedAt)
 		if parseErr != nil {
@@ -229,9 +232,15 @@ func newerPreviewRunID(candidate, current, commitSHA string) bool {
 
 func previewRunOrder(runID, commitSHA string) (int, int, bool) {
 	const prefix = "run-"
-	suffix := "-" + shortSHA(commitSHA)
-	if !strings.HasPrefix(runID, prefix) || !strings.HasSuffix(runID, suffix) {
+	if !strings.HasPrefix(runID, prefix) {
 		return 0, 0, false
+	}
+	suffix := "-" + artifactSHA(commitSHA)
+	if !strings.HasSuffix(runID, suffix) {
+		suffix = "-" + shortSHA(commitSHA)
+		if !strings.HasSuffix(runID, suffix) {
+			return 0, 0, false
+		}
 	}
 
 	identity := strings.TrimSuffix(strings.TrimPrefix(runID, prefix), suffix)
@@ -265,8 +274,14 @@ func previewManifestCandidate(key, prefix, commitSHA string) (string, bool, bool
 	if strings.HasPrefix(runID, "apply-") || strings.HasPrefix(runID, "refresh-") {
 		return "", false, false
 	}
-	if strings.HasPrefix(runID, "run-") && !strings.HasSuffix(runID, "-"+shortSHA(commitSHA)) {
+	if strings.HasPrefix(runID, "run-") {
+		if strings.HasSuffix(runID, "-"+artifactSHA(commitSHA)) {
+			return runID, true, true
+		}
+		if strings.HasSuffix(runID, "-"+shortSHA(commitSHA)) {
+			return runID, false, true
+		}
 		return "", false, false
 	}
-	return runID, strings.HasPrefix(runID, "run-"), true
+	return runID, false, true
 }

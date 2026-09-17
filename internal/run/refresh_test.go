@@ -123,7 +123,7 @@ func TestRefreshUsesOneAuthoritativePRSnapshot(t *testing.T) {
 	if vcsClient.getPRCalls != 1 {
 		t.Fatalf("PR metadata reads = %d, want 1", vcsClient.getPRCalls)
 	}
-	want := "refresh-12-2-" + headSHA[:7]
+	want := runIdentity("refresh", 12, 2, headSHA)
 	if out.RunID != want {
 		t.Fatalf("run ID = %q, want %q", out.RunID, want)
 	}
@@ -131,35 +131,47 @@ func TestRefreshUsesOneAuthoritativePRSnapshot(t *testing.T) {
 
 func TestRefreshRerunResumesStableLockIdentity(t *testing.T) {
 	t.Parallel()
-	store, err := filesystem.New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	lockStore := blocks.New(store)
 	const sha = "abcdef1234567890"
-	holder := corelocks.Holder{PR: 7, CommitSHA: sha, RunID: lockIdentity("refresh", 12, sha)}
-	if _, acquired, err := lockStore.TryAcquire(t.Context(), "api", "prod", holder, time.Hour); err != nil || !acquired {
-		t.Fatalf("attempt 1 acquire = (%t, %v), want success", acquired, err)
+	tests := []struct {
+		name       string
+		runAttempt int
+	}{
+		{name: "legacy attempt", runAttempt: 0},
+		{name: "provider rerun", runAttempt: 2},
 	}
-	engine := &credentialRefreshEngine{stacks: []discovery.Stack{
-		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
-	}}
-	out, err := Refresh(t.Context(), RefreshInput{
-		PRNumber: 7, CommitSHA: sha, RunNumber: 12, RunAttempt: 2,
-		Local: true, RepoRoot: t.TempDir(), Engine: engine, Locks: lockStore,
-		Config: &schemas.Engine{Engine: schemas.EngineBody{
-			Type: "tofu", Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"prod"}}},
-		}},
-		Shared: &schemas.Shared{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Blocked || out.Failed || len(engine.refreshed) != 1 {
-		t.Fatalf("refresh rerun = %+v, refreshed = %v", out, engine.refreshed)
-	}
-	if want := "refresh-12-2-" + sha[:7]; out.RunID != want {
-		t.Fatalf("run ID = %q, want %q", out.RunID, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := filesystem.New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			lockStore := blocks.New(store)
+			holder := corelocks.Holder{PR: 7, CommitSHA: sha, RunID: lockIdentity("refresh", 12, sha)}
+			if _, acquired, err := lockStore.TryAcquire(t.Context(), "api", "prod", holder, time.Hour); err != nil || !acquired {
+				t.Fatalf("initial acquire = (%t, %v), want success", acquired, err)
+			}
+			engine := &credentialRefreshEngine{stacks: []discovery.Stack{
+				{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
+			}}
+			out, err := Refresh(t.Context(), RefreshInput{
+				PRNumber: 7, CommitSHA: sha, RunNumber: 12, RunAttempt: tt.runAttempt,
+				Local: true, RepoRoot: t.TempDir(), Engine: engine, Locks: lockStore,
+				Config: &schemas.Engine{Engine: schemas.EngineBody{
+					Type: "tofu", Stacks: []schemas.StackDecl{{Project: "api", Path: "projects/api", Stacks: []string{"prod"}}},
+				}},
+				Shared: &schemas.Shared{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Blocked || out.Failed || len(engine.refreshed) != 1 {
+				t.Fatalf("refresh rerun = %+v, refreshed = %v", out, engine.refreshed)
+			}
+			if want := runIdentity("refresh", 12, tt.runAttempt, sha); out.RunID != want {
+				t.Fatalf("run ID = %q, want %q", out.RunID, want)
+			}
+		})
 	}
 }
 

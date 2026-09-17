@@ -212,8 +212,9 @@ Skipped events do not run those setup steps.
 
 - `--run-attempt` defaults to `GITHUB_RUN_ATTEMPT`; an explicit flag takes precedence.
 - A supplied attempt must be a positive integer.
+- New artifacts use the full commit SHA; legacy short-SHA artifacts remain readable.
 - Workflow retries keep separate artifacts and audit records while apply and refresh resume the same lock identity.
-- Apply, ready, and explain stop when preview history for the selected commit is unreadable or invalid.
+- Apply, ready, and explain stop when preview history for the selected commit is unreadable or invalid, including an already-applied commit.
 - Ready does not post success, and explain does not post a partial report after that failure.
 
 ### Repository roots and change scope

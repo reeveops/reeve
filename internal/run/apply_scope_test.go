@@ -171,6 +171,32 @@ func TestApplyFailsClosedOnMalformedPreviewHistory(t *testing.T) {
 	}
 }
 
+func TestApplyAlreadyAppliedFailsClosedOnMalformedPreviewHistory(t *testing.T) {
+	t.Parallel()
+	engine := &bgEngine{}
+	store, _ := filesystem.New(t.TempDir())
+	in := twoStackInput(t, engine, store)
+	if err := writeAppliedState(t.Context(), store, AppliedState{
+		CommitSHA: in.CommitSHA,
+		RunID:     runIdentity("apply", 6, 1, in.CommitSHA),
+		RunNumber: 6,
+		AppliedAt: "2026-09-17T00:00:00Z",
+		PR:        in.PRNumber,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	putRawManifest(t, store, in.PRNumber, "run-99-1", in.CommitSHA, "{not-json")
+
+	_, err := Apply(t.Context(), in)
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("Apply error = %v, want *json.SyntaxError", err)
+	}
+	if len(engine.applied) != 0 {
+		t.Fatalf("malformed preview history allowed already-applied shortcut: %v", engine.applied)
+	}
+}
+
 // scopeDelta names what a recomputed mapping would have added, so the drop is
 // visible on the timeline rather than silent.
 func TestScopeDeltaNamesDroppedStacks(t *testing.T) {

@@ -227,6 +227,11 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	timeline := newApplyTimeline(in.VCS, in.Blob, in.PRNumber, runID, in.RunNumber, in.CommitSHA, in.CIRunURL)
 	timeline.add(ctx, "🚀", "apply starting", "")
 
+	previewSnapshot, err := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, in.CommitSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load preview snapshot: %w", err)
+	}
+
 	// Already-applied guard: if this exact commit was fully applied before and
 	// the caller didn't pass --force, there is nothing new to ship. Record it
 	// on the timeline and exit success rather than re-running side effects.
@@ -247,10 +252,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 	decls, filter := declarationsFromConfig(in.Config)
 	declared := discovery.Resolve(enum, decls, filter)
-	previewSnapshot, err := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, in.CommitSHA)
-	if err != nil {
-		return nil, fmt.Errorf("load preview snapshot: %w", err)
-	}
 	previewed, hasPreview := previewSnapshot.StackRefs()
 
 	changed, err := in.VCS.ListChangedFiles(ctx, in.PRNumber)

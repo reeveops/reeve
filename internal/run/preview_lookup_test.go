@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
@@ -51,11 +52,10 @@ func testPreviewRunID(runID, sha string) string {
 	if !strings.HasPrefix(runID, "run-") {
 		runID = "run-" + runID
 	}
-	suffix := "-" + shortSHA(sha)
-	if !strings.HasSuffix(runID, suffix) {
-		runID += suffix
+	if strings.HasSuffix(runID, "-"+artifactSHA(sha)) || strings.HasSuffix(runID, "-"+shortSHA(sha)) {
+		return runID
 	}
-	return runID
+	return runID + "-" + artifactSHA(sha)
 }
 
 func TestFindPreviewForStack_NoManifest(t *testing.T) {
@@ -226,6 +226,11 @@ type previewFailureStore struct {
 	failGet  bool
 }
 
+var (
+	errPreviewListUnavailable = errors.New("list unavailable")
+	errPreviewReadUnavailable = errors.New("read unavailable")
+)
+
 type previewExtraKeysStore struct {
 	blob.Store
 	keys []string
@@ -238,14 +243,14 @@ func (s *previewExtraKeysStore) List(ctx context.Context, prefix string) ([]stri
 
 func (s *previewFailureStore) List(ctx context.Context, prefix string) ([]string, error) {
 	if s.failList {
-		return nil, errors.New("list unavailable")
+		return nil, errPreviewListUnavailable
 	}
 	return s.Store.List(ctx, prefix)
 }
 
 func (s *previewFailureStore) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metadata, error) {
 	if s.failGet && strings.HasSuffix(key, "/manifest.json") {
-		return nil, nil, errors.New("read unavailable")
+		return nil, nil, errPreviewReadUnavailable
 	}
 	return s.Store.Get(ctx, key)
 }
@@ -290,10 +295,11 @@ func TestPreviewSnapshotRejectsMalformedCandidates(t *testing.T) {
 		name      string
 		createdAt string
 		stacks    []summary.StackSummary
+		parseErr  bool
 	}{
 		{name: "invalid timestamp", createdAt: "not-a-time", stacks: []summary.StackSummary{
 			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
-		}},
+		}, parseErr: true},
 		{name: "missing project", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
 			{Stack: "prod", Status: summary.StatusPlanned},
 		}},
@@ -316,8 +322,14 @@ func TestPreviewSnapshotRejectsMalformedCandidates(t *testing.T) {
 				t.Fatal(err)
 			}
 			putManifest(t, store, 42, "run-1", sha, tt.createdAt, tt.stacks)
-			if _, err := LoadPreviewSnapshot(t.Context(), store, 42, sha); err == nil {
-				t.Fatal("malformed preview manifest was accepted")
+			_, err = LoadPreviewSnapshot(t.Context(), store, 42, sha)
+			if tt.parseErr {
+				var parseErr *time.ParseError
+				if !errors.As(err, &parseErr) {
+					t.Fatalf("LoadPreviewSnapshot error = %v, want *time.ParseError", err)
+				}
+			} else if !errors.Is(err, errInvalidPreviewManifest) {
+				t.Fatalf("LoadPreviewSnapshot error = %v, want %v", err, errInvalidPreviewManifest)
 			}
 		})
 	}
@@ -330,8 +342,37 @@ func TestPreviewSnapshotRejectsUnreadableHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	putRawManifest(t, store, 42, "corrupt", "abc1234xyz", "{not-json")
-	if _, err := LoadPreviewSnapshot(t.Context(), store, 42, "abc1234xyz"); err == nil {
-		t.Fatal("corrupt preview history was ignored")
+	_, err = LoadPreviewSnapshot(t.Context(), store, 42, "abc1234xyz")
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("LoadPreviewSnapshot error = %v, want *json.SyntaxError", err)
+	}
+}
+
+func TestPreviewSnapshotSkipsLegacyShortSHACollision(t *testing.T) {
+	t.Parallel()
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const targetSHA = "abcdef1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const otherSHA = "abcdef1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	putManifest(t, store, 42, "run-9-1", targetSHA, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+	})
+	putManifest(t, store, 42, "run-10-"+shortSHA(otherSHA), otherSHA, "2026-08-08T12:00:01Z", []summary.StackSummary{
+		{Project: "worker", Stack: "prod", Status: summary.StatusPlanned},
+	})
+
+	snapshot, err := LoadPreviewSnapshot(t.Context(), store, 42, targetSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.StackStatus("api/prod").Succeeded {
+		t.Fatal("full-SHA preview was not selected")
+	}
+	if snapshot.StackStatus("worker/prod").Found {
+		t.Fatal("legacy preview for a different full SHA was selected")
 	}
 }
 
@@ -393,13 +434,21 @@ func TestPreviewSnapshotPropagatesStorageFailures(t *testing.T) {
 	putManifest(t, base, 42, "run-1", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
 		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
 	})
-	for _, store := range []*previewFailureStore{
-		{Store: base, failList: true},
-		{Store: base, failGet: true},
-	} {
-		if _, err := LoadPreviewSnapshot(t.Context(), store, 42, sha); err == nil {
-			t.Fatal("preview storage failure was ignored")
-		}
+	tests := []struct {
+		name  string
+		store *previewFailureStore
+		want  error
+	}{
+		{name: "list", store: &previewFailureStore{Store: base, failList: true}, want: errPreviewListUnavailable},
+		{name: "read", store: &previewFailureStore{Store: base, failGet: true}, want: errPreviewReadUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := LoadPreviewSnapshot(t.Context(), tt.store, 42, sha); !errors.Is(err, tt.want) {
+				t.Fatalf("LoadPreviewSnapshot error = %v, want %v", err, tt.want)
+			}
+		})
 	}
 }
 
