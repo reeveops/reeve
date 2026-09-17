@@ -119,6 +119,7 @@ func TestApplyCleanRunNotFailed(t *testing.T) {
 }
 
 func TestApplyLoadsPreviewManifestOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	engine := &failEngine{bgEngine: bgEngine{enum: []discovery.Stack{
 		{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},

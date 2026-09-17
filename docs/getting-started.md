@@ -208,6 +208,14 @@ That's it. The action auto-detects the command from the event:
 Event classification runs before binary setup, checkout, authentication, and engine installation.
 Skipped events do not run those setup steps.
 
+### Run attempts and preview history
+
+- `--run-attempt` defaults to `GITHUB_RUN_ATTEMPT`; an explicit flag takes precedence.
+- A supplied attempt must be a positive integer.
+- Workflow retries keep separate artifacts and audit records while apply and refresh resume the same lock identity.
+- Apply, ready, and explain stop when preview history for the selected commit is unreadable or invalid.
+- Ready does not post success, and explain does not post a partial report after that failure.
+
 ### Repository roots and change scope
 
 `--root` may point at a nested infrastructure directory in the checkout.

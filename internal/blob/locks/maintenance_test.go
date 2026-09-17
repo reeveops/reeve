@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -16,8 +17,15 @@ import (
 
 type maintenanceCounter struct {
 	blob.Store
-	reads, writes int
-	beforeWrite   func(string)
+	lists, reads, writes int
+	beforeWrite          func(string)
+}
+
+func (c *maintenanceCounter) List(ctx context.Context, prefix string) ([]string, error) {
+	if prefix == "locks" {
+		c.lists++
+	}
+	return c.Store.List(ctx, prefix)
 }
 
 func (c *maintenanceCounter) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metadata, error) {
@@ -95,8 +103,8 @@ func TestMaintenanceOperationCounts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if counter.reads != 1 || counter.writes != tc.writes || changes != tc.changes {
-				t.Fatalf("reads=%d writes=%d changes=%d; want 1/%d/%d", counter.reads, counter.writes, changes, tc.writes, tc.changes)
+			if counter.lists != 1 || counter.reads != 1 || counter.writes != tc.writes || changes != tc.changes {
+				t.Fatalf("lists=%d reads=%d writes=%d changes=%d; want 1/1/%d/%d", counter.lists, counter.reads, counter.writes, changes, tc.writes, tc.changes)
 			}
 			_, after, err := s.Get(ctx, "api", "prod")
 			if err != nil {
@@ -104,6 +112,76 @@ func TestMaintenanceOperationCounts(t *testing.T) {
 			}
 			if tc.writes == 0 && after != before {
 				t.Fatal("Unchanged maintenance rewrote the lock version")
+			}
+		})
+	}
+}
+
+func TestMaintenanceRequestBudgetAtScale(t *testing.T) {
+	const (
+		lockCount  = 1000
+		matchEvery = 100
+	)
+	for _, operation := range []string{"list", "reap", "unlock"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			now := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+			s := newStore(t, now)
+			for i := range lockCount {
+				l := corelocks.NewLock("scale", fmt.Sprintf("stack-%04d", i), now)
+				pr := i + 1000
+				expiresAt := now.Add(time.Hour)
+				if i%matchEvery == 0 {
+					if operation == "unlock" {
+						pr = 9
+					}
+					if operation == "reap" {
+						expiresAt = now.Add(-time.Hour)
+					}
+				}
+				l.Holder = &corelocks.Holder{
+					PR:         pr,
+					RunID:      "running",
+					AcquiredAt: now.Add(-2 * time.Hour).Format(time.RFC3339),
+					ExpiresAt:  expiresAt.Format(time.RFC3339),
+				}
+				data, err := json.Marshal(l)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.store.Put(ctx, s.key(l.Project, l.Stack), bytes.NewReader(data)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			counter := &maintenanceCounter{Store: s.store}
+			s.store = counter
+			wantChanges := 0
+			var changes int
+			var err error
+			switch operation {
+			case "list":
+				var locks []corelocks.Lock
+				locks, err = s.ListAll(ctx)
+				changes = len(locks)
+				wantChanges = lockCount
+			case "reap":
+				changes, err = s.ReapAll(ctx, time.Hour)
+				wantChanges = lockCount / matchEvery
+			case "unlock":
+				changes, _, err = s.UnlockPRAll(ctx, 9, "running", time.Hour, true)
+				wantChanges = lockCount / matchEvery
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantWrites := 0
+			if operation != "list" {
+				wantWrites = wantChanges
+			}
+			if counter.lists != 1 || counter.reads != lockCount || counter.writes != wantWrites || changes != wantChanges {
+				t.Fatalf("lists=%d reads=%d writes=%d changes=%d; want 1/%d/%d/%d", counter.lists, counter.reads, counter.writes, changes, lockCount, wantWrites, wantChanges)
 			}
 		})
 	}

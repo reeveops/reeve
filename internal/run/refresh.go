@@ -97,6 +97,7 @@ type RefreshOutput struct {
 func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	start := time.Now()
 	runID := runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
+	lockRunID := lockIdentity("refresh", in.RunNumber, in.CommitSHA)
 
 	if !in.Engine.Capabilities().SupportsRefresh {
 		return nil, fmt.Errorf("engine %s does not support refresh", in.Engine.Name())
@@ -117,9 +118,11 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			}
 			in.CommitSHA = in.ExpectedHeadSHA
 			runID = runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
+			lockRunID = lockIdentity("refresh", in.RunNumber, in.CommitSHA)
 		} else if pr.HeadSHA != "" {
 			in.CommitSHA = pr.HeadSHA
 			runID = runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
+			lockRunID = lockIdentity("refresh", in.RunNumber, in.CommitSHA)
 		}
 	}
 	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
@@ -227,7 +230,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		acquired := true
 		if !in.DryRun && in.Locks != nil {
 			lock, ok, lerr := in.Locks.TryAcquire(ctx, s.Project, s.Name, corelocks.Holder{
-				PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
+				PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: lockRunID, Actor: in.Actor,
 			}, ttl)
 			if lerr != nil {
 				ss.Status = summary.StatusError
@@ -262,7 +265,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 				ss.Error = redactor.Redact(loginErr.Error())
 				anyFailed = true
 				if acquired && !in.DryRun {
-					releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state login failed")
+					releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "state login failed")
 				}
 				summaries = append(summaries, ss)
 				continue
@@ -277,7 +280,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			ss.Error = redactor.Redact(aerr.Error())
 			anyFailed = true
 			if acquired && !in.DryRun {
-				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "auth resolve failed")
+				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "auth resolve failed")
 			}
 			summaries = append(summaries, ss)
 			continue
@@ -290,7 +293,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		var stopHeartbeat func()
 		if acquired && !in.DryRun && in.Locks != nil {
 			stopHeartbeat = in.Locks.StartHeartbeat(ctx, s.Project, s.Name, corelocks.Holder{
-				PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
+				PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: lockRunID, Actor: in.Actor,
 			}, ttl)
 		}
 		res, rerr := in.Engine.Refresh(ctx, s, iac.RefreshOpts{
@@ -304,7 +307,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		}
 		authCleanup()
 		if !in.DryRun && in.Locks != nil {
-			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "stack refresh complete")
+			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, lockRunID, ttl, "stack refresh complete")
 		}
 
 		ss.DurationMS = res.DurationMS

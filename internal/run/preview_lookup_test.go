@@ -179,6 +179,42 @@ func TestPlanSucceededAgreesWithNewestManifest(t *testing.T) {
 	}
 }
 
+func TestNewestPreviewManifestOrdersRunIdentityNumerically(t *testing.T) {
+	t.Parallel()
+	const sha = "abc1234xyz"
+	const sameSecond = "2026-08-08T12:00:00Z"
+	tests := []struct {
+		name       string
+		first      string
+		second     string
+		wantNewest string
+	}{
+		{name: "attempt", first: "run-9-10", second: "run-9-2", wantNewest: "run-9-10"},
+		{name: "run number", first: "run-10", second: "run-9", wantNewest: "run-10"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := filesystem.New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, runID := range []string{tt.first, tt.second} {
+				putManifest(t, store, 42, runID, sha, sameSecond, []summary.StackSummary{
+					{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+				})
+			}
+			best, err := newestPreviewManifest(t.Context(), store, 42, sha)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if best == nil || best.RunID != testPreviewRunID(tt.wantNewest, sha) {
+				t.Fatalf("newest manifest = %+v, want %q", best, testPreviewRunID(tt.wantNewest, sha))
+			}
+		})
+	}
+}
+
 type previewListCounter struct {
 	blob.Store
 	lists map[string]int

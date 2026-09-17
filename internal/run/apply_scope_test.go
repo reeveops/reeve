@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -154,13 +155,16 @@ func TestApplyWithNoPlanForCommitDoesNotWiden(t *testing.T) {
 }
 
 func TestApplyFailsClosedOnMalformedPreviewHistory(t *testing.T) {
+	t.Parallel()
 	engine := &bgEngine{}
 	store, _ := filesystem.New(t.TempDir())
 	in := twoStackInput(t, engine, store)
 	putRawManifest(t, store, in.PRNumber, "corrupt", in.CommitSHA, "{not-json")
 
-	if _, err := Apply(t.Context(), in); err == nil {
-		t.Fatalf("Apply error = %v, want malformed preview failure", err)
+	_, err := Apply(t.Context(), in)
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("Apply error = %v, want *json.SyntaxError", err)
 	}
 	if len(engine.applied) != 0 {
 		t.Fatalf("malformed preview history allowed applies: %v", engine.applied)

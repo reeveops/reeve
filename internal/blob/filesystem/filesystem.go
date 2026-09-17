@@ -80,11 +80,10 @@ func cleanKey(key string) (string, error) {
 	if k == "." {
 		return "", errors.New("blob key is empty")
 	}
-	// The lock namespace is reserved: it holds internal lockfiles, never
-	// objects. Refusing it here is what lets List skip the whole subtree
-	// without ever hiding a real key.
-	if k == lockNamespace || strings.HasPrefix(k, lockNamespace+"/") {
-		return "", fmt.Errorf("blob key %q is inside the reserved lock namespace %q", key, lockNamespace)
+	// Internal namespaces never contain objects. Refusing them here lets
+	// List skip those subtrees without hiding a real key.
+	if isInternalKey(k) {
+		return "", fmt.Errorf("blob key %q is inside a reserved internal namespace", key)
 	}
 	return k, nil
 }
@@ -115,7 +114,7 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metad
 		_ = f.Close()
 		return nil, nil, err
 	}
-	etag, err := hashKey(r, k)
+	etag, err := versionForInfo(r, k, st)
 	if err != nil {
 		_ = f.Close()
 		return nil, nil, err
@@ -135,6 +134,11 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader) (*blob.Metadat
 		return nil, err
 	}
 	defer root.Close()
+	lock, err := acquireShardLock(root, k)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.release()
 	return writeAtomic(root, k, r)
 }
 
@@ -149,14 +153,23 @@ func (s *Store) PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch
 	}
 	defer root.Close()
 
-	// Lock the target key via a sibling lockfile.
-	lock, err := acquireLock(root, k)
+	// Lock state keys retain the legacy per-key lock for compatibility with
+	// running versions that predate sharding. High-churn namespaces use only
+	// the bounded shard set.
+	if strings.HasPrefix(k, "locks/") {
+		legacyLock, err := acquireLegacyLock(root, k)
+		if err != nil {
+			return nil, err
+		}
+		defer legacyLock.release()
+	}
+	lock, err := acquireShardLock(root, k)
 	if err != nil {
 		return nil, err
 	}
 	defer lock.release()
 
-	current, statErr := hashKey(root, k)
+	current, _, statErr := inspectKey(root, k)
 	// Only "not there" may be read as absence. Any other stat/read failure
 	// (a permissions problem, a truncated read) previously fell through the
 	// ifMatch=="" branch and CREATED the object, overwriting whatever was
@@ -185,10 +198,15 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	defer root.Close()
+	lock, err := acquireShardLock(root, k)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 	if err := root.Remove(osKey(k)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return nil
+	return removeGeneration(root, k)
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
@@ -227,13 +245,12 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
-			if p == lockNamespace {
+			if isInternalKey(p) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		// Lockfiles are internal bookkeeping, not objects.
-		if p == lockNamespace || strings.HasPrefix(p, lockNamespace+"/") {
+		if isInternalKey(p) {
 			return nil
 		}
 		// WalkDir yields slash paths already relative to the bucket root,
@@ -242,6 +259,129 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		return nil
 	})
 	return out, err
+}
+
+// ListMetadata returns object metadata with a persisted write generation as
+// the version. It does not read object content.
+func (s *Store) ListMetadata(ctx context.Context, prefix string) ([]blob.ListedObject, error) {
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	fsys := root.FS()
+
+	start := "."
+	if strings.TrimSpace(prefix) != "" {
+		k, err := cleanKey(prefix)
+		if err != nil {
+			return nil, err
+		}
+		start = path.Clean(k)
+	}
+
+	info, err := fs.Stat(fsys, start)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		var out []blob.ListedObject
+		if err := appendListedObject(root, start, &out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+
+	var out []blob.ListedObject
+	err = fs.WalkDir(fsys, start, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if isInternalKey(p) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if isInternalKey(p) {
+			return nil
+		}
+		return appendListedObject(root, p, &out)
+	})
+	return out, err
+}
+
+// DeleteIfMatch removes key only while it is still the listed version.
+func (s *Store) DeleteIfMatch(ctx context.Context, key, version string) error {
+	if version == "" {
+		return blob.ErrPreconditionFailed
+	}
+	k, err := cleanKey(key)
+	if err != nil {
+		return err
+	}
+	root, err := s.openRoot()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	lock, err := acquireShardLock(root, k)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
+
+	current, _, err := inspectKey(root, k)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+		return blob.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if current != version {
+		return blob.ErrPreconditionFailed
+	}
+	if err := root.Remove(osKey(k)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return blob.ErrNotFound
+		}
+		return err
+	}
+	return removeGeneration(root, k)
+}
+
+func listedObject(root *os.Root, key string) (blob.ListedObject, error) {
+	lock, err := acquireShardLock(root, key)
+	if err != nil {
+		return blob.ListedObject{}, err
+	}
+	defer lock.release()
+
+	version, info, err := inspectKey(root, key)
+	if err != nil {
+		return blob.ListedObject{}, err
+	}
+	return blob.ListedObject{
+		Key:          key,
+		Version:      version,
+		LastModified: info.ModTime().Unix(),
+		Size:         info.Size(),
+	}, nil
+}
+
+func appendListedObject(root *os.Root, key string, out *[]blob.ListedObject) error {
+	listed, err := listedObject(root, key)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	*out = append(*out, listed)
+	return nil
 }
 
 // writeAtomic writes r to key via a sibling temp file plus rename. Both the
@@ -261,8 +401,7 @@ func writeAtomic(root *os.Root, key string, r io.Reader) (*blob.Metadata, error)
 	}
 	cleanup := func() { _ = root.Remove(osKey(tmpKey)) }
 
-	hasher := sha256.New()
-	n, err := io.Copy(tmp, io.TeeReader(r, hasher))
+	n, err := io.Copy(tmp, r)
 	if err != nil {
 		_ = tmp.Close()
 		cleanup()
@@ -277,11 +416,23 @@ func writeAtomic(root *os.Root, key string, r io.Reader) (*blob.Metadata, error)
 		cleanup()
 		return nil, err
 	}
+	generation, err := newGeneration()
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	// Publish the generation before the object. A failure between these
+	// renames may invalidate an old version, but can never let it delete a
+	// replacement.
+	if err := writeGeneration(root, key, generation); err != nil {
+		cleanup()
+		return nil, err
+	}
 	if err := root.Rename(osKey(tmpKey), osKey(key)); err != nil {
 		cleanup()
 		return nil, err
 	}
-	return &blob.Metadata{ETag: hex.EncodeToString(hasher.Sum(nil)), Size: n}, nil
+	return &blob.Metadata{ETag: generationVersion(generation), Size: n}, nil
 }
 
 // createTemp makes an exclusive temp file beside the target. os.Root has no
@@ -312,17 +463,127 @@ func createTemp(root *os.Root, dir string) (string, *os.File, error) {
 
 // --- helpers ---
 
-func hashKey(root *os.Root, key string) (string, error) {
-	f, err := root.Open(osKey(key))
+func inspectKey(root *os.Root, key string) (string, fs.FileInfo, error) {
+	info, err := root.Stat(osKey(key))
+	if err != nil {
+		return "", nil, err
+	}
+	version, err := versionForInfo(root, key, info)
+	return version, info, err
+}
+
+func versionForInfo(root *os.Root, key string, info fs.FileInfo) (string, error) {
+	generation, err := readGeneration(root, key)
+	if err != nil {
+		return "", err
+	}
+	if generation != "" {
+		return generationVersion(generation), nil
+	}
+	return legacyVersion(info), nil
+}
+
+func generationVersion(generation string) string { return "generation:" + generation }
+
+func legacyVersion(info fs.FileInfo) string {
+	// Objects created before generation tracking use metadata until their next
+	// write. Every write through this Store creates a generation.
+	return fmt.Sprintf("legacy:%d:%d", info.Size(), info.ModTime().UnixNano())
+}
+
+const generationNamespace = ".reeve-generations"
+
+func generationPathFor(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return generationNamespace + "/" + hex.EncodeToString(sum[:])
+}
+
+func newGeneration() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
+func readGeneration(root *os.Root, key string) (string, error) {
+	f, err := root.Open(osKey(generationPathFor(key)))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	value, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	if len(value) != 32 {
+		return "", fmt.Errorf("invalid generation for object %q", key)
+	}
+	return string(value), nil
+}
+
+func writeGeneration(root *os.Root, key, generation string) error {
+	if err := root.MkdirAll(osKey(generationNamespace), 0o750); err != nil {
+		return err
+	}
+	tmpKey, tmp, err := createTemp(root, generationNamespace)
+	if err != nil {
+		return err
+	}
+	cleanup := func() { _ = root.Remove(osKey(tmpKey)) }
+	if _, err := io.WriteString(tmp, generation); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := root.Rename(osKey(tmpKey), osKey(generationPathFor(key))); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
+}
+
+func removeGeneration(root *os.Root, key string) error {
+	err := root.Remove(osKey(generationPathFor(key)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func isInternalKey(key string) bool {
+	if isTemporaryKey(key) {
+		return true
+	}
+	for _, namespace := range []string{lockNamespace, generationNamespace} {
+		if key == namespace || strings.HasPrefix(key, namespace+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+const temporaryPrefix = ".reeve-tmp-"
+
+func isTemporaryKey(key string) bool {
+	for _, part := range strings.Split(key, "/") {
+		if strings.HasPrefix(part, temporaryPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 type fileLock struct {
@@ -336,10 +597,9 @@ type fileLock struct {
 // Unlinking races: with A holding the lock and B already blocked in
 // Flock on the same inode, A's unlink lets B proceed on a now-unlinked
 // inode while C opens the path fresh, creates a NEW inode and locks that.
-// B and C then both believe they hold the lock and their PutIfMatch
-// bodies interleave. Keeping the inode in place means every waiter
-// contends on the same one. The files are empty and are filtered out of
-// List, so leaving them costs a directory entry per key.
+// B and C then both believe they hold the lock and their operations
+// interleave. Keeping each shard inode in place makes every waiter contend
+// on the same bounded set of files.
 func (l *fileLock) release() {
 	if l.f != nil {
 		_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
@@ -353,19 +613,33 @@ func (l *fileLock) release() {
 // object.
 //
 // Locks used to sit beside their target as "<key>.lock", which put them in
-// the key space: an object legitimately named "foo.lock" collided with the
-// lock for "foo", and classifying by suffix forced List to hide real
-// objects ending in .lock. Naming by hash also keeps this directory flat,
-// so no per-key intermediate directories are created.
+// the key space. Sharded locks bound storage for high-churn objects, while
+// PutIfMatch retains legacy per-key locks only under locks/ for upgrade
+// compatibility with the lock state machine.
 const lockNamespace = ".reeve-locks"
+
+const lockShardCount = 256
 
 func lockPathFor(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return lockNamespace + "/" + hex.EncodeToString(sum[:])
 }
 
-func acquireLock(root *os.Root, key string) (*fileLock, error) {
-	lockKey := lockPathFor(key)
+func shardLockPathFor(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	shard := int(sum[0]) % lockShardCount
+	return fmt.Sprintf("%s/shard-%03d", lockNamespace, shard)
+}
+
+func acquireLegacyLock(root *os.Root, key string) (*fileLock, error) {
+	return acquireLockPath(root, lockPathFor(key))
+}
+
+func acquireShardLock(root *os.Root, key string) (*fileLock, error) {
+	return acquireLockPath(root, shardLockPathFor(key))
+}
+
+func acquireLockPath(root *os.Root, lockKey string) (*fileLock, error) {
 	if err := root.MkdirAll(osKey(lockNamespace), 0o750); err != nil {
 		return nil, err
 	}

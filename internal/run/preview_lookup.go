@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -203,13 +204,53 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 			return nil, fmt.Errorf("preview manifest %q has invalid created_at %q: %w", k, m.CreatedAt, parseErr)
 		}
 		if best == nil || createdAt.After(bestCreatedAt) ||
-			(createdAt.Equal(bestCreatedAt) && m.RunID > best.RunID) {
+			(createdAt.Equal(bestCreatedAt) && newerPreviewRunID(m.RunID, best.RunID, commitSHA)) {
 			c := m
 			best = &c
 			bestCreatedAt = createdAt
 		}
 	}
 	return best, nil
+}
+
+func newerPreviewRunID(candidate, current, commitSHA string) bool {
+	candidateRun, candidateAttempt, candidateOK := previewRunOrder(candidate, commitSHA)
+	currentRun, currentAttempt, currentOK := previewRunOrder(current, commitSHA)
+	if candidateOK && currentOK {
+		if candidateRun != currentRun {
+			return candidateRun > currentRun
+		}
+		if candidateAttempt != currentAttempt {
+			return candidateAttempt > currentAttempt
+		}
+	}
+	return candidate > current
+}
+
+func previewRunOrder(runID, commitSHA string) (int, int, bool) {
+	const prefix = "run-"
+	suffix := "-" + shortSHA(commitSHA)
+	if !strings.HasPrefix(runID, prefix) || !strings.HasSuffix(runID, suffix) {
+		return 0, 0, false
+	}
+
+	identity := strings.TrimSuffix(strings.TrimPrefix(runID, prefix), suffix)
+	parts := strings.Split(identity, "-")
+	if len(parts) < 1 || len(parts) > 2 {
+		return 0, 0, false
+	}
+	runNumber, err := strconv.Atoi(parts[0])
+	if err != nil || runNumber < 0 {
+		return 0, 0, false
+	}
+	if len(parts) == 1 {
+		return runNumber, 0, true
+	}
+	runAttempt, err := strconv.Atoi(parts[1])
+	if err != nil || runAttempt <= 0 {
+		return 0, 0, false
+	}
+	return runNumber, runAttempt, true
 }
 
 func previewManifestCandidate(key, prefix, commitSHA string) (string, bool, bool) {
