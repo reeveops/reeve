@@ -10,10 +10,14 @@ package s3
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -27,9 +31,12 @@ import (
 
 // Store implements blob.Store against an S3 bucket.
 type Store struct {
-	client *s3.Client
-	bucket string
-	prefix string // optional key prefix (includes trailing slash if non-empty)
+	client           *s3.Client
+	bucket           string
+	prefix           string // optional key prefix (includes trailing slash if non-empty)
+	deleteProbeMu    sync.Mutex
+	deleteProbed     bool
+	deleteProbeError error
 }
 
 // Options configures New.
@@ -198,6 +205,126 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		continuationToken = res.NextContinuationToken
 	}
 	return out, nil
+}
+
+// ListMetadata returns metadata already present in ListObjectsV2 responses.
+func (s *Store) ListMetadata(ctx context.Context, prefix string) ([]blob.ListedObject, error) {
+	var out []blob.ListedObject
+	var continuationToken *string
+	fullPrefix := s.fullKey(prefix)
+	for {
+		res, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(fullPrefix),
+			ContinuationToken: continuationToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, obj := range res.Contents {
+			listed := blob.ListedObject{
+				Key:     strings.TrimPrefix(aws.ToString(obj.Key), s.prefix),
+				Version: strings.Trim(aws.ToString(obj.ETag), `"`),
+				Size:    aws.ToInt64(obj.Size),
+			}
+			if obj.LastModified != nil {
+				listed.LastModified = obj.LastModified.Unix()
+			}
+			out = append(out, listed)
+		}
+		if res.IsTruncated == nil || !*res.IsTruncated {
+			break
+		}
+		continuationToken = res.NextContinuationToken
+	}
+	return out, nil
+}
+
+// DeleteIfMatch removes key only if its ETag still matches version.
+func (s *Store) DeleteIfMatch(ctx context.Context, key, version string) error {
+	if version == "" {
+		return blob.ErrPreconditionFailed
+	}
+	if err := s.ensureConditionalDeletes(ctx); err != nil {
+		return err
+	}
+	return s.deleteIfMatch(ctx, key, version)
+}
+
+func (s *Store) deleteIfMatch(ctx context.Context, key, version string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:  aws.String(s.bucket),
+		Key:     aws.String(s.fullKey(key)),
+		IfMatch: aws.String(`"` + version + `"`),
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return blob.ErrNotFound
+		}
+		if isPreconditionFailed(err) {
+			return blob.ErrPreconditionFailed
+		}
+		return err
+	}
+	return nil
+}
+
+// ensureConditionalDeletes verifies that the endpoint enforces If-Match
+// before retention can delete a user object. Some S3-compatible endpoints
+// accept the header but silently perform an unconditional delete.
+func (s *Store) ensureConditionalDeletes(ctx context.Context) error {
+	s.deleteProbeMu.Lock()
+	defer s.deleteProbeMu.Unlock()
+	if s.deleteProbed {
+		return s.deleteProbeError
+	}
+	err := s.probeConditionalDeletes(ctx)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if err != nil && !errors.Is(err, blob.ErrConditionalDeletesUnsupported) {
+		err = fmt.Errorf("%w: %w", blob.ErrConditionalDeleteProbeFailed, err)
+	}
+	s.deleteProbed = true
+	s.deleteProbeError = err
+	return err
+}
+
+func (s *Store) probeConditionalDeletes(ctx context.Context) error {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Errorf("conditional-delete probe: %w", err)
+	}
+	key := "runs/.delete-cas-probe/" + hex.EncodeToString(suffix[:])
+	defer func() { _ = s.Delete(ctx, key) }()
+
+	first, err := s.Put(ctx, key, strings.NewReader("probe-one"))
+	if err != nil {
+		return fmt.Errorf("conditional-delete probe: initial write failed: %w", err)
+	}
+	version := ""
+	if first != nil {
+		version = first.ETag
+	}
+	if version == "" {
+		return fmt.Errorf("%w: backend returns no ETag to compare against", blob.ErrConditionalDeletesUnsupported)
+	}
+	second, err := s.Put(ctx, key, strings.NewReader("probe-two"))
+	if err != nil {
+		return fmt.Errorf("conditional-delete probe: replacement write failed: %w", err)
+	}
+	if second == nil || second.ETag == "" || second.ETag == version {
+		return fmt.Errorf("%w: ETag did not change after replacement", blob.ErrConditionalDeletesUnsupported)
+	}
+
+	switch err := s.deleteIfMatch(ctx, key, version); {
+	case err == nil:
+		return blob.ErrConditionalDeletesUnsupported
+	case errors.Is(err, blob.ErrPreconditionFailed):
+		return nil
+	default:
+		return fmt.Errorf("conditional-delete probe: %w", err)
+	}
 }
 
 func isNotFound(err error) bool {

@@ -12,7 +12,21 @@ import (
 	"testing"
 
 	"github.com/reeveops/reeve/internal/blob"
+	"github.com/reeveops/reeve/internal/blob/blobtest"
 )
+
+func TestContract(t *testing.T) {
+	blobtest.RunContract(t, blobtest.Subject{
+		NewStore: func(t *testing.T) blob.Store {
+			t.Helper()
+			store, err := New(t.TempDir())
+			if err != nil {
+				t.Fatalf("new filesystem store: %v", err)
+			}
+			return store
+		},
+	})
+}
 
 func TestPutGet(t *testing.T) {
 	ctx := context.Background()
@@ -34,6 +48,29 @@ func TestPutGet(t *testing.T) {
 	}
 	if string(data) != `{"ok":true}` {
 		t.Fatalf("roundtrip mismatch: %s", data)
+	}
+}
+
+func TestGetDoesNotCreateLockfiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "runs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "runs", "manifest.json"), []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := s.Get(t.Context(), "runs/manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if _, err := os.Stat(filepath.Join(dir, lockNamespace)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Get created lock namespace: %v", err)
 	}
 }
 
@@ -136,6 +173,207 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestListMetadataAndConditionalDelete(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "runs/pr-1/old/manifest.json"
+	if _, err := s.Put(ctx, key, strings.NewReader("old")); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := s.ListMetadata(ctx, "runs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 {
+		t.Fatalf("listed %d objects, want 1", len(objects))
+	}
+	listed := objects[0]
+	if listed.Key != key || listed.Version == "" || listed.LastModified == 0 || listed.Size != 3 {
+		t.Fatalf("listed object = %+v", listed)
+	}
+
+	if _, err := s.Put(ctx, key, strings.NewReader("new")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteIfMatch(ctx, key, listed.Version); !errors.Is(err, blob.ErrPreconditionFailed) {
+		t.Fatalf("delete replaced object = %v, want ErrPreconditionFailed", err)
+	}
+	objects, err = s.ListMetadata(ctx, key)
+	if err != nil || len(objects) != 1 {
+		t.Fatalf("relist: objects=%v err=%v", objects, err)
+	}
+	if err := s.DeleteIfMatch(ctx, key, objects[0].Version); err != nil {
+		t.Fatalf("delete current object: %v", err)
+	}
+	if _, _, err := s.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+		t.Fatalf("get deleted object = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteIfMatchRejectsIdenticalRewrite(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "runs/pr-1/old/manifest.json"
+	if _, err := s.Put(ctx, key, strings.NewReader("same")); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := s.ListMetadata(ctx, key)
+	if err != nil || len(objects) != 1 {
+		t.Fatalf("list: objects=%v err=%v", objects, err)
+	}
+	staleVersion := objects[0].Version
+
+	if _, err := s.Put(ctx, key, strings.NewReader("same")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteIfMatch(ctx, key, staleVersion); !errors.Is(err, blob.ErrPreconditionFailed) {
+		t.Fatalf("delete identically rewritten object = %v, want ErrPreconditionFailed", err)
+	}
+	data, _, err := ReadBytes(ctx, s, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "same" {
+		t.Fatalf("replacement content = %q, want same", data)
+	}
+}
+
+func TestArtifactChurnUsesBoundedLockShards(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const artifactCount = 500
+	for i := range artifactCount {
+		key := fmt.Sprintf("runs/pr-1/history-%04d/manifest.json", i)
+		if _, err := s.Put(t.Context(), key, strings.NewReader("manifest")); err != nil {
+			t.Fatalf("put artifact %d: %v", i, err)
+		}
+	}
+	objects, err := s.ListMetadata(t.Context(), "runs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != artifactCount {
+		t.Fatalf("listed %d artifacts, want %d", len(objects), artifactCount)
+	}
+	for i, object := range objects {
+		if err := s.DeleteIfMatch(t.Context(), object.Key, object.Version); err != nil {
+			t.Fatalf("delete artifact %d: %v", i, err)
+		}
+	}
+
+	locks, err := os.ReadDir(filepath.Join(dir, lockNamespace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) > lockShardCount {
+		t.Fatalf("artifact churn left %d lockfiles, want at most %d", len(locks), lockShardCount)
+	}
+	for _, lock := range locks {
+		if !strings.HasPrefix(lock.Name(), "shard-") {
+			t.Fatalf("artifact churn left per-key lockfile %q", lock.Name())
+		}
+	}
+	generations, err := os.ReadDir(filepath.Join(dir, generationNamespace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(generations) != 0 {
+		t.Fatalf("artifact churn left %d generation files, want 0", len(generations))
+	}
+	keys, err := s.List(t.Context(), "runs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("artifact churn left objects: %v", keys)
+	}
+}
+
+func TestConditionalWriteChurnUsesBoundedLockShards(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const recordCount = 500
+	for i := range recordCount {
+		key := fmt.Sprintf("audit/2026/09/17/run-%04d.json", i)
+		if _, err := s.PutIfMatch(t.Context(), key, strings.NewReader("audit"), ""); err != nil {
+			t.Fatalf("write audit record %d: %v", i, err)
+		}
+	}
+
+	locks, err := os.ReadDir(filepath.Join(dir, lockNamespace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) > lockShardCount {
+		t.Fatalf("conditional-write churn left %d lockfiles, want at most %d", len(locks), lockShardCount)
+	}
+	for _, lock := range locks {
+		if !strings.HasPrefix(lock.Name(), "shard-") {
+			t.Fatalf("conditional-write churn left per-key lockfile %q", lock.Name())
+		}
+	}
+}
+
+func TestListMetadataSkipsTransientFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(t.Context(), "runs/pr-1/manifest.json", strings.NewReader("manifest")); err != nil {
+		t.Fatal(err)
+	}
+	tempPath := filepath.Join(dir, "runs", "pr-1", temporaryPrefix+"deadbeef")
+	if err := os.WriteFile(tempPath, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	objects, err := s.ListMetadata(t.Context(), "runs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 || objects[0].Key != "runs/pr-1/manifest.json" {
+		t.Fatalf("ListMetadata = %+v, want only manifest", objects)
+	}
+	keys, err := s.List(t.Context(), "runs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] != "runs/pr-1/manifest.json" {
+		t.Fatalf("List = %v, want only manifest", keys)
+	}
+
+	root, err := s.openRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	var listed []blob.ListedObject
+	if err := appendListedObject(root, "runs/pr-1/already-gone", &listed); err != nil {
+		t.Fatalf("disappeared object aborted listing: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("disappeared object was listed: %+v", listed)
+	}
+}
+
 // TestPutIfMatchSerializesConcurrentCreates is the race the lockfile exists
 // to prevent. Many goroutines race to create the same key with
 // If-None-Match; exactly one may win.
@@ -192,8 +430,8 @@ func TestListHidesLockfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range keys {
-		if strings.HasPrefix(k, lockNamespace) {
-			t.Fatalf("List returned an internal lockfile: %q (all keys: %v)", k, keys)
+		if isInternalKey(k) {
+			t.Fatalf("List returned internal metadata: %q (all keys: %v)", k, keys)
 		}
 	}
 	if len(keys) != 1 || keys[0] != "runs/pr-1/manifest.json" {
@@ -331,14 +569,20 @@ func TestLockNamespaceIsReserved(t *testing.T) {
 	if _, _, err := s.Get(ctx, lockNamespace+"/anything"); err == nil {
 		t.Fatal("reading from the reserved lock namespace was allowed")
 	}
+	if _, err := s.Put(ctx, generationNamespace+"/anything", strings.NewReader("x")); err == nil {
+		t.Fatal("writing into the reserved generation namespace was allowed")
+	}
+	if _, err := s.Put(ctx, "runs/"+temporaryPrefix+"anything", strings.NewReader("x")); err == nil {
+		t.Fatal("writing an internal temporary key was allowed")
+	}
 	// ...and never surfaces from a whole-bucket walk.
 	all, err := s.List(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, k := range all {
-		if strings.HasPrefix(k, lockNamespace) {
-			t.Fatalf("lock namespace leaked into List: %q", k)
+		if isInternalKey(k) {
+			t.Fatalf("internal namespace leaked into List: %q", k)
 		}
 	}
 }

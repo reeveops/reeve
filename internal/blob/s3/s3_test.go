@@ -3,13 +3,20 @@ package s3
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+
+	"github.com/reeveops/reeve/internal/blob"
 )
 
 // responseError builds the layered error the SDK produces for an HTTP
@@ -121,5 +128,104 @@ func TestIsNotFound(t *testing.T) {
 				t.Fatalf("isNotFound(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDeleteIfMatchRejectsEndpointThatIgnoresPrecondition(t *testing.T) {
+	t.Parallel()
+
+	var puts atomic.Int64
+	var mu sync.Mutex
+	var deletePaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		switch r.Method {
+		case http.MethodPut:
+			w.Header().Set("ETag", fmt.Sprintf(`"etag-%d"`, puts.Add(1)))
+			w.WriteHeader(http.StatusOK)
+		case http.MethodDelete:
+			mu.Lock()
+			deletePaths = append(deletePaths, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unsupported", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	store, err := New(t.Context(), Options{
+		Bucket:       "contract",
+		Region:       "us-east-1",
+		Endpoint:     server.URL,
+		UsePathStyle: true,
+		AccessKey:    "test",
+		SecretKey:    "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteIfMatch(t.Context(), "runs/user.json", "user-etag"); !errors.Is(err, blob.ErrConditionalDeletesUnsupported) {
+		t.Fatalf("DeleteIfMatch = %v, want ErrConditionalDeletesUnsupported", err)
+	}
+	if got := puts.Load(); got != 2 {
+		t.Fatalf("probe writes = %d, want 2", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, requestPath := range deletePaths {
+		if strings.HasSuffix(requestPath, "/runs/user.json") {
+			t.Fatalf("unsafe endpoint received deletion for user object: %q", requestPath)
+		}
+	}
+}
+
+func TestDeleteIfMatchCachesProbeFailure(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int64
+	var mu sync.Mutex
+	var putPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		if r.Method == http.MethodPut {
+			mu.Lock()
+			putPath = r.URL.Path
+			mu.Unlock()
+			http.Error(w, "access denied", http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	store, err := New(t.Context(), Options{
+		Bucket:       "contract",
+		Region:       "us-east-1",
+		Endpoint:     server.URL,
+		UsePathStyle: true,
+		AccessKey:    "test",
+		SecretKey:    "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstErr := store.DeleteIfMatch(t.Context(), "runs/one.json", "etag")
+	if !errors.Is(firstErr, blob.ErrConditionalDeleteProbeFailed) {
+		t.Fatalf("first DeleteIfMatch = %v, want ErrConditionalDeleteProbeFailed", firstErr)
+	}
+	firstRequests := requests.Load()
+	secondErr := store.DeleteIfMatch(t.Context(), "runs/two.json", "etag")
+	if !errors.Is(secondErr, blob.ErrConditionalDeleteProbeFailed) {
+		t.Fatalf("second DeleteIfMatch = %v, want ErrConditionalDeleteProbeFailed", secondErr)
+	}
+	if got := requests.Load(); got != firstRequests {
+		t.Fatalf("cached probe made more requests: first=%d total=%d", firstRequests, got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(putPath, "/runs/.delete-cas-probe/") {
+		t.Fatalf("probe path = %q, want managed runs namespace", putPath)
 	}
 }
