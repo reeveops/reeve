@@ -178,6 +178,27 @@ func TestExplainLoadsPreviewManifestOnce(t *testing.T) {
 	}
 }
 
+func TestExplainReportsUnavailablePreviewHistory(t *testing.T) {
+	_, fv, in := explainFixture(t)
+	putRawManifest(t, in.Blob, 18, "run-999", bgSHA, "{not-json")
+
+	out, err := Explain(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Blocked {
+		t.Fatal("unavailable preview history must fail preview gates closed")
+	}
+	for _, want := range []string{"Preview history is unavailable", "could not be evaluated", "preview_succeeded", "preview_fresh"} {
+		if !strings.Contains(out.Body, want) {
+			t.Fatalf("explain report missing %q:\n%s", want, out.Body)
+		}
+	}
+	if len(fv.comments[render.ExplainMarker(shortSHA(bgSHA))]) != 1 {
+		t.Fatal("expected degraded explain report to be posted")
+	}
+}
+
 func TestExplainForkPRIdenticalPath(t *testing.T) {
 	// Fork PRs run explain identically: no credentials involved, gate
 	// trace still renders (with the fork gate failing closed by default).

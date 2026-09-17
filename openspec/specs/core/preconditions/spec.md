@@ -19,13 +19,13 @@ comment renderer. All gates shown in comment regardless of which failed.
 For an authorized break-glass run (see `openspec/specs/core/approvals`),
 gate evaluation overrides the approvals gate unconditionally and the freeze
 gate only when `break_glass.override_freeze` is true (the default). An
-overridden gate surfaces as a WARNING in the gate trace - visible, never
-silent - and is reported in the evaluation result's overridden-gates list
-(which feeds the audit record and PR comment). Break-glass NEVER overrides
-the lock gate, and leaves every other gate untouched: checks_green,
-up_to_date, preview_succeeded, preview_fresh, policy, fork-PR, and draft-PR
-all still apply. A gate that would have passed anyway is not reported as
-overridden.
+overridden gate surfaces as a WARNING in the gate trace and is reported in
+the evaluation result's overridden-gates list. If selected preview history
+cannot be read or decoded, an authorized break-glass run MAY also override
+`preview_succeeded` and `preview_fresh` so the repository can recover.
+Break-glass NEVER overrides the lock, checks, up-to-date, policy, fork-PR, or
+draft-PR gates. An ordinary missing, stale, or failed preview remains binding.
+A gate that would have passed anyway is not reported as overridden.
 
 ## Fork PR gate
 

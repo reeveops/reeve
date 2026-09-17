@@ -97,7 +97,7 @@ type RefreshOutput struct {
 func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	start := time.Now()
 	runID := runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
-	lockRunID := lockIdentity("refresh", in.RunNumber, in.CommitSHA)
+	lockRunID := lockIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
 
 	if !in.Engine.Capabilities().SupportsRefresh {
 		return nil, fmt.Errorf("engine %s does not support refresh", in.Engine.Name())
@@ -118,11 +118,11 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			}
 			in.CommitSHA = in.ExpectedHeadSHA
 			runID = runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
-			lockRunID = lockIdentity("refresh", in.RunNumber, in.CommitSHA)
+			lockRunID = lockIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
 		} else if pr.HeadSHA != "" {
 			in.CommitSHA = pr.HeadSHA
 			runID = runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
-			lockRunID = lockIdentity("refresh", in.RunNumber, in.CommitSHA)
+			lockRunID = lockIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
 		}
 	}
 	enum, err := in.Engine.EnumerateStacks(ctx, in.RepoRoot)
@@ -131,6 +131,9 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 	}
 	decls, filter := declarationsFromConfig(in.Config)
 	declared := discovery.Resolve(enum, decls, filter)
+	if err := discovery.ValidateUniqueRefs(declared); err != nil {
+		return nil, fmt.Errorf("stack discovery: %w", err)
+	}
 
 	target := declared
 	if pr != nil {

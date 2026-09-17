@@ -129,7 +129,7 @@ func TestRefreshUsesOneAuthoritativePRSnapshot(t *testing.T) {
 	}
 }
 
-func TestRefreshRerunResumesStableLockIdentity(t *testing.T) {
+func TestRefreshRerunRefusesEarlierAttemptLock(t *testing.T) {
 	t.Parallel()
 	const sha = "abcdef1234567890"
 	tests := []struct {
@@ -147,7 +147,7 @@ func TestRefreshRerunResumesStableLockIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			lockStore := blocks.New(store)
-			holder := corelocks.Holder{PR: 7, CommitSHA: sha, RunID: lockIdentity("refresh", 12, sha)}
+			holder := corelocks.Holder{PR: 7, CommitSHA: sha, RunID: lockIdentity("refresh", 12, 1, sha)}
 			if _, acquired, err := lockStore.TryAcquire(t.Context(), "api", "prod", holder, time.Hour); err != nil || !acquired {
 				t.Fatalf("initial acquire = (%t, %v), want success", acquired, err)
 			}
@@ -165,8 +165,8 @@ func TestRefreshRerunResumesStableLockIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if out.Blocked || out.Failed || len(engine.refreshed) != 1 {
-				t.Fatalf("refresh rerun = %+v, refreshed = %v", out, engine.refreshed)
+			if out.Blocked || !out.Failed || len(engine.refreshed) != 0 {
+				t.Fatalf("refresh rerun = %+v, refreshed = %v; want failed before engine execution", out, engine.refreshed)
 			}
 			if want := runIdentity("refresh", 12, tt.runAttempt, sha); out.RunID != want {
 				t.Fatalf("run ID = %q, want %q", out.RunID, want)

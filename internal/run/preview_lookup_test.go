@@ -390,6 +390,9 @@ func TestPreviewSnapshotIgnoresUnrelatedMalformedManifests(t *testing.T) {
 	if _, err := store.Put(t.Context(), "runs/pr-42/apply-9-1-abc1234/manifest.json", strings.NewReader("{not-json")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Put(t.Context(), "runs/pr-42/legacy-layout/manifest.json", strings.NewReader("{not-json")); err != nil {
+		t.Fatal(err)
+	}
 
 	snapshot, err := LoadPreviewSnapshot(t.Context(), store, 42, sha)
 	if err != nil {
@@ -413,6 +416,7 @@ func TestPreviewSnapshotIgnoresUnrelatedMissingManifests(t *testing.T) {
 	store := &previewExtraKeysStore{Store: base, keys: []string{
 		"runs/pr-42/apply-9-1-abc1234/manifest.json",
 		"runs/pr-42/run-9-1-differe/manifest.json",
+		"runs/pr-42/legacy-layout/manifest.json",
 	}}
 
 	snapshot, err := LoadPreviewSnapshot(t.Context(), store, 42, sha)

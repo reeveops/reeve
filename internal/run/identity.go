@@ -19,9 +19,8 @@ func artifactSHA(commitSHA string) string {
 	return commitSHA
 }
 
-// lockIdentity stays stable across reruns of one provider run. A retry must
-// be able to resume a lock left by its cancelled earlier attempt or by a
-// Reeve version that used the legacy short-SHA identity.
-func lockIdentity(op string, runNumber int, commitSHA string) string {
-	return fmt.Sprintf("%s-%d-%s", op, runNumber, shortSHA(commitSHA))
+// lockIdentity distinguishes provider attempts so a retry cannot adopt the
+// live lease of a cancelled or still-running earlier attempt.
+func lockIdentity(op string, runNumber, runAttempt int, commitSHA string) string {
+	return runIdentity(op, runNumber, runAttempt, commitSHA)
 }

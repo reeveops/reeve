@@ -244,6 +244,10 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 			return nil, fmt.Errorf("enumerate stacks: %w", err)
 		}
 		target = discovery.Resolve(enum, decls, filter)
+		if err := discovery.ValidateUniqueRefs(target); err != nil {
+			outcome = "failed"
+			return nil, fmt.Errorf("stack discovery: %w", err)
+		}
 		slog.Debug("preview target: all declared stacks", "count", len(target))
 	} else {
 		if changedErr != nil {
@@ -264,6 +268,10 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 				return nil, fmt.Errorf("enumerate stacks: %w", err)
 			}
 			declared := discovery.Resolve(enum, decls, filter)
+			if err := discovery.ValidateUniqueRefs(declared); err != nil {
+				outcome = "failed"
+				return nil, fmt.Errorf("stack discovery: %w", err)
+			}
 			res := discovery.AffectedDetailed(declared, changed, cm)
 			target = res.Stacks
 			mappingNotice = mappingNoticeFor(res)

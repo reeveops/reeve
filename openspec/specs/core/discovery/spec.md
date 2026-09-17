@@ -12,6 +12,16 @@
 Always explicit. reeve acts only on stacks that are either declared
 literally or match a declared pattern. There is no runtime auto-discovery.
 
+The resolved `project/stack` reference MUST identify one repository path.
+`reeve lint` and runtime commands reject ambiguous references and name the paths.
+
+#### Scenario: Duplicate stack reference
+
+- **GIVEN** two project directories resolve to the same `project/stack` reference
+- **WHEN** lint or a runtime command resolves declared stacks
+- **THEN** the command fails before preview, lock, credential, or engine work
+- **AND** the error names the duplicate reference and both paths
+
 ## Pattern language
 
 Doublestar glob. `re:` regex escape hatch is **not shipped in v1** (cut

@@ -125,30 +125,20 @@ func (s PreviewSnapshot) Succeeded() bool {
 	return s.allSucceeded
 }
 
-// PlanSucceededForPR returns true if the most recent preview manifest for the
-// given PR and commit SHA exists and has no stacks in error state.
-//
-// Selection goes through newestPreviewManifest for the same reason
-// FindPreviewForStack does: if the "which manifest is authoritative"
-// answers ever disagreed, `reeve ready` could report a green plan from one
-// run while apply gated against another. This function used to re-implement
-// the scan and had already drifted - it was missing the RunID tie-break for
-// manifests written in the same second.
+// PlanSucceededForPR reports whether the shared snapshot for one PR and commit
+// exists and has no stack errors.
 func PlanSucceededForPR(ctx context.Context, store blob.Store, prNumber int, commitSHA string) (bool, error) {
 	snapshot, err := LoadPreviewSnapshot(ctx, store, prNumber, commitSHA)
 	return snapshot.Succeeded(), err
 }
 
-// FindPreviewForStack scans runs/pr-{n}/ for manifests, picks the most
-// recent one whose commit_sha + op=preview matches, and reports whether
-// the named stack was present and successful there.
+// FindPreviewForStack loads the shared snapshot and returns one stack status.
 func FindPreviewForStack(ctx context.Context, store blob.Store, prNumber int, commitSHA, stackRef string) (PreviewStatus, error) {
 	snapshot, err := LoadPreviewSnapshot(ctx, store, prNumber, commitSHA)
 	return snapshot.StackStatus(stackRef), err
 }
 
-// PreviewedStackRefs returns the set of stack refs the newest preview for
-// this exact commit SHA covered, and whether such a preview exists.
+// PreviewedStackRefs returns the stack refs in the selected snapshot.
 //
 // This is what binds apply's blast radius to what was actually planned and
 // approved. Apply must not re-derive its target set from the PR's changed
@@ -184,10 +174,18 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 		}
 		data, _, err := filesystem.ReadBytes(ctx, store, k)
 		if err != nil {
+			if !identityBound {
+				slog.Debug("skip unreadable unbound preview manifest", "key", k, "err", err)
+				continue
+			}
 			return nil, fmt.Errorf("read preview manifest %q: %w", k, err)
 		}
 		var m manifest
 		if err := json.Unmarshal(data, &m); err != nil {
+			if !identityBound {
+				slog.Debug("skip malformed unbound preview manifest", "key", k, "err", err)
+				continue
+			}
 			return nil, fmt.Errorf("decode preview manifest %q: %w", k, err)
 		}
 		if m.Op != "preview" || m.CommitSHA != commitSHA {

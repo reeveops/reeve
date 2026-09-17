@@ -265,6 +265,30 @@ func TestBreakGlassStillEnforcesChecksAndPreview(t *testing.T) {
 	}
 }
 
+func TestBreakGlassOverridesOnlyUnavailablePreviewHistory(t *testing.T) {
+	in := Inputs{
+		ChecksGreen: false, PreviewSucceeded: false, HasFreshPreview: false,
+		ApprovalsSatisfied: true, LockAcquirable: true,
+		BreakGlass: true, PreviewHistoryUnavailable: true,
+		PreviewHistoryError: "decode manifest",
+	}
+	res := Evaluate(Config{PreviewFreshness: time.Hour}, in)
+	if res.Blocked {
+		t.Fatalf("authorized recovery should override unavailable preview gates: %+v", res.Gates)
+	}
+	for _, gate := range []GateID{GatePreviewOK, GatePreviewFresh} {
+		g, ok := gateFor(res, gate)
+		if !ok || g.Outcome != OutcomeWarning || !overrode(res, gate) || !contains(g.Reason, "decode manifest") {
+			t.Fatalf("gate %s was not recorded as overridden: %+v", gate, res)
+		}
+	}
+
+	in.PreviewHistoryUnavailable = false
+	if res := Evaluate(Config{}, in); !res.Blocked || overrode(res, GatePreviewOK) {
+		t.Fatalf("ordinary failed preview must remain enforced: %+v", res)
+	}
+}
+
 func TestBreakGlassStillEnforcesDraftAndFork(t *testing.T) {
 	in := Inputs{
 		PRIsDraft: true, PreviewSucceeded: true,

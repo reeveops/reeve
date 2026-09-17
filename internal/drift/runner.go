@@ -184,6 +184,9 @@ func Run(ctx context.Context, opts Options) (*RunOutput, error) {
 		return nil, fmt.Errorf("enumerate: %w", err)
 	}
 	declared := discovery.Resolve(enum, opts.Decls, opts.Filter)
+	if err := discovery.ValidateUniqueRefs(declared); err != nil {
+		return nil, fmt.Errorf("stack discovery: %w", err)
+	}
 	targets := filterPatterns(declared, opts.IncludePatterns, opts.ExcludePatterns)
 
 	sem := make(chan struct{}, opts.Parallel)

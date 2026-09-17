@@ -46,9 +46,8 @@ prefixes.
 
 New run IDs use the full commit SHA. Legacy short-SHA run IDs remain readable.
 
-Apply and refresh lock-holder IDs omit the attempt. Retries of one provider
-run therefore resume the same lock while artifact and audit identities remain
-separate.
+Apply and refresh lock-holder IDs include the attempt. A retry cannot adopt an
+unexpired lease from an earlier attempt, and can acquire it after expiry.
 
 All adapters must implement atomic conditional writes (If-Match on ETag,
 GCS generation preconditions, filesystem flock+rename). `ErrPreconditionFailed`

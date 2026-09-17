@@ -38,15 +38,15 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 - New run IDs MUST include the full commit SHA. Preview selection MUST accept
   legacy short-SHA IDs and skip them when the manifest names a different full
   commit SHA.
-- Apply and refresh lock-holder identity MUST remain stable across attempts of
-  one provider run so a retry can resume a lock left by a cancelled earlier
-  attempt.
+- Apply and refresh lock-holder identity MUST include the provider attempt.
+  A retry MUST NOT adopt an unexpired lease from an earlier attempt.
 - A supplied run attempt MUST be a positive integer. Invalid flag or
   environment values MUST fail before artifact, lock, or audit identity is
   generated.
-- Apply, readiness, and explain MUST reject unreadable or malformed candidate
-  preview history for the selected commit. They MUST ignore other operations and
-  commits and MUST NOT fall back to an older valid candidate.
+- Apply MUST reject unreadable or malformed identity-bound preview history for
+  the selected commit and MUST NOT fall back to an older valid candidate.
+- Readiness MUST skip its notification when preview history is unavailable.
+  Explain MUST render a fail-closed diagnostic report with the storage error.
 - Apply does **not** replay a plan saved by the earlier preview. Preview
   freshness is a gate, not plan reuse: apply requires a successful preview on
   the current HEAD SHA within `preconditions.preview_freshness`, then
@@ -128,7 +128,9 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 - **WHEN** attempts 1 and 2 use the same run number and commit SHA
 - **THEN** each attempt receives a different run ID and cannot overwrite the
   other attempt's manifest or saved plans
-- **AND** both attempts use the same apply or refresh lock-holder identity
+- **AND** each attempt uses a different apply or refresh lock-holder identity
+- **AND** attempt 2 cannot acquire an unexpired lease held by attempt 1
+- **AND** attempt 2 can acquire the lock after the earlier lease expires
 
 #### Scenario: Commits share a short SHA
 
@@ -152,15 +154,27 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 - **OR** a candidate manifest for the selected commit cannot be read or decoded
 - **OR** a candidate has an invalid timestamp, stack
   reference, or status
-- **WHEN** apply, readiness, or explain selects the authoritative preview
-- **THEN** the operation fails closed
-- **AND** it does not accept an older manifest
-- **AND** apply does not bypass the failure when the commit was already applied
+- **WHEN** apply selects the authoritative preview
+- **THEN** apply fails closed and does not accept an older manifest
+- **AND** it does not bypass the failure when the commit was already applied
+- **WHEN** readiness reads the same history
+- **THEN** it skips the success notification without failing the workflow
+- **WHEN** explain reads the same history
+- **THEN** it posts a diagnostic report with preview gates failed closed
+
+#### Scenario: Break-glass recovers unavailable preview history
+
+- **GIVEN** the selected commit's identity-bound preview history cannot be read or decoded
+- **AND** break-glass is configured and authorizes the actor
+- **WHEN** the actor requests apply with a mandatory justification
+- **THEN** the unavailable preview gates are overridden as warnings
+- **AND** the PR comment, timeline, and audit record name the override
+- **AND** checks, policy, locks, fork, and draft gates remain enforced
 
 #### Scenario: Unrelated manifest is unavailable
 
-- **GIVEN** an apply, refresh, or different-commit manifest is unreadable or
-  malformed
+- **GIVEN** an apply, refresh, different-commit, or unbound legacy manifest is
+  unreadable or malformed
 - **WHEN** apply, readiness, or explain selects the authoritative preview
 - **THEN** the unrelated manifest is ignored
 
