@@ -90,7 +90,11 @@ func runReady(cmd *cobra.Command, _ []string) error {
 		sha = prMeta.HeadSHA
 	}
 
-	if !run.PlanSucceededForPR(ctx, store, pr, sha) {
+	planSucceeded, err := run.PlanSucceededForPR(ctx, store, pr, sha)
+	if err != nil {
+		return fmt.Errorf("load preview snapshot: %w", err)
+	}
+	if !planSucceeded {
 		fmt.Fprintf(cmd.OutOrStdout(), "no successful plan found for PR #%d at %s - skipping ready\n", pr, sha[:7])
 		return nil
 	}

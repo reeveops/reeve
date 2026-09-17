@@ -53,5 +53,6 @@ Single-field concerns are kept to env vars.
 ## CLI / config parity
 
 Every runtime behavior has both a CLI flag and a config setting.
-Flag-only exceptions are genuinely ephemeral (`--dry-run`, `--verbose`,
-`--explain`). No config-only behaviors.
+Flag-only exceptions are ephemeral behavior (`--dry-run`, `--verbose`,
+`--explain`) or invocation identity supplied by CI (`--run-number`,
+`--run-attempt`, `--run-url`, and `--sha`). No config-only behaviors.

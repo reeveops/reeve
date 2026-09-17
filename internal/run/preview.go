@@ -98,6 +98,8 @@ type PreviewInput struct {
 	// Force re-runs even when this commit is already recorded as applied,
 	// bypassing the already-applied guard.
 	Force bool
+	// RunAttempt distinguishes reruns that share a workflow run number.
+	RunAttempt int
 	// PlanRequested marks a plan an operator explicitly asked for (a
 	// `/reeve plan` comment) rather than one triggered by the PR head
 	// changing. It rides the published plan events; the timeline channel
@@ -153,7 +155,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}
 	slog.Debug("preview starting", "pr", in.PRNumber, "sha", in.CommitSHA, "local", in.Local)
 
-	runID := fmt.Sprintf("run-%d-%s", in.RunNumber, shortSHA(in.CommitSHA))
+	runID := runIdentity("run", in.RunNumber, in.RunAttempt, in.CommitSHA)
 	ciRunID := in.CIRunID
 	if ciRunID == "" {
 		// Direct callers and local tests may not have a provider run ID. The

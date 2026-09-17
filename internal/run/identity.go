@@ -12,3 +12,9 @@ func runIdentity(op string, runNumber, runAttempt int, commitSHA string) string 
 	}
 	return fmt.Sprintf("%s-%d-%s", op, runNumber, shortSHA(commitSHA))
 }
+
+// lockIdentity stays stable across reruns of one provider run. A retry must
+// be able to resume a lock left by its cancelled earlier attempt.
+func lockIdentity(op string, runNumber int, commitSHA string) string {
+	return runIdentity(op, runNumber, 0, commitSHA)
+}

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -18,6 +20,7 @@ import (
 // RunID tie-break exists to resolve.
 func putManifest(t *testing.T, store blob.Store, pr int, runID, sha, createdAt string, stacks []summary.StackSummary) {
 	t.Helper()
+	runID = testPreviewRunID(runID, sha)
 	data, err := json.Marshal(manifest{
 		RunID:     runID,
 		PR:        pr,
@@ -33,6 +36,26 @@ func putManifest(t *testing.T, store blob.Store, pr int, runID, sha, createdAt s
 	if _, err := store.Put(t.Context(), key, bytes.NewReader(data)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func putRawManifest(t *testing.T, store blob.Store, pr int, runID, sha, body string) {
+	t.Helper()
+	runID = testPreviewRunID(runID, sha)
+	key := fmt.Sprintf("runs/pr-%d/%s/manifest.json", pr, runID)
+	if _, err := store.Put(t.Context(), key, strings.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testPreviewRunID(runID, sha string) string {
+	if !strings.HasPrefix(runID, "run-") {
+		runID = "run-" + runID
+	}
+	suffix := "-" + shortSHA(sha)
+	if !strings.HasSuffix(runID, suffix) {
+		runID += suffix
+	}
+	return runID
 }
 
 func TestFindPreviewForStack_NoManifest(t *testing.T) {
@@ -134,17 +157,232 @@ func TestPlanSucceededAgreesWithNewestManifest(t *testing.T) {
 		{Project: "api", Stack: "prod", Status: summary.StatusError, Error: "engine crashed"},
 	})
 
-	best := newestPreviewManifest(ctx, store, 42, sha)
+	best, err := newestPreviewManifest(ctx, store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if best == nil {
 		t.Fatal("expected a manifest")
 	}
-	if best.RunID != "run-2" {
+	if best.RunID != testPreviewRunID("run-2", sha) {
 		t.Fatalf("tie-break should pick the higher run id, got %q", best.RunID)
 	}
 
 	// The authoritative manifest has a failed stack, so this must be false.
 	// If it reports true, the two selections disagree.
-	if PlanSucceededForPR(ctx, store, 42, sha) {
+	succeeded, err := PlanSucceededForPR(ctx, store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if succeeded {
 		t.Fatal("PlanSucceededForPR reported success from a manifest other than the authoritative one")
+	}
+}
+
+type previewListCounter struct {
+	blob.Store
+	lists map[string]int
+}
+
+type previewFailureStore struct {
+	blob.Store
+	failList bool
+	failGet  bool
+}
+
+type previewExtraKeysStore struct {
+	blob.Store
+	keys []string
+}
+
+func (s *previewExtraKeysStore) List(ctx context.Context, prefix string) ([]string, error) {
+	keys, err := s.Store.List(ctx, prefix)
+	return append(keys, s.keys...), err
+}
+
+func (s *previewFailureStore) List(ctx context.Context, prefix string) ([]string, error) {
+	if s.failList {
+		return nil, errors.New("list unavailable")
+	}
+	return s.Store.List(ctx, prefix)
+}
+
+func (s *previewFailureStore) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metadata, error) {
+	if s.failGet && strings.HasSuffix(key, "/manifest.json") {
+		return nil, nil, errors.New("read unavailable")
+	}
+	return s.Store.Get(ctx, key)
+}
+
+func (s *previewListCounter) List(ctx context.Context, prefix string) ([]string, error) {
+	s.lists[prefix]++
+	return s.Store.List(ctx, prefix)
+}
+
+func TestPreviewSnapshotScansManifestsOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base, _ := filesystem.New(t.TempDir())
+	const sha = "abc1234xyz"
+	putManifest(t, base, 42, "run-1", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+		{Project: "worker", Stack: "prod", Status: summary.StatusPlanned},
+	})
+	store := &previewListCounter{Store: base, lists: map[string]int{}}
+
+	snapshot, err := LoadPreviewSnapshot(ctx, store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs, ok := snapshot.StackRefs(); !ok || len(refs) != 2 {
+		t.Fatalf("StackRefs() = (%v, %t), want two refs", refs, ok)
+	}
+	for _, ref := range []string{"api/prod", "worker/prod", "api/prod"} {
+		if got := snapshot.StackStatus(ref); !got.Found {
+			t.Fatalf("StackStatus(%q) = %+v, want found", ref, got)
+		}
+	}
+	if got := store.lists["runs/pr-42/"]; got != 1 {
+		t.Fatalf("manifest list calls = %d, want 1", got)
+	}
+}
+
+func TestPreviewSnapshotRejectsMalformedCandidates(t *testing.T) {
+	t.Parallel()
+	const sha = "abc1234xyz"
+	tests := []struct {
+		name      string
+		createdAt string
+		stacks    []summary.StackSummary
+	}{
+		{name: "invalid timestamp", createdAt: "not-a-time", stacks: []summary.StackSummary{
+			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+		}},
+		{name: "missing project", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
+			{Stack: "prod", Status: summary.StatusPlanned},
+		}},
+		{name: "missing stack", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
+			{Project: "api", Status: summary.StatusPlanned},
+		}},
+		{name: "invalid status", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
+			{Project: "api", Stack: "prod", Status: summary.StatusBlocked},
+		}},
+		{name: "duplicate stack", createdAt: "2026-08-08T12:00:00Z", stacks: []summary.StackSummary{
+			{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+			{Project: "api", Stack: "prod", Status: summary.StatusNoOp},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := filesystem.New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			putManifest(t, store, 42, "run-1", sha, tt.createdAt, tt.stacks)
+			if _, err := LoadPreviewSnapshot(t.Context(), store, 42, sha); err == nil {
+				t.Fatal("malformed preview manifest was accepted")
+			}
+		})
+	}
+}
+
+func TestPreviewSnapshotRejectsUnreadableHistory(t *testing.T) {
+	t.Parallel()
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	putRawManifest(t, store, 42, "corrupt", "abc1234xyz", "{not-json")
+	if _, err := LoadPreviewSnapshot(t.Context(), store, 42, "abc1234xyz"); err == nil {
+		t.Fatal("corrupt preview history was ignored")
+	}
+}
+
+func TestPreviewSnapshotIgnoresUnrelatedMalformedManifests(t *testing.T) {
+	t.Parallel()
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = "abc1234xyz"
+	putManifest(t, store, 42, "current", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+	})
+	putRawManifest(t, store, 42, "other", "different-sha", "{not-json")
+	if _, err := store.Put(t.Context(), "runs/pr-42/apply-9-1-abc1234/manifest.json", strings.NewReader("{not-json")); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := LoadPreviewSnapshot(t.Context(), store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.StackStatus("api/prod").Succeeded {
+		t.Fatal("matching preview was not selected")
+	}
+}
+
+func TestPreviewSnapshotIgnoresUnrelatedMissingManifests(t *testing.T) {
+	t.Parallel()
+	base, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = "abc1234xyz"
+	putManifest(t, base, 42, "current", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+	})
+	store := &previewExtraKeysStore{Store: base, keys: []string{
+		"runs/pr-42/apply-9-1-abc1234/manifest.json",
+		"runs/pr-42/run-9-1-differe/manifest.json",
+	}}
+
+	snapshot, err := LoadPreviewSnapshot(t.Context(), store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.StackStatus("api/prod").Succeeded {
+		t.Fatal("matching preview was not selected")
+	}
+}
+
+func TestPreviewSnapshotPropagatesStorageFailures(t *testing.T) {
+	t.Parallel()
+	base, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = "abc1234xyz"
+	putManifest(t, base, 42, "run-1", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+	})
+	for _, store := range []*previewFailureStore{
+		{Store: base, failList: true},
+		{Store: base, failGet: true},
+	} {
+		if _, err := LoadPreviewSnapshot(t.Context(), store, 42, sha); err == nil {
+			t.Fatal("preview storage failure was ignored")
+		}
+	}
+}
+
+func TestPreviewSnapshotPreservesFailedPreview(t *testing.T) {
+	t.Parallel()
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = "abc1234xyz"
+	putManifest(t, store, 42, "run-1", sha, "2026-08-08T12:00:00Z", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusError, Error: "engine failed"},
+	})
+	snapshot, err := LoadPreviewSnapshot(t.Context(), store, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := snapshot.StackStatus("api/prod")
+	if !status.Found || status.Succeeded || snapshot.Succeeded() {
+		t.Fatalf("failed preview status = %+v, snapshot success = %t", status, snapshot.Succeeded())
 	}
 }

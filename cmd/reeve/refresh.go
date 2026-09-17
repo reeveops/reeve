@@ -59,6 +59,10 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 	pr := flagInt(cmd, "pr")
 	sha := flagStringOrEnv(cmd, "sha", "GITHUB_SHA")
 	runNum := flagIntOrEnv(cmd, "run-number", "GITHUB_RUN_NUMBER")
+	runAttempt, err := flagPositiveIntOrEnv(cmd, "run-attempt", "GITHUB_RUN_ATTEMPT")
+	if err != nil {
+		return err
+	}
 	runURL := flagStringOrEnv(cmd, "run-url", "")
 	repoFull := flagStringOrEnv(cmd, "repo", "GITHUB_REPOSITORY")
 	token := flagStringOrEnv(cmd, "token", "GITHUB_TOKEN")
@@ -85,6 +89,7 @@ func runRefresh(cmd *cobra.Command, _ []string) error {
 		CommitSHA:       sha,
 		ExpectedHeadSHA: os.Getenv("REEVE_EXPECTED_HEAD_SHA"),
 		RunNumber:       runNum,
+		RunAttempt:      runAttempt,
 		CIRunURL:        runURL,
 		RepoRoot:        root,
 		RepoPath:        repoPathForRoot(root),

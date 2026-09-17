@@ -154,6 +154,30 @@ func TestExplainNilLockStore(t *testing.T) {
 	}
 }
 
+func TestExplainLoadsPreviewManifestOnce(t *testing.T) {
+	t.Parallel()
+	engine, _, in := explainFixture(t)
+	engine.enum = append(engine.enum,
+		discovery.Stack{Project: "api", Name: "staging", Env: "staging", Path: "projects/api"})
+	in.Config.Engine.Stacks[0].Stacks = append(in.Config.Engine.Stacks[0].Stacks, "staging")
+	base := in.Blob
+	store := &previewListCounter{Store: base, lists: map[string]int{}}
+	in.Blob = store
+	if err := writeManifest(context.Background(), store, 18, "preview-2", []summary.StackSummary{
+		{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
+		{Project: "api", Stack: "staging", Status: summary.StatusPlanned},
+	}, bgSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Explain(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.lists["runs/pr-18/"]; got != 1 {
+		t.Fatalf("explain manifest list calls = %d, want 1", got)
+	}
+}
+
 func TestExplainForkPRIdenticalPath(t *testing.T) {
 	// Fork PRs run explain identically: no credentials involved, gate
 	// trace still renders (with the fork gate failing closed by default).
