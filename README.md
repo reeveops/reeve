@@ -33,6 +33,7 @@ The PR shows changes, gate failures, and apply results; locks, artifacts, and au
 | I want to… | Start here |
 | --- | --- |
 | Try Reeve locally without cloud resources | [Local demos](examples/README.md#local-demos) |
+| Follow a guided PR tour without local setup | [Guided playground](examples/README.md#guided-pr-tour) — currently requires write access to `reeve-test`. |
 | Connect an existing infrastructure repository | [Getting started](docs/getting-started.md) |
 | Explore deeper scenarios and E2E tests | [Test harness and scenarios](examples/README.md#test-harness-and-scenarios) |
 

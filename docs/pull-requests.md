@@ -18,6 +18,9 @@ Draft PRs cannot apply; converting a draft to ready invokes readiness notificati
 This [recorded test run](images/README.md) used real GitHub review identities and disposable local OpenTofu state.
 It illustrates gate outcomes; the trusted harness invoked apply directly.
 
+To explore these outcomes interactively, use the [guided PR tour](../examples/README.md#guided-pr-tour) when you have write access to `reeve-test`.
+Its controller accepts your comments and runs a fixed demonstration within one job; connect your own repository using the standard workflow above.
+
 ## Read the result
 
 | Result | Meaning | Next step |

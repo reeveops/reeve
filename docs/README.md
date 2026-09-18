@@ -6,6 +6,7 @@ Start with the task you want to complete. Optional integrations and detailed ref
 
 - [Getting started](getting-started.md): connect an existing repository and complete your first preview, review, and apply.
 - [Local demos](../examples/README.md#local-demos): try Pulumi or Terraform/OpenTofu without cloud workload credentials.
+- [Guided PR tour](../examples/README.md#guided-pr-tour): follow an interactive playground in GitHub; currently requires write access to `reeve-test`.
 - [PR workflow](pull-requests.md): read results, approve changes, apply, and understand a blocked run.
 
 ## Set up your environment

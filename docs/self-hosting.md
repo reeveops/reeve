@@ -147,6 +147,7 @@ Locks require storage that enforces conditional writes and deletes.
 An S3-compatible endpoint accepting an HTTP header is not proof that it enforces the condition; Reeve checks required behavior and fails when it cannot rely on it.
 
 The evolving [reeve-test storage lanes](https://github.com/reeveops/reeve-test/blob/master/e2e/cloud-buckets.md) exercise selected adapters.
+Local emulator checks explicitly test unsupported or ignored conditional-delete behavior; a passing negative test does not establish that emulator as a suitable lock backend.
 Read the lane's source pin and result before treating it as acceptance of a particular service/version.
 
 ## Retention and recovery

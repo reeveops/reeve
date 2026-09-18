@@ -2,6 +2,7 @@
 
 Connect an existing infrastructure repository to Reeve, then preview, review, and apply one small change.
 For a local trial without cloud resources, start with the [local demos](../examples/README.md#local-demos).
+If you have write access to `reeve-test`, the [guided PR tour](../examples/README.md#guided-pr-tour) lets you explore the flow before configuring your own repository.
 
 ## Before you begin
 
