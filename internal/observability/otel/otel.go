@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -93,6 +94,12 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 		ep = envref.Expand(ep)
 		traceOpts = append(traceOpts, otlptracehttp.WithEndpointURL(ep))
 		metricOpts = append(metricOpts, otlpmetrichttp.WithEndpointURL(ep))
+		// Exporters no longer supply signal paths for URLs without a path.
+		// Preserve Reeve's defaults while retaining explicitly configured paths.
+		if u, err := url.Parse(ep); err == nil && u.Path == "" {
+			traceOpts = append(traceOpts, otlptracehttp.WithURLPath("/v1/traces"))
+			metricOpts = append(metricOpts, otlpmetrichttp.WithURLPath("/v1/metrics"))
+		}
 	}
 	if len(opts.Headers) > 0 {
 		h := map[string]string{}

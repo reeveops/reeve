@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -111,6 +112,65 @@ func TestNewExpandsEnvInEndpointAndHeaders(t *testing.T) {
 	}
 	if gotHeader != "example-key" {
 		t.Errorf("header env expansion failed: %q", gotHeader)
+	}
+}
+
+func TestNewEndpointPaths(t *testing.T) {
+	cases := []struct {
+		name       string
+		path       string
+		fromEnv    bool
+		perSignal  bool
+		wantTraces string
+		wantMetric string
+	}{
+		{name: "configured host", wantTraces: "/v1/traces", wantMetric: "/v1/metrics"},
+		{name: "configured root path", path: "/", wantTraces: "/", wantMetric: "/"},
+		{name: "configured custom path", path: "/collector/ingest", wantTraces: "/collector/ingest", wantMetric: "/collector/ingest"},
+		{name: "configured trailing slash", path: "/collector/", wantTraces: "/collector/", wantMetric: "/collector/"},
+		{name: "environment base URL", path: "/collector", fromEnv: true, wantTraces: "/collector/v1/traces", wantMetric: "/collector/v1/metrics"},
+		{name: "environment signal URLs", fromEnv: true, perSignal: true, wantTraces: "/custom/traces", wantMetric: "/custom/metrics"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := &collector{}
+			srv := httptest.NewServer(col.handler())
+			defer srv.Close()
+
+			for _, key := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"} {
+				t.Setenv(key, "")
+			}
+			opts := Options{Endpoint: srv.URL + tc.path}
+			if tc.fromEnv {
+				opts.Endpoint = ""
+				t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL+tc.path)
+				if tc.perSignal {
+					t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", srv.URL+tc.wantTraces)
+					t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", srv.URL+tc.wantMetric)
+				}
+			}
+			p, err := New(t.Context(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, end := p.StartRunSpan(t.Context(), "plan", 1, "sha")
+			end("ok")
+			shutdownCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			if err := p.Shutdown(shutdownCtx); err != nil {
+				t.Fatal(err)
+			}
+
+			col.mu.Lock()
+			got := slices.Clone(col.paths)
+			col.mu.Unlock()
+			want := []string{tc.wantTraces, tc.wantMetric}
+			slices.Sort(got)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Errorf("export paths = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
