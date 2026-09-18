@@ -40,7 +40,7 @@ func newRunCmd() *cobra.Command {
 func newPlanRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plan-run",
-		Short: "Simulate a PR run with no side effects (alias for `run preview --local`)",
+		Short: "Run a real local preview and render its comment (alias for `run preview --local`)",
 		RunE: func(c *cobra.Command, args []string) error {
 			c.Flag("local").Value.Set("true")
 			return runPreview(c, args)

@@ -1,7 +1,15 @@
-# gcp-wif
+# GCP WIF wiring recipe
 
 Single-cloud GCP using Workload Identity Federation. GitHub Actions OIDC
 → GCP STS → service account impersonation.
+
+## Before copying
+
+This directory provides cloud setup, configuration, and a shared-workflow caller; it does not contain workload projects.
+Use your existing Pulumi project and backend, then replace all project, service-account, bucket, and approver placeholders.
+
+Set repository variables `REEVE_GCP_WIF_PROVIDER` and `REEVE_GCP_SERVICE_ACCOUNT` for the controller's Reeve bucket access.
+The `.reeve/auth.yaml` bindings and `engine.state.auth_provider` supply engine credentials separately.
 
 ## One-time cloud setup
 
@@ -44,11 +52,11 @@ done
 # Grant whatever project roles the stacks need (scope to least-privilege)
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:reeve-prod@$PROJECT_ID.iam.gserviceaccount.com" \
-  --role=roles/editor
+  --role=YOUR_WORKLOAD_ROLE
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:reeve-drift-readonly@$PROJECT_ID.iam.gserviceaccount.com" \
-  --role=roles/viewer
+  --role=YOUR_READONLY_WORKLOAD_ROLE
 ```
 
 ## GCS bucket
@@ -72,3 +80,14 @@ Search and replace:
 - `111` → your project number
 - `myorg/myrepo` → your repo
 - `mycompany-reeve` → your bucket
+
+## Validate and use
+
+The named workload roles must cover the resources your project manages; grant state-backend/KMS access to the effective engine identities too.
+Stack credentials override same-named backend credential variables, so the read-only drift identity still needs any backend permissions required by Pulumi refresh.
+
+Run `reeve lint`, `reeve stacks`, and `reeve rules explain YOUR_PROJECT/prod`, then open one small workload PR.
+Expect the controller to authenticate through the workflow inputs and the engine to authenticate through its explicit providers.
+
+Keep IAM restrictions tied to the actual repository claims; organizations using customized immutable OIDC subjects must use their configured claim format.
+When retiring a disposable trial, remove its bucket, service accounts, and trust bindings only after preserving anything you still need.

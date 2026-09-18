@@ -12,8 +12,8 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 2. Single PR comment posted, identified by hidden HTML marker, edited in place
    on subsequent runs. Help comment upserted separately.
 3. Slack message posted/updated (if configured).
-4. If `auto_ready: true`, when PR converts from draft to ready for review and plan has
-   succeeded, reeve fires `/reeve ready` automatically. Otherwise author runs it manually.
+4. A subscribed `ready_for_review` event invokes ready when a successful plan exists.
+   `/reeve ready` is also available explicitly; `auto_ready` does not implement a dispatch gate.
 5. Reviewers approve per configured rules.
 6. Apply is initiated per `apply.trigger` (see Apply trigger modes below):
    `comment` → on `/reeve apply`; `merge` → on PR merge. Either way reeve
@@ -31,7 +31,7 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 - Stacks sharing one project directory run serially because their engine
   working data and workspace selection share that directory.
 - Preview results, failure lists, and manifests retain discovery order.
-- Preview artifacts persist under `runs/pr-{n}/{run-id}/` for the PR lifetime.
+- Preview artifacts persist under `runs/pr-{n}/{run-id}/` until configured retention or explicit removal.
 - A CI run ID includes the provider's run attempt when one is available. A
   rerun of the same run number MUST write a distinct manifest, saved-plan
   prefix, and audit record.
@@ -47,16 +47,10 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   the selected commit and MUST NOT fall back to an older valid candidate.
 - Readiness MUST skip its notification when preview history is unavailable.
   Explain MUST render a fail-closed diagnostic report with the storage error.
-- Apply does **not** replay a plan saved by the earlier preview. Preview
-  freshness is a gate, not plan reuse: apply requires a successful preview on
-  the current HEAD SHA within `preconditions.preview_freshness`, then
-  re-executes the engine (Pulumi runs `pulumi up`; Terraform/OpenTofu re-plan
-  inside Apply and apply that just-produced plan file, giving
-  plan-what-you-apply parity within the apply call itself).
-- Apply on **fork PRs** is **deny by default**. Opt-in per repo with documented
-  risk; fork PRs otherwise get dry-run-only credentials.
-- Notifications run last in the pipeline so upstream failures are captured
-  accurately in the authoritative "what happened" surface.
+- Apply reuses the preview's saved engine plan by default when available. Missing or unreadable plan artifacts fall back to a fresh plan with an explicit timeline warning; `--refresh` and `engine.plan_locking: false` disable saved-plan reuse.
+- Preview-manifest integrity is separate: malformed or unreadable selected history fails closed except for the explicitly authorized recovery path below.
+- Apply on fork PRs is denied by default. The gate does not reduce preview credentials; previews use configured preview bindings subject to workflow credential availability.
+- Start and completion notifications follow their lifecycle points; delivery errors are logged without changing the engine result.
 - SHA resolution: the maintained action MUST check out one immutable PR HEAD
   SHA and supply it to the CLI. PR commands MUST fail when the live PR snapshot
   disagrees with that checkout identity.
@@ -186,7 +180,7 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
 gate — it changes only *when* an apply starts, never *whether* the gates hold.
 
 - `comment` (default) — apply-then-merge. Apply runs only from a `/reeve apply`
-  (or `@reeve apply` / `up`) comment. A merge event is a no-op.
+  (or `/reeve up`) comment. A merge event is a no-op.
 - `merge` — merge-then-apply (continuous delivery). Apply runs when the PR is
   merged (`pull_request` `closed` with `merged: true`). A `/reeve apply` comment
   is a no-op.
@@ -220,4 +214,4 @@ A fully-clean apply (no failed/blocked stacks) writes `runs/pr-{n}/applied/{sha}
 
 ## Out of scope (v1)
 
-- Multi-engine runs in one PR (v1 is Pulumi only).
+- Multiple engine configurations in one root. Separate roots in one repository may each configure an engine.

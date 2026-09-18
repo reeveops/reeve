@@ -29,4 +29,4 @@ bindings:
   providers: [ aws-prod ]
 
 - match: { stack: "**", mode: drift }
-  providers: [ aws-prod-readonly ]
+  override: [ aws-prod-readonly ]

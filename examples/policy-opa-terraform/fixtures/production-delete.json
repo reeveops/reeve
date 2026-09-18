@@ -1,0 +1,37 @@
+{
+  "project": "api",
+  "stack": "prod",
+  "env": "prod",
+  "counts": {
+    "add": 1,
+    "change": 0,
+    "delete": 1,
+    "replace": 0
+  },
+  "plan_summary": "One instance",
+  "plan": {
+    "resource_changes": [
+      {
+        "address": "aws_instance.api",
+        "mode": "managed",
+        "type": "aws_instance",
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
+            "tags": {
+              "cost-center": "demo",
+              "owner": "platform"
+            }
+          }
+        }
+      }
+    ],
+    "variables": {
+      "aws_region": {
+        "value": "us-east-1"
+      }
+    }
+  }
+}

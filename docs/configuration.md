@@ -3,6 +3,24 @@
 Everything under `.reeve/` is strict YAML: unknown keys are errors, versions
 are per-file, and schemas are stable within a major version.
 
+
+## Find a setting
+
+| Area | Reference |
+| --- | --- |
+| Bucket, comments, locks, approvals, apply | [shared.yaml](#sharedyaml) |
+| Gate defaults | [Preconditions](#preconditions) |
+| Pulumi, Terraform, OpenTofu | [Engine](#engine-eg-pulumiyaml) |
+| Credentials and bindings | [auth.yaml](#authyaml) · [provider catalog](auth.md#provider-catalog) |
+| Slack, webhooks, issues, timelines | [notifications.yaml](#notificationsyaml) · [channels](notifications.md#channel-types) |
+| Telemetry and annotations | [observability.yaml](#observabilityyaml) |
+| Scheduled checks | [drift.yaml](#driftyaml) · [drift behavior](drift.md) |
+| Expansion and validation | [Token expansion](#token-expansion) · [Lint](#lint) |
+| Compatibility | [Reserved fields](#reserved-fields) · [Migration](#migration) |
+
+These are configuration examples, not a file to enable in full.
+Start with [getting started](getting-started.md) and add only the features you need.
+
 ## File layout
 
 ```text
@@ -12,8 +30,7 @@ are per-file, and schemas are stable within a major version.
 ├── notifications.yaml    # notification channels (slack, webhook, pagerduty, ...)
 ├── observability.yaml    # OTEL + annotations
 ├── drift.yaml            # drift scope, schedules, channels
-├── pulumi.yaml           # engine: pulumi
-└── terraform.yaml        # engine: terraform / tofu
+└── pulumi.yaml           # choose ONE engine file: pulumi, terraform, or tofu
 ```
 
 Every file begins with:
@@ -25,7 +42,7 @@ config_type: <shared|engine|auth|notifications|observability|drift|user>
 
 - `version` is per-file. Bumps affect only that schema.
 - `config_type` is one-per-file. Engine files are keyed by `engine.type`,
-  but reeve currently supports only one engine config per repo - loading
+  but reeve currently supports only one engine config per configured root - loading
   more than one is a validation error.
 - Unknown top-level keys fail `reeve lint`.
 
@@ -59,7 +76,6 @@ retention:
 locking:
   ttl: 4h                          # default 4h; also bounds the lease of holders promoted from the queue
   queue: fifo                      # v1: fifo (only option)
-  reaper_interval: 15m             # reserved; schedule `reeve maintenance run` in CI
   admin_override:                  # gates force-unlock (locks unlock without --pr);
     allowed: ["@org/sre-leads"]    # PR-scoped removal (--pr / "/reeve unlock") is
     requires_reason: true          # self-service and not gated here
@@ -86,11 +102,11 @@ approvals:
     codeowners: true               # honor CODEOWNERS alongside team rules
     dismiss_on_new_commit: true
   stacks:
-    "prod/*":
+    "*/prod":
       required_approvals: 2
       approvers: ["@org/sre", "@org/security"]
       require_all_groups: true     # one from each group, not N-of-any
-    "prod/payments":
+    "payments/prod":
       approvers: ["@org/payments-leads"]
 
 preconditions:
@@ -109,23 +125,32 @@ freeze_windows:
   - name: friday-afternoon
     cron: "0 15 * * 5"             # Fri 3pm
     duration: 65h                  # through Monday morning
-    stacks: ["prod/*"]
+    stacks: ["*/prod"]
 
 break_glass:                       # opt-in emergency apply; OFF when absent
   authorized:                      # UNION: any matching source grants
     internal_list: ["alice", "myorg/sre"]
     codeowners: true               # owners of changed paths may break-glass
     anyone: false
-    vcs_bypass: false              # config surface only — not yet supported
   override_freeze: true            # default true
   reject_self_authorization: false # default false — see "Break-glass" below
 
 apply:
   trigger: comment                 # comment (default) | merge — see "apply.trigger" below
   allow_fork_prs: false            # deny-by-default - review risk before flipping
-  auto_ready: false                # reserved — not yet enforced (draft→ready already notifies for
-                                   # approval whenever a plan has succeeded)
 ```
+
+### Preconditions
+
+| Field | When omitted | Meaning |
+| --- | --- | --- |
+| `require_up_to_date` | `false` | Block an apply whose PR head is behind its base; leave off for merge-triggered apply. |
+| `require_checks_passing` | `false` | Require the relevant GitHub checks to pass. |
+| `preview_freshness` | `4h` | Maximum preview age; the literal `"0"` disables the age limit. |
+| `preview_max_commits_behind` | `0` | When positive, permit this many commits behind as a warning in the up-to-date gate. |
+
+`reeve init` writes stricter explicit values than the omitted-field defaults: both boolean checks on and a `2h` freshness window.
+`reeve lint` warns about omitted boolean gates; see [PR workflow](pull-requests.md) for how gates interact.
 
 ### `apply.trigger`
 
@@ -290,175 +315,25 @@ Run `reeve maintenance run` on a schedule to prune artifacts under `runs/`.
 
 ### Approval rule merging
 
-- `approvals.default` is the baseline.
-- `approvals.stacks.<pattern>` entries merge with the default for matching
-  stacks.
-- Scalar fields (`required_approvals`, `require_all_groups`, `codeowners`,
-  `dismiss_on_new_commit`, `freshness`) on a pattern **override** the
-  default.
-- `approvers` lists **union** (deduplicated).
-- Patterns with more literal characters win specificity ties, and the
-  more-specific pattern's scalar fields override the broader one's.
-- `require_all_groups: true` changes semantics: every listed approver
-  group must contribute one approval, regardless of `required_approvals`.
-
-**Secure defaults.** reeve fails closed on approvals:
-
-- A stack with **no matching approval policy** still requires **one**
-  non-author approval — it does not auto-pass.
-- `required_approvals: N` with **no `approvers` list** counts any `N`
-  distinct non-author approvals (GitHub's "require N approvals" behavior),
-  rather than being unsatisfiable — **on private repos**. On a **public**
-  repo this path is blocked (see below), because anyone can review.
-- **Public repositories.** On a public repo any GitHub user can submit an
-  approving review, so a bare `required_approvals` with no `approvers` list
-  and no CODEOWNERS is not a real gate. reeve fails such a stack closed with
-  a message telling you to add an `approvers` list or CODEOWNERS — or to set
-  `approvals.allow_unlisted_approvals_on_public: true` if you genuinely want
-  to count unlisted reviews. The default (`false`) does not remove the
-  ability, only forces you to name the risk. Private repos are unaffected,
-  and a public repo that already uses an `approvers` list or CODEOWNERS never
-  hits this.
-- `dismiss_on_new_commit` defaults to **`true`**: pushing a new commit
-  invalidates prior approvals. Set it to `false` explicitly to opt out.
-- Only a reviewer's **most recent** review counts. A reviewer who approves
-  and later requests changes (or whose approval is dismissed) no longer
-  counts toward the gate.
-- `freshness: <duration>` (opt-in, e.g. `24h`): an approval older than the
-  window at evaluation time does not count and must be re-given. Stale
-  approvals are called out in the rule trace and the missing list, so a
-  blocked apply says exactly whose approval expired. `0`/unset means no
-  freshness constraint. An approval without a submission timestamp fails
-  closed when freshness is set.
+Pattern scalars override the default and approver lists union.
+See [approval policies](pull-requests.md#approval-rule-merging) for specificity, public repositories, freshness, and group requirements.
 
 ### Approval sources
 
-`approvals.sources` selects which signals count as approvals. Sources are
-gathered independently and **unioned** — a human who approves via *both* a
-review and a comment counts **once**.
-
-| Source | Default | Signal |
-| --- | --- | --- |
-| `pr_review` | **on** | A GitHub PR review whose current state is `APPROVED`. |
-| `pr_comment` | off (opt-in) | An authorized non-author posting `/reeve approve` in a PR comment. |
-
-- **Omitting the `sources` block** leaves `pr_review` as the only active
-  source — identical to reeve's original behavior. No existing config changes.
-- `pr_review` stays on unless you list it explicitly with `enabled: false`.
-- `pr_comment` is off unless you list it with `enabled: true`.
-- **`enabled` is required on every listed source.** If you list a source you
-  must set `enabled: true` or `enabled: false` — an omitted `enabled` is a
-  load/lint error, not a silent "off". (Listing `pr_review` with no `enabled`
-  used to disable reviews, the opposite of the obvious intent.)
-
-```yaml
-approvals:
-  sources:
-    - type: pr_review
-      enabled: true
-    - type: pr_comment
-      enabled: true
-      command: "/reeve approve"   # trigger phrase; default "/reeve approve"
-```
-
-**`pr_comment` authorization (fail-closed).** A `/reeve approve` comment counts
-only when every condition holds:
-
-- Its first line is `<prefix> approve`, where `<prefix>` exactly matches a
-  configured command prefix (the action's `command-prefix`, default `/reeve`)
-  — parsed the same way as every other `/reeve` command.
-- The commenter's `author_association` is in the same allowlist that gates
-  command dispatch (the action's `allowed-associations`, default `OWNER`,
-  `MEMBER`, `COLLABORATOR`). reeve **re-checks this at apply time** because it
-  reads historical comments directly, not the dispatched event, so an
-  unauthorized commenter's `/reeve approve` never counts.
-- The commenter is not a bot and is **not the PR author** (the same non-author
-  rule reviews follow — an author never self-approves).
-
-**Commit binding under `dismiss_on_new_commit` (default on).** A PR review
-carries an authoritative commit id from GitHub, but a comment does not — and the
-SHA that was HEAD when a comment was posted *cannot* be reconstructed after the
-fact, because git committer timestamps are settable by whoever pushes (a commit
-can be backdated to appear older than an approval). So a comment approval is
-bound to a commit **only when the commenter names it**:
-
-- `/reeve approve <sha>` — pins the approval to `<sha>` (a 7+ character prefix of
-  the commit). If `<sha>` is the current HEAD the approval counts; once a new
-  commit lands it no longer matches HEAD and is dismissed, exactly like a stale
-  review. Re-approve the new HEAD to satisfy the gate again.
-- Bare `/reeve approve` (no SHA) — is **unpinned**. When `dismiss_on_new_commit`
-  is on (the default) an unpinned comment approval is **dismissed** (the rule
-  trace explains why and suggests re-approving with the SHA). When
-  `dismiss_on_new_commit` is `false`, a bare `/reeve approve` counts.
-
-reeve posts the current HEAD short-SHA in its PR comments, so approvers can copy
-`/reeve approve <sha>` directly.
-
-**Opting out — `allow_unpinned_comment_approvals`.** If your team trusts its
-allowed approvers and prefers the convenience of a bare `/reeve approve`, set
-`allow_unpinned_comment_approvals: true`. Unpinned comment approvals then count
-even under `dismiss_on_new_commit` (approve-and-stick: the approval survives new
-commits). It defaults to `false` (the secure behavior above), rides on any
-approval rule so it can be scoped per pattern (e.g. loosen it on `dev/*` while
-leaving `prod/*` strict), and has no effect on `pr_review` approvals — those are
-always pinned to GitHub's authoritative commit id, and a pinned-but-stale
-approval is still dismissed.
-
-```yaml
-approvals:
-  default:
-    allow_unpinned_comment_approvals: false   # secure default
-  stacks:
-    "dev/*":
-      allow_unpinned_comment_approvals: true  # bare /reeve approve is fine on dev
-```
-
-> Posting `/reeve approve` also refreshes the approved-state notification
-> (Slack "ready to apply"), mirroring the `pull_request_review` path. The
-> comment itself is the approval — the apply gate re-reads it (and re-checks
-> authorization) at apply time; the comment never triggers an apply.
+PR reviews are enabled by default; comment approvals are opt-in.
+See [approval sources](pull-requests.md#approval-sources) for explicit-SHA comments and authorization.
 
 ### CODEOWNERS resolution
 
-When `codeowners: true`, reeve parses the repo's `CODEOWNERS` file and
-requires at least one approval from an owner of each changed file.
-
-Owner resolution unions **all** matching rules for a file. For example:
-
-```
-* @org/platform
-Pulumi.*.yaml @org/engineering
-```
-
-A `Pulumi.*.yaml` file matches both rules, so owners =
-`[@org/platform, @org/engineering]`. Either team's member satisfies the
-gate for that file.
-
-Team slugs in CODEOWNERS are expanded the same way as `approvers` entries:
-reeve resolves `org/team` → member logins via the VCS API before evaluation.
-
-**Email owners are unenforceable.** GitHub allows email addresses as
-CODEOWNERS entries (e.g. `docs@example.com`), but reeve has no
-commit-email → login resolution, so email owners are excluded from the
-gate: a path owned by both an email and a login/team still requires the
-login/team's approval, and a path owned *only* by emails adds no
-requirement (the evaluation trace notes the skipped entries instead of
-wedging the gate forever). `reeve lint` warns about email owners in
-CODEOWNERS.
-
-Inspect the merged result:
-
-```bash
-reeve rules explain prod/payments
-```
+The last matching CODEOWNERS rule wins for each path; earlier matches do not contribute owners.
+See [CODEOWNERS resolution](pull-requests.md#codeowners-resolution) for team expansion, ownerless rules, and email owners.
 
 ### Break-glass (`break_glass`)
 
 Opt-in emergency apply: `/reeve breakglass "<justification>" apply`
 overrides the approvals gate (and freeze windows unless
-`override_freeze: false`) with a mandatory justification and a loud,
-write-once audit record. Locks, checks, up-to-date base, preview
-freshness, and policy hooks are **never** bypassed. Absent the block, the
+`override_freeze: false`) with a mandatory justification and a write-once audit record.
+Locks, checks, up-to-date base, and policy hooks remain enforced; authorized recovery from unreadable preview history has the narrow preview-gate exception described in the dedicated guide. Absent the block, the
 command fails closed with a polite error.
 
 `authorized:` is a union of sources — `internal_list` (logins and
@@ -678,11 +553,11 @@ providers:
     role_arn: arn:aws:iam::111111111111:role/reeve-drift-readonly
 
 bindings:
-  - match: { stack: "prod/*" }
+  - match: { stack: "*/prod" }
     providers: [aws-prod]
 
-  - match: { stack: "prod/*", mode: drift }
-    providers: [aws-prod-readonly]   # replaces aws-prod for drift runs
+  - match: { stack: "*/prod", mode: drift }
+    override: [aws-prod-readonly]    # replaces aws-prod for drift runs
 ```
 
 ---
@@ -724,93 +599,10 @@ per event (SHA, timestamp, per-run CI link) — thread replies in Slack, one
 comment per commit SHA on GitHub. See
 [notifications.md](notifications.md#the-deployment-timeline).
 
-### Converting from the original config
+### Migration and lifecycle
 
-The original single `slack:` block (and drift.yaml's `sinks:` key) no
-longer load — reeve errors with a conversion pointer. Run
-`reeve migrate-config` to rewrite them to the `channels:` shape
-(originals backed up as `*.bak`; `--dry-run` previews), or hand-edit —
-see [notifications.md](notifications.md#converting-from-the-original-config).
-
-```yaml
-version: 1
-config_type: notifications
-
-slack:
-  enabled: true
-  channel: "#infra-deploys"
-  auth_token: ${env:SLACK_BOT_TOKEN}
-
-  # trigger controls when the initial Slack message is created.
-  # Subsequent events always update the existing message in place.
-  #
-  #   apply  (default) - message created only when /reeve apply is invoked
-  #   plan             - message created when a plan finishes (status: pending approval)
-  #   ready            - message created only when /reeve ready is run
-  trigger: plan
-
-  # events lists which lifecycle events emit a Slack notification.
-  # When omitted, all events at or after the trigger fire (default behavior).
-  # Valid values: plan, ready, approved, applying, applied, failed, blocked
-  #
-  # Example: only notify on plan and final result, skip the intermediate steps:
-  #   events: [plan, applied, failed, blocked]
-  #
-  # events: [plan, ready, approved, applying, applied, failed, blocked]
-
-  # icons overrides the default emoji used in the message layout.
-  # All fields are optional. Useful when your Slack workspace has custom emoji
-  # (e.g. :pulumi:, :github:) that aren't available by default.
-  icons:
-    engine: ":building_construction:"   # repo/project header icon
-    runner: ":runner:"                  # CI runner / view-run button
-    author: ":bust_in_silhouette:"      # PR author field
-    approver: ":approved_stamp:"        # required approvers field
-
-  rules:
-    - environments: [prod, staging]  # only notify these envs
-    - stacks: ["prod/payments", "prod/auth"]
-```
-
-### Message lifecycle
-
-reeve sends one message per PR and edits it in place as the run progresses.
-The sidebar color and status field update at each stage:
-
-| Stage | Trigger | Color |
-| --- | --- | --- |
-| Plan ready | `trigger: plan` - plan finishes | 🟡 yellow |
-| Ready | `/reeve ready`, or draft→ready with a successful plan | 🟡 yellow |
-| Approved | Preconditions passed, apply imminent | 🔵 blue |
-| Applying | Apply loop started | 🟣 purple |
-| Applied | Apply completes successfully | 🟢 green |
-| Failed | Apply errors | 🔴 red |
-| Blocked | Preconditions not met | 🟡 yellow |
-
-**Error rule:** if no message exists yet and apply fails, no message is created.
-Errors only update an existing message.
-
-> The Approved update can also fire the moment a PR review is approved
-> (`reeve run approved`), but only if the GitHub Action is configured with
-> `run-on-approval: "true"` and the workflow subscribes to
-> `pull_request_review` events. By default that dispatch is skipped - the
-> apply gate re-checks approvals anyway - so Slack flips to approved at
-> apply time instead.
-
-**`/reeve apply` hint** only appears when status is `approved`. Pending-approval
-states show "Waiting for approval." instead.
-
-### Thread timeline
-
-The first message opens a Slack thread. Each event appends a timestamped
-timeline entry (planned, ready, approved, applying, applied, failed).
-When a `timeline_slack` channel is enabled it takes over the thread with
-richer entries (per-stack outcomes, per-run CI links) and these courtesy
-entries are suppressed.
-
-No plan output is sent to Slack. Full output is in the GitHub Actions run log.
-
-Token expansion: `${env:NAME}` pulls from the process environment.
+The old single `slack:` block is rejected; use `reeve migrate-config` to convert it with a backup.
+[Notifications](notifications.md) owns the channel catalog, message lifecycle, and delivery guarantees.
 
 ---
 
@@ -849,9 +641,9 @@ annotations:
 
 - Fully opt-in. Without `observability.yaml`, reeve emits no telemetry.
 - `stack_cardinality: hash` emits a stable 64-bit fingerprint of
-  `{project}/{stack}` as the OTEL label - prevents cardinality blow-up on
-  big monorepos. Use `allow` for small deployments, `drop` to omit the
-  stack label entirely.
+  `{project}/{stack}` as the OTEL label, hiding the raw name without reducing
+  the number of distinct stack labels. Use `allow` to expose names or `drop`
+  to omit the stack label; project and environment labels still contribute cardinality.
 
 ---
 
@@ -864,7 +656,7 @@ version: 1
 config_type: drift
 
 scope:
-  include_patterns: ["prod/*", "staging/*"]
+  include_patterns: ["*/prod", "*/staging"]
   exclude_patterns: ["*/scratch"]
 
 behavior:
@@ -872,14 +664,13 @@ behavior:
   max_parallel_stacks: 8
   state_bootstrap:
     mode: require_manual           # baseline | alert_all | require_manual
-    baseline_max_age: 7d           # reserved — parsed but not yet enforced
 
 schedules:
   critical:
-    patterns: ["prod/payments", "prod/auth"]
+    patterns: ["payments/prod", "auth/prod"]
   prod:
-    patterns: ["prod/*"]
-    exclude_patterns: ["prod/payments", "prod/auth"]
+    patterns: ["*/prod"]
+    exclude_patterns: ["payments/prod", "auth/prod"]
 
 channels:
   - type: slack
@@ -949,147 +740,25 @@ skipped when `observability.yaml` changed — see
 
 ## Preview freshness
 
-`preconditions.preview_freshness` bounds how old a plan may be at apply time.
-It exists for two failure modes, and both are about the world moving while a
-plan sits waiting for a human.
-
-**Stale plans on busy repos.** A plan records what *your* PR intended against
-the state it saw. It does not record that the state still looks that way. On a
-repo where several PRs land in a day, another PR can merge and change a
-resource your plan touches — and what happens next depends on
-[plan locking](#plan-locking):
-
-- **Plan locking on** (the default): apply executes the plan artifact the
-  preview stored. If state moved since that plan was made, the engine
-  *refuses* it — Terraform says "saved plan is stale", Pulumi says the update
-  exceeds its plan. Safe, but the failure arrives late: after the run started,
-  after the stack lock was taken, and on a queue where the next PR is waiting
-  behind it. Freshness turns that into an upfront block.
-- **Plan locking off**: apply computes a new change set at apply time. Nothing
-  errors. The apply simply executes something other than what the reviewer
-  read, and the wider the gap between preview and apply, the more it can
-  differ.
-
-Plan locking protects you from *reeve* applying something other than what it
-planned. Neither setting protects you from *reality* having changed — that is
-what freshness is for.
-
-This is also the axis `require_up_to_date` and `preview_max_commits_behind`
-cannot cover. Those compare your branch to its base — code drift. Freshness
-bounds *state* drift, which includes changes with no PR behind them at all: a
-console edit, an out-of-band apply, a drift-correction run. A branch can be
-perfectly up to date and its plan still describe a world that is gone.
-
-**Click-ops protection.** An approval plus an old plan is an apply anyone can
-trigger later from a comment. A freshness window forces the plan to be
-re-derived against current state before that is allowed, so an apply reflects
-a recent decision rather than a stale one someone stumbled back onto.
-
-### Default
-
-```yaml
-preconditions:
-  preview_freshness: "4h"          # the default when the key is omitted
-```
-
-Omitting the key gives you **4 hours**. That is roughly "planned this working
-session": long enough that a normal review cycle does not force a re-plan,
-short enough that a plan cannot survive a day of other merges. Set your own
-window if your review cadence is faster or slower.
-
-### Disabling it
-
-```yaml
-preconditions:
-  preview_freshness: "0"           # deliberately disabled
-```
-
-Only a literal `"0"` disables the gate; omitting the key no longer does.
-Disabled, a plan of any age may be applied, and reeve records that on the gate
-trace as *"preview_freshness disabled - a plan of any age may be applied;
-concurrent merges are not accounted for"*, so it stays visible in the PR
-comment rather than looking like the check passed.
-
-Disabling is a reasonable choice for a low-traffic repo, a single-owner
-environment, or where an external process already serialises changes. It is a
-poor choice on a shared repo with concurrent merges — that is precisely the
-case the gate is for.
-
-A value that is not a Go duration — or one that is not positive — is a load
-error rather than a silent disable. Previously `preview_freshness: 2hrs`
-parsed as nothing, left the window at zero, and turned the gate off without
-saying so.
-
-Note that disabling freshness does not disable the `preview_succeeded` gate: a
-stack with no plan at all for the current commit is still blocked.
+`preconditions.preview_freshness` defaults to `4h`; the literal string `"0"` disables the age gate.
+See [preview freshness](pull-requests.md#preview-freshness) for its relationship to branch state and saved plans.
 
 ## Plan locking
 
-```yaml
-# .reeve/<engine>.yaml
-engine:
-  type: terraform
-  plan_locking: true          # default; omit to get this
-```
+`engine.plan_locking` defaults to `true` and applies a saved preview plan when one is available.
+Missing or unreadable plan artifacts fall back to a fresh plan, and `--refresh` disables locking for that run; see [saved plans](pull-requests.md#plan-locking).
 
-Plan locking binds an apply to the plan its preview produced. With it on,
-reeve stores the engine's plan artifact next to the run manifest at preview
-time and hands that exact file back to the engine at apply time:
+## Reserved fields
 
-| Engine | Preview | Apply |
-|---|---|---|
-| Terraform / OpenTofu | `plan -out=<file>` | `apply <file>` |
-| Pulumi | `preview --save-plan=<file>` | `up --plan=<file>` |
+These fields parse for compatibility but do not enable the suggested behavior:
 
-With it off, both engines compute a fresh change set inside the apply call.
-That is not a small difference:
-
-```
-plan_locking: false                  plan_locking: true
-
-  preview  →  plan A  (reviewed)       preview  →  plan A  (reviewed, stored)
-     ⋮         someone merges             ⋮         someone merges
-  apply    →  plan B  → SHIPS          apply    →  plan A  → engine REFUSES
-                                                   (state moved under it)
-```
-
-Off, "last apply wins": what ships is whatever the world looks like at apply
-time, which is not necessarily what anyone approved. On, an apply the world
-moved out from under fails loudly instead.
-
-Reeve still re-derives nothing about *which* stacks apply — that is bound to
-the preview manifest independently of this setting.
-
-### When it degrades
-
-Locking is best-effort in one direction only: it never applies something
-unreviewed, but it can fall back to a re-plan. That happens when the preview
-stored no artifact (locking was off then, the upload failed, the manifest
-predates this feature) or the stored plan cannot be read back. The apply still
-runs, and the run's timeline says **"plan lock unavailable"** with the reason —
-"this apply re-planned" is never something you should have to infer.
-
-`/reeve apply --refresh` also turns locking off for that run, by construction:
-a refresh changes the diff, which is the one thing a locked plan pins.
-
-### Reasons to turn it off
-
-- **Pulumi's update-plan flags are still experimental.** `--save-plan` and
-  `--plan` are gated behind `PULUMI_EXPERIMENTAL`, which reeve sets on exactly
-  the two invocations that pass them. If your Pulumi version does not support
-  them, the apply fails rather than silently applying something else — set
-  `plan_locking: false`.
-- **The stored plan is sensitive.** A plan artifact is the engine's own
-  serialized change set: it contains resource attribute values, including
-  ones your state backend treats as secret. Pulumi's own docs say as much
-  about `--save-plan`. Unlike the plan *summary* in the run manifest, it
-  cannot be redacted — redacting it would make it unusable as a plan.
-
-  It lands in your own bucket, under `runs/pr-<n>/<run-id>/plans/`, and is
-  pruned by the same `retention.max_age` sweep as the rest of the run's
-  artifacts. If that bucket is not already treated as sensitive — object
-  encryption, access limited to the people who can already read state — treat
-  this as the reason to fix that, or turn plan locking off.
+- `locking.reaper_interval`: use an external [maintenance schedule](operations.md#scheduled-maintenance).
+- `apply.auto_ready`: does not dispatch readiness automatically; the workflow's `ready_for_review` event already invokes ready.
+- `drift.behavior.state_bootstrap.baseline_max_age`: not enforced.
+- `drift.freshness.respect_failures`: not a separate toggle; failed checks are retried.
+- `drift.classification.treat_as_drift.missing_state`: requires unmanaged-resource inventory the current engines do not provide.
+- `break_glass.authorized.vcs_bypass` and `groups`: rejected if configured; see [break-glass](break-glass.md).
+- Auth provider `source`: does not wire a parent provider into secret-manager retrieval; see [secret managers](auth.md#secret-managers).
 
 ## Lint
 
@@ -1105,7 +774,7 @@ Catches:
   per `engine.type`)
 - Missing required fields (`bucket.type`, an engine config)
 - More than one engine config (reeve currently supports one engine per
-  repo)
+  configured root)
 - Auth provider scope conflicts (see [auth.md](auth.md))
 - `env_passthrough` without `i_understand_this_is_dangerous: true`
 

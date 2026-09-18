@@ -6,6 +6,13 @@ engine:
   binary:
     path: pulumi
 
+  state:
+    backend: file
+    url: file:///REPLACE_WITH_ABSOLUTE_PATH/pulumi-state # set by the README setup
+    secrets_provider:
+      type: passphrase
+      passphrase: reeve-demo-only # synthetic local fixture, never a real secret
+
   stacks:
     - pattern: "projects/*"
       stacks: [dev, prod]

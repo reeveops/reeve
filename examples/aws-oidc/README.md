@@ -1,4 +1,4 @@
-# aws-oidc
+# AWS OIDC wiring recipe
 
 Single-cloud AWS using GitHub Actions OIDC federation. No long-lived AWS
 credentials anywhere - reeve acquires 1-hour STS tokens per stack.
@@ -9,6 +9,14 @@ credentials anywhere - reeve acquires 1-hour STS tokens per stack.
 - `.reeve/auth.yaml` - one `aws_oidc` provider for prod + drift-readonly
 - `.reeve/pulumi.yaml` - two projects, dev/staging/prod per project
 - `.github/workflows/reeve.yml` - preview + apply on comment
+
+## Before copying
+
+This recipe supplies configuration and a caller workflow, not workload projects.
+Use an existing Pulumi project and replace all account, role, bucket, organization, and reviewer placeholders.
+
+The caller uses a prepared runner labeled `reeve-aws` whose IAM identity can access the Reeve artifact bucket.
+Workload OIDC bindings do not authenticate that controller bucket client; for hosted runners use an appropriately restricted [custom action job](../../docs/github-actions.md#composite-action-for-custom-jobs).
 
 ## One-time cloud setup
 
@@ -82,3 +90,17 @@ reeve lint
 reeve stacks              # enumerates projects/*/Pulumi.<stack>.yaml
 reeve rules explain api/prod
 ```
+
+## State access and validation
+
+`engine.state.auth_provider` supplies credentials for Pulumi backend login; stack credentials override state credentials with the same environment keys during engine execution.
+With an S3 state backend and AWS workload role, ensure the effective workload role can access that backend too; two roles do not remain independently active in one AWS environment.
+
+The drift binding uses `override:` to replace the write-capable workload role.
+Grant the backend permissions required by Pulumi refresh separately from read-only workload inspection.
+
+After adapting the files, run `reeve lint`, `reeve stacks`, and `reeve rules explain YOUR_PROJECT/prod` from the consumer root.
+Expect production approval rules to match `*/prod`; test with one reviewed change before enabling all projects.
+
+This recipe does not provision cloud resources for you; remove only resources you created specifically for a disposable trial after they are no longer needed.
+The evolving [cloud contract harness](https://github.com/reeveops/reeve-test/blob/master/e2e/cloud-buckets.md) tests bucket behavior separately from a workload deployment.

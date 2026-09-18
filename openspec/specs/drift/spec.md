@@ -13,7 +13,7 @@ at `drift` level; `suppress` is a command group.
 
 ```
 reeve drift run [--pattern ... | --schedule <name> | --if-stale]
-reeve drift status [--since 24h] [--stack prod/api]
+reeve drift status [--since 24h] [--stack api/prod]
 reeve drift report [--format markdown|json]
 reeve drift bootstrap [--pattern ...]
 reeve drift suppress add <stack> [--until 48h] [--reason ...]
@@ -167,7 +167,7 @@ duplicate beats a silently lost alert.
 - `require_manual` - refuse to run without `reeve drift bootstrap` command.
 
 **Unset mode behaves like `alert_all`** - noisy on a large estate, but
-nothing is silently accepted as baseline. **Recommended for `prod/*` scopes
+nothing is silently accepted as baseline. **Recommended for `*/prod` scopes
 is `require_manual`**, to close the "attacker deletes state file → baseline
 resets → alerts suppressed" gap. `baseline_max_age` is accepted in config but
 **not yet enforced** (reserved for the `baseline` mode).

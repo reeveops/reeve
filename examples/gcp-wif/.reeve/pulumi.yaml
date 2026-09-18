@@ -5,6 +5,7 @@ engine:
   type: pulumi
 
   state:
+    auth_provider: gcp-prod
     backend: gcs
     url: gs://mycompany-pulumi-state
     secrets_provider:

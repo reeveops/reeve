@@ -55,3 +55,14 @@ reeve runs `init -input=false`, selects the workspace, saves a plan with
 `plan -detailed-exitcode -out=...`, and parses `show -json` for the PR
 comment. Apply consumes that exact saved plan file. Drift checks use
 `plan -refresh-only`, which never mutates your state.
+
+## Expected result and cleanup
+
+Expect `random-name/dev`, `random-name/prod`, and `null-touch/default` from `reeve stacks`, followed by a rendered plan with additions against fresh local state.
+Provider initialization needs network access even though the workload needs no cloud credentials.
+
+Use a disposable checkout for the demo; it creates Reeve artifacts, Terraform working directories, and workspace/backend files.
+After a preview-only run, discard that checkout; if you deliberately applied the fixture, destroy the fixture resources with the matching engine/workspace before removing its state.
+
+For CI across separate runs, replace the local Reeve bucket and engine backend with persistent storage.
+See [getting started](../../docs/getting-started.md) and the evolving [scenario catalog](../README.md#test-harness-and-scenarios).

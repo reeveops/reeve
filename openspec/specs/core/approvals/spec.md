@@ -59,13 +59,11 @@ A `/reeve approve` comment only counts when **all** hold:
   PR author** (the non-author rule - an author never self-approves, via review
   or comment).
 
-A comment approval is stamped with the SHA that was HEAD when the comment was
-posted (the newest commit at or before the comment's creation time), mirroring
-how a review carries its `commit_id`. Under `dismiss_on_new_commit` (default
-on) a comment approval is therefore **dismissed when a newer commit lands**,
-exactly like a stale review. Where the intended commit is ambiguous (a comment
-predating every commit), the source picks the oldest commit so dismissal still
-fires - the fail-closed choice.
+Comment approvals are commit-bound only when the comment names a SHA: `/reeve approve <sha>` accepts a prefix of at least seven characters.
+Under `dismiss_on_new_commit`, an unpinned comment does not count unless `allow_unpinned_comment_approvals: true` explicitly enables approve-and-stick behavior.
+
+A pinned stale approval is still dismissed; GitHub review approvals use their authoritative `commit_id`.
+Reeve does not infer a comment's SHA from user-controlled commit timestamps.
 
 ## Rule resolution
 
@@ -76,8 +74,7 @@ Layered, not either/or:
   more specific overrides numeric fields (e.g. `required_approvals`).
 - `require_all_groups: true` means one approval from each listed group,
   not N-of-any.
-- CODEOWNERS integration optional; when enabled, honored alongside team
-  rules.
+- CODEOWNERS integration is optional and honored alongside team rules. The last matching CODEOWNERS rule wins; a final ownerless rule leaves the path unowned.
 - Stale reviews dismissed on new commits (configurable, GitHub-only
   capability - declared via VCS capability flag).
 

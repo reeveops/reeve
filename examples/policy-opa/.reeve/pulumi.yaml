@@ -41,3 +41,13 @@ engine:
       command: ["./scripts/cost-gate.sh", "{{plan_json}}", "{{env}}"]
       on_fail: warn
       required: false        # skip if infracost isn't installed locally
+
+    - name: prevent-production-deletes
+      command: [conftest, test, --policy, policies/prevent_deletes.rego, "{{plan_json}}"]
+      on_fail: block
+      required: true
+
+    - name: large-change
+      command: [python3, scripts/change-limit.py, "{{plan_json}}", "20"]
+      on_fail: warn
+      required: true

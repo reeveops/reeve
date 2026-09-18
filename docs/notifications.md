@@ -1,50 +1,38 @@
 # Notifications
 
-reeve publishes lifecycle events through a single **notification-channel
-framework** (`internal/notify`). Two producers feed it:
+Send PR status and drift alerts to the destinations your team already uses.
+Notifications are optional; the GitHub PR remains the primary place to inspect a plan and apply result.
 
-- the **PR flow** (plan → ready → approved → applying → applied/failed/blocked)
-- the **drift runner** (drift_detected / drift_ongoing / drift_resolved / check_failed / check_recovered)
+## Enable Slack
 
-A destination is implemented once and can subscribe to events from either
-producer: the same Slack channel that tracks a PR's apply lifecycle can also
-receive drift alerts, and a webhook can be pointed at both.
-
-## Declaring channels
-
-Channels are declared in `.reeve/notifications.yaml` as a generic
-list — `type` picks the adapter, `on:` picks the events:
+Create a Slack bot with access to the destination channel and message-posting permission, then store its token as `SLACK_BOT_TOKEN` in GitHub Actions secrets.
+Add this to `.reeve/notifications.yaml`:
 
 ```yaml
 version: 2
 config_type: notifications
-
 channels:
   - type: slack
     channel: "#infra-deploys"
     auth_token: ${env:SLACK_BOT_TOKEN}
-    trigger: plan                     # when the per-PR message is created
-    on: [plan, approved, applying, applied, failed, blocked]
-
-  - type: slack
-    name: drift-alerts
-    channel: "#infra-drift"
-    auth_token: ${env:SLACK_BOT_TOKEN}
-    on: [drift_detected, check_failed]
-
-  - type: webhook
-    name: audit-feed
-    url: https://example.internal/hooks/reeve
-    on: [applied, failed, drift_detected]
-    headers:
-      Authorization: "Bearer ${env:HOOK_TOKEN}"
+    trigger: plan
+    on: [plan, ready, approved, applying, applied, failed, blocked]
 ```
 
-Drift-only channels can also live in `drift.yaml` under `channels:` (same shape,
-same adapters). drift.yaml's original spelling `sinks:` no longer loads —
-`reeve migrate-config` renames it (see "Converting from the original
-config" below). See [drift.md](drift.md#channels) for the drift-specific
-rendering of each type.
+Pass the secret alongside `with:` in your reusable-workflow caller:
+
+```yaml
+secrets:
+  slack_token: ${{ secrets.SLACK_BOT_TOKEN }}
+```
+
+After a successful preview, expect one PR-level message that updates as the workflow progresses.
+If this PR changes notification configuration, the preview notification is [suppressed](#pre-approval-channel-isolation); test the next workload PR after merging the configuration.
+
+## Declaring channels
+
+A channel's `type` selects the destination and `on` selects events.
+Drift-only channels may instead live under `channels:` in `.reeve/drift.yaml`; avoid declaring the same delivery twice.
 
 ### Events
 
@@ -54,7 +42,7 @@ Valid `on:` values, in lifecycle order:
 | --- | --- | --- |
 | `planning` | PR flow | Preview run started (timeline event) |
 | `plan` | PR flow | Preview finished; pending approval |
-| `ready` | PR flow | `/reeve ready` (or `auto_ready`) |
+| `ready` | PR flow | `/reeve ready` or a ready-for-review event with a successful plan |
 | `approved` | PR flow | Preconditions passed; apply imminent |
 | `applying` | PR flow | Apply loop started |
 | `applied` | PR flow | Apply finished successfully |
@@ -108,9 +96,8 @@ preview still runs and the PR comment carries a visible line:
 > after approval/apply.
 
 This fails closed: if the changed-file list cannot be fetched in a
-VCS-connected run, dispatch is suppressed too. Post-approval events
-(`ready`, `approved`, `applying`, `applied`, …) dispatch normally — the
-approval that gates them covers the config change. `--local` runs are
+VCS-connected run, dispatch is suppressed too. This suppression applies to preview events; other lifecycle commands have their own dispatch paths.
+Do not treat it as a general authorization boundary for every configured destination. `--local` runs are
 unaffected (no VCS interaction).
 
 The same gate covers the OTEL exporter: when a PR modifies
@@ -187,20 +174,10 @@ Delivery guarantees:
   overlapping plan. This is the one case where a series does not start at a
   plan.
 
-Later series carry `· plan N` in the header. The first series on a commit is
-unnumbered and keeps the marker `reeve:timeline:v1:{sha}`; later series use
-`reeve:timeline:v1:{sha}:{n}`. Existing status/help/apply comment markers are
-untouched, so enabling the timeline never orphans an existing comment.
+Later series are numbered in the header; the first is unnumbered.
+History persists in your bucket with conditional writes; marker and storage details live in the [notification spec](../openspec/specs/notifications/spec.md#timeline-channels).
 
-`timeline_slack` is unaffected by series: entries keep threading under the
-one PR-level anchor.
-
-Entry history is persisted in the state bucket
-(`notifications/pr-{n}/timeline-v2.json`) with conditional writes, so
-concurrent runs merge instead of overwriting each other. The versioned key
-keeps workflows pinned to an older state schema from truncating plan series.
-
-### Delivery guarantees
+## Delivery guarantees
 
 - Channels receive events **concurrently** — one hung endpoint cannot starve
   the others. Each delivery is bounded by a timeout.
@@ -209,67 +186,185 @@ keeps workflows pinned to an older state schema from truncating plan series.
   bounded exponential backoff.
 - Notification failures are logged, never fatal: they cannot abort a plan
   or apply.
-- Notifications run last in the pipeline, so upstream failures are
-  captured accurately.
-
-## Converting from the original config
-
-reeve is early alpha and the config shape changed: the original single
-`slack:` block (and drift.yaml's `sinks:` key) no longer load — reeve
-errors and points you here. Convert with one command:
-
-```bash
-reeve migrate-config            # rewrites in place; originals backed up as *.bak
-reeve migrate-config --dry-run  # preview the rewrite first
-```
-
-That turns the original
-
-```yaml
-version: 1
-config_type: notifications
-
-slack:
-  enabled: true
-  channel: "#infra-deploys"
-  auth_token: ${env:SLACK_BOT_TOKEN}
-  trigger: plan
-  events: [plan, applied, failed]
-```
-
-into the equivalent `channels:` entry (`events:` becomes `on:`; trigger,
-icons, and rules carry over), and renames drift.yaml's `sinks:` key to
-`channels:`. Hand-editing to the same shape works just as well.
-
-`comments.*` in `shared.yaml` (PR comment rendering) is unchanged and
-unrelated to channels.
+- Start and completion events are delivered at their lifecycle points; a missing notification does not prove the engine did not run.
 
 ## The Slack PR message lifecycle
 
-See [configuration.md](configuration.md#notificationsyaml) for the full
-message lifecycle (colors, thread timeline, trigger semantics, icons,
-rules).
+reeve sends one message per PR and edits it in place as the run progresses.
+The sidebar color and status field update at each stage:
 
-## Adding a destination
+| Stage | Trigger | Color |
+| --- | --- | --- |
+| Plan ready | `trigger: plan` - plan finishes | 🟡 yellow |
+| Ready | `/reeve ready`, or draft→ready with a successful plan | 🟡 yellow |
+| Approved | Preconditions passed, apply imminent | 🔵 blue |
+| Applying | Apply loop started | 🟣 purple |
+| Applied | Apply completes successfully | 🟢 green |
+| Failed | Apply errors | 🔴 red |
+| Blocked | Preconditions not met | 🟡 yellow |
 
-One interface implementation serves both producers. In
-`internal/notify/channels/<name>`:
+**Error rule:** if no message exists yet and apply fails, no message is created.
+Errors only update an existing message.
 
-```go
-func init() { notify.Register("my_channel", New) }
+> The Approved update can also fire the moment a PR review is approved
+> (`reeve run approved`), but only if the shared workflow is configured with
+> `run_on_approval: true` and the workflow subscribes to
+> `pull_request_review` events. By default that dispatch is skipped - the
+> apply gate re-checks approvals anyway - so Slack flips to approved at
+> apply time instead.
 
-func New(_ context.Context, cfg schemas.ChannelYAML, deps notify.Deps) (notify.Channel, error) {
-    // return (nil, nil) to skip when an optional dependency is missing
-}
+**`/reeve apply` hint** only appears when status is `approved`. Pending-approval
+states show "Waiting for approval." instead.
 
-func (s *Channel) Name() string                { ... }
-func (s *Channel) Subscribes() []notify.Event  { ... } // usually notify.ParseEvents(cfg.On)
-func (s *Channel) Deliver(ctx context.Context, p notify.Payload) error {
-    // p.Drift != nil for drift events, p.PR != nil for PR-flow events
+### Slack thread timeline
+
+The first message opens a Slack thread. Each event appends a timestamped
+timeline entry (planned, ready, approved, applying, applied, failed).
+When a `timeline_slack` channel is enabled it takes over the thread with
+richer entries (per-stack outcomes, per-run CI links) and these courtesy
+entries are suppressed.
+
+No plan output is sent to Slack. Full output is in the GitHub Actions run log.
+
+Token expansion: `${env:NAME}` pulls from the process environment.
+
+---
+
+## Destination recipes
+
+These channel fragments belong under `channels:` in notifications or drift configuration.
+The shared workflow directly accepts the Slack token; other secrets/variables must be made available through an appropriate prepared runner or custom job, not invented reusable-workflow inputs.
+
+### Slack
+
+Drift messages are per stack by default; `grouping: by_environment` batches them by environment. Use a dedicated
+channel (`#infra-drift`) - mixing drift with regular alerts gets noisy.
+
+```yaml
+- type: slack
+  channel: "#infra-drift"
+  on: [drift_detected, check_failed]
+  grouping: by_environment
+```
+
+### Webhook
+
+Generic HTTP POST with JSON body. In v1, the `raw` format is the only
+shape - no named presets.
+
+```yaml
+- type: webhook
+  name: incident-router
+  url: https://alerts.example.com/reeve
+  on: [drift_detected]
+  headers:
+    Authorization: "Bearer ${env:ALERT_ROUTER_TOKEN}"
+```
+
+Payload shape:
+
+```json
+{
+  "event": "drift_detected",
+  "project": "api",
+  "stack": "prod",
+  "env": "prod",
+  "outcome": "drift_detected",
+  "counts": {"add": 0, "change": 1, "delete": 0, "replace": 0},
+  "fingerprint": "a3f8e1...",
+  "error": "",
+  "run_id": "drift-20260421T153000Z"
 }
 ```
 
-Then add the package to `internal/notify/all` (or import it directly in a
-custom build). Channels self-register; the factory resolves purely by the
-config `type:` string — no core code changes needed (see the modularity
-contract in `openspec/specs/architecture`).
+With `grouping: by_environment`, a grouped POST replaces the top-level stack
+fields with the environment key and a `stacks` array:
+
+```json
+{
+  "event": "drift_detected",
+  "group": "prod",
+  "stacks": [
+    {"project": "api", "stack": "prod", "env": "prod", "outcome": "drift_detected",
+     "counts": {"add": 0, "change": 1, "delete": 0, "replace": 0}, "fingerprint": "a3f8e1...", "error": ""}
+  ],
+  "run_id": "drift-20260421T153000Z"
+}
+```
+
+Named presets for `incident_io` / `rootly` / `opsgenie` are deliberately
+**not** built in. Template the payload in your webhook receiver instead -
+that's where the transformation logic belongs.
+
+### PagerDuty
+
+Events API v2 with automatic `trigger` / `resolve` action selection.
+Every stack gets two independent incident streams so a check failure
+never stomps a real drift incident (and vice versa):
+
+| Dedup key | Triggered by | Resolved by |
+|---|---|---|
+| `reeve-drift-<project>/<stack>` | `drift_detected`, `drift_ongoing` | `drift_resolved` |
+| `reeve-drift-check::<project>/<stack>` | `check_failed` | `check_recovered` |
+
+Subscribing to `check_failed` implicitly subscribes `check_recovered`, so
+check-failure incidents always resolve once the check heals.
+
+```yaml
+- type: pagerduty
+  integration_key: ${env:PD_CHANGE_EVENTS_KEY}
+  on: [drift_detected, drift_resolved]
+  severity_map:
+    prod: error
+    staging: warning
+    dev: info
+```
+
+### GitHub issue
+
+One open issue per drifted stack, identified by a hidden marker
+(`<!-- reeve:drift:<project>/<stack> -->`). On re-runs, the issue body
+updates. On `drift_resolved`, the issue closes.
+
+Check failures get their own issue per stack (marker
+`<!-- reeve:drift-check:<project>/<stack> -->`, title
+`drift check failed: <project>/<stack>`), opened on `check_failed` and
+closed on `check_recovered` — they never overwrite the drift issue.
+Subscribing to `check_failed` implicitly subscribes `check_recovered`.
+
+```yaml
+- type: github_issue
+  on: [drift_detected, drift_resolved]
+  labels: [drift, infra]
+  assignees: ["YOUR_GITHUB_LOGIN"]
+```
+
+Requires `GITHUB_TOKEN` with `issues: write`.
+
+### OTEL annotation
+
+Emits an annotation event to the annotations module (Grafana / Datadog /
+Dash0). See [configuration.md](configuration.md#observabilityyaml).
+
+```yaml
+- type: otel_annotation
+  on: [drift_detected, drift_resolved]
+```
+
+## Converting from the original config
+
+The old `notifications.yaml` single `slack:` block and `drift.yaml` `sinks:` key no longer load.
+Preview the migration before writing it:
+
+```bash
+reeve migrate-config --dry-run
+reeve migrate-config
+```
+
+The converter keeps `*.bak` backups, moves Slack settings into a channel, and renames `events` to `on`.
+PR comment settings under `shared.yaml: comments` are unrelated and stay unchanged.
+
+## Adding a destination
+
+Provider implementation belongs in the [notification specification](../openspec/specs/notifications/spec.md#adding-a-destination) and [contributor guide](../CONTRIBUTING.md).
+A new adapter can serve both PR and drift events without adding setup requirements for users who do not enable it.

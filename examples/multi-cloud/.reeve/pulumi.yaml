@@ -5,6 +5,7 @@ engine:
   type: pulumi
 
   state:
+    auth_provider: aws-prod
     backend: s3
     url: s3://mycompany-pulumi-state
     secrets_provider:

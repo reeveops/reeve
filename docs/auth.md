@@ -1,12 +1,23 @@
-# Auth providers
+# Authentication
 
-reeve's authentication model is **zero-trust by design**: short-lived
-federated credentials only, acquired per-stack at run time, discarded
-after. Long-lived cloud keys are a flagged escape hatch (`env_passthrough`)
-that requires explicit opt-in.
+Configure the identities Reeve needs for your environment, then bind workload credentials to stacks and run modes.
+Federation is preferred; supported secret managers and explicitly acknowledged environment mappings cover other credentials.
 
-This guide covers every provider type, the cloud-side trust setup, and
-common wiring recipes.
+## Which credentials go where
+
+| Use | Where it is configured |
+| --- | --- |
+| GitHub controller API | Default Actions token, shared-workflow `reeve_token`, or action `github-token`. |
+| Reeve bucket | Runner/cloud SDK credentials; [bucket authentication](github-actions.md#bucket-authentication). |
+| Pulumi state backend | `engine.state.auth_provider` and `engine.state` settings. |
+| Terraform/OpenTofu backend and cloud workload | Explicit credentials passed to the engine through bindings; backend settings stay in `.tf` files. |
+| Pulumi workload | Stack/mode bindings in `.reeve/auth.yaml`. |
+
+These identities may share a role where appropriate, but their configuration paths are distinct.
+Adding a workload provider does not authenticate the controller bucket or change the identity posting PR comments.
+
+Choose a provider below, complete its cloud-side setup, and validate the actual stack references with `reeve stacks` and `reeve lint`.
+For ready-to-adapt wiring, see the [AWS](../examples/aws-oidc/README.md), [GCP](../examples/gcp-wif/README.md), and [multi-cloud](../examples/multi-cloud/README.md) recipes.
 
 ## Provider catalog
 
@@ -38,17 +49,13 @@ providers:
 
 bindings:
   # Default for preview + apply on prod stacks
-  - match: { stack: "prod/*" }
+  - match: { stack: "*/prod" }
     providers: [aws-prod, gcp-prod]
 
   # Drift-specific binding: read-only role
-  - match: { stack: "prod/*", mode: drift }
-    providers: [aws-prod-readonly]
+  - match: { stack: "*/prod", mode: drift }
+    override: [aws-prod-readonly]
 
-  # Stack-specific override: different AWS role for payments
-  - match: { stack: "prod/payments" }
-    override: [aws-payments-strict]     # replaces aws-prod for this stack
-    providers: [github-app]             # unions with remaining providers
 ```
 
 ### Resolution rules
@@ -76,7 +83,7 @@ Used to detect conflicts:
 - `gcp` - `gcp_wif`, `gcloud_adc`
 - `azure` - `azure_federated`
 - `github-identity` - `github_app`
-- Secret managers and Vault do not conflict (multiple allowed).
+- Secret-manager scopes are distinct by provider type; different providers of the same type can conflict.
 
 ## Child process credential boundary
 
@@ -103,12 +110,8 @@ Apply waits until approvals, checks, preview, lock, freeze, fork, draft, and pol
 
 Stack credentials override state credentials when both explicitly provide the same environment key.
 
-- One command reuses each provider credential across state access and every matching stack.
-- Concurrent requests for one provider share one acquisition.
-- Concurrent waiters share one acquisition failure; a later request may retry.
-- A credential expiring within 30 seconds is replaced before a new consumer receives it.
-- Drift invalidates the cached generation before rebinding after an expired-credential failure.
-- Every acquired generation is cleaned once when the command ends, including replaced and invalidated generations.
+Credentials are reused within one invocation, refreshed when needed, and cleaned up when the command finishes.
+[Invocation reuse](../openspec/specs/auth/spec.md#invocation-reuse) specifies concurrency and expiry behavior.
 
 This boundary prevents accidental ambient inheritance but is not an operating-system sandbox.
 Run approved untrusted code under a separate user, container, VM, or job boundary.
@@ -189,39 +192,8 @@ providers:
     duration: 1h
 ```
 
-The impersonation response is validated before use:
-
-- `accessToken` must be present and non-empty.
-- `expireTime` must be a parseable RFC3339 timestamp.
-- The expiry must be in the future.
-- Any of those failing fails the acquire.
-
-Validation happens in two steps, because each provider reports its expiry
-differently:
-
-- The provider parses or converts its own format first. `gcp_wif` parses
-  `expireTime` as RFC3339; `azure_federated` converts a relative
-  `expires_in` via `auth.ExpiresInToTime`, which rejects non-positive
-  values and any value large enough to overflow `time.Duration`;
-  `github_app` decodes a `time.Time` straight from JSON; `aws_oidc`
-  dereferences the SDK's `*time.Time` with `aws.ToTime`, which yields the
-  zero time when the field is absent.
-- The result then goes to `auth.ValidateExchange`, which applies the checks
-  common to every provider: the token is non-empty, the expiry is non-zero,
-  and the expiry is in the future.
-
-`ValidateExchange` takes an already-parsed `time.Time`. It does not parse
-timestamps or convert `expires_in`.
-
-All providers return the same sentinel errors, so callers and tests match
-with `errors.Is`: `ErrNoToken`, `ErrNoExpiry`, `ErrExpired`.
-
-Why the expiry is not optional:
-
-- `Credential.ExpiresAt` treats the zero value as "no expiry", so an absent
-  or malformed timestamp advertises a one-hour token as permanent.
-- An already-expired credential fails opaquely partway through an engine
-  run instead of failing here, where the cause is obvious.
+The credential exchange rejects missing tokens, malformed expiry, and expired credentials before engine execution.
+Implementation details and exchange contracts live in the [auth specification](../openspec/specs/auth/spec.md).
 
 ### GCP setup
 
@@ -289,7 +261,6 @@ providers:
     app_id: 123456
     installation_id: 789012
     private_key: ${env:GITHUB_APP_PRIVATE_KEY}   # or a file path
-    permissions: ["contents:read", "issues:write", "pull_requests:write"]
 ```
 
 `private_key` accepts three forms:
@@ -298,17 +269,25 @@ providers:
 2. File path
 3. Base64-encoded blob (Actions secrets often deliver it this way)
 
-**Why use a GitHub App instead of `GITHUB_TOKEN`?** Higher rate limits,
-works across many repos, can post as a branded account, can be granted
-granular scopes. For small single-repo setups, the default `GITHUB_TOKEN`
-is fine.
+A bound `github_app` provider exports a token to the engine, with permissions governed by the App installation.
+For the identity that posts Reeve comments, follow [controller App setup](github-actions.md#github-app-identity) instead.
 
 ---
 
 ## Secret managers
 
-All secret-manager providers use a parent auth provider for the API call
-and map the returned value into env vars for the engine via `env_map`.
+Secret-manager providers retrieve a value using the controller's available credentials, then map it into engine variables with `env_map`.
+The parsed `source:` field does not currently wire a parent auth provider into retrieval.
+
+| Provider | Retrieval credential in the controller |
+| --- | --- |
+| AWS Secrets Manager / SSM | AWS SDK default credential chain. |
+| GCP Secret Manager | `CLOUDSDK_AUTH_ACCESS_TOKEN` in the controller environment. |
+| Azure Key Vault | Azure SDK `DefaultAzureCredential`. |
+| GitHub secret | The explicitly named controller environment variable. |
+
+A sibling federated workload binding does not populate the controller's ambient environment.
+Prepare retrieval credentials explicitly; the shared workflow's GCP ADC setup alone does not promise the access-token environment variable required by `gcp_secret_manager`.
 
 ### `env_map`
 
@@ -347,7 +326,6 @@ providers:
 
   cloudflare-token:
     type: aws_secrets_manager
-    source: aws-prod                # parent provider
     secret_id: reeve/cloudflare/api-token
     region: us-east-1
     ttl: 1h
@@ -355,8 +333,8 @@ providers:
       CLOUDFLARE_API_TOKEN: ""      # "" = whole (plain-string) secret value
 ```
 
-The underlying IAM role (`aws-prod`) needs
-`secretsmanager:GetSecretValue` on the secret ARN.
+The controller identity used for retrieval needs `secretsmanager:GetSecretValue` on the secret ARN.
+The returned secret can be long-lived; Reeve does not rotate it.
 
 ### AWS SSM Parameter
 
@@ -364,7 +342,6 @@ The underlying IAM role (`aws-prod`) needs
 providers:
   datadog-key:
     type: aws_ssm_parameter
-    source: aws-prod
     parameter: /reeve/datadog/api-key
     region: us-east-1
     env_map:
@@ -373,8 +350,8 @@ providers:
 
 ### GCP Secret Manager
 
-Requires a sibling `gcp_wif` binding so the GCP access token is in the
-environment when this provider runs.
+Requires `CLOUDSDK_AUTH_ACCESS_TOKEN` in the controller environment.
+A `gcp_wif` workload binding alone does not provide that controller variable.
 
 ```yaml
 providers:
@@ -418,10 +395,10 @@ providers:
       MY_TOOL_TOKEN: ""             # re-export under the name the engine expects
 ```
 
-In the workflow:
+In a custom composite-action job (not a reusable-workflow caller):
 
 ```yaml
-- uses: reeveops/reeve@master
+- uses: reeveops/reeve@d31c814640689c2f2e1b0d02d2bc11a80a94faab
   env:
     MY_CUSTOM_SECRET: ${{ secrets.MY_CUSTOM_SECRET }}
 ```
@@ -457,7 +434,7 @@ against a stack bound to them, name a local substitute on the binding:
 
 ```yaml
 bindings:
-  - match: { stack: "prod/*" }
+  - match: { stack: "*/prod" }
     providers: [gcp-prod]        # gcp_wif - used in CI
     local: [gcp-local]           # gcloud_adc - used in --local runs only
 ```
@@ -594,24 +571,19 @@ because its credential is incomplete.
 
 ## Fork PR policy
 
-Fork PRs get **dry-run-only credentials by default**. A fork PR means
-someone outside the repo's collaborators is proposing code, and running
-that code with production credentials is a textbook supply-chain hole.
+`apply.allow_fork_prs` defaults to `false` and blocks apply and writing refresh on fork PRs.
+It does not automatically reduce IAM permissions or create a special read-only credential for preview.
 
-Opt in explicitly:
+Preview uses the configured preview bindings when workflow permissions and credentials allow it to run.
+Use explicit read-only preview roles and a suitable execution boundary for untrusted code; GitHub's event/token restrictions also affect what a fork workflow can access.
 
 ```yaml
-# .reeve/shared.yaml
 apply:
-  allow_fork_prs: true   # read the docs before flipping this
+  allow_fork_prs: false
 ```
 
-With opt-in, fork PRs get the full credential set. Without, the fork-PR
-precondition gate denies apply (but preview still runs with dry-run creds).
-
-Recommended pattern: leave `allow_fork_prs: false`, use a required label
-(`needs-credentials`) applied by a trusted reviewer to re-run the
-workflow as a `workflow_dispatch` against the PR's head ref.
+Enabling this setting permits fork applies to reach the other gates; it does not remove approval, checks, policy, or lock requirements.
+Do not use a label or manual dispatch as a substitute for reviewing the code and credential boundary.
 
 ---
 
@@ -642,9 +614,8 @@ Trust policy mismatch. Check:
 
 ### `gcp_wif` returns empty access token
 
-Workload identity pool's attribute condition doesn't match. Debug by
-temporarily removing `--attribute-condition` and retrying; the failing
-condition is usually repo or ref mismatch.
+Check the provider response, mapped claims, repository/ref condition, service-account binding, and API permissions.
+Correct the mismatched claim or binding without removing the trust restriction.
 
 ### GitHub App 404 on `/app/installations/{id}/access_tokens`
 

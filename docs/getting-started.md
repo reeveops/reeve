@@ -1,434 +1,138 @@
 # Getting started
 
-Zero to PR-comment in ten minutes. This guide walks you through the minimum
-setup: one Pulumi project, one stack, a filesystem bucket (no cloud yet),
-and a GitHub Actions workflow that opens a PR and comments on it.
+Connect an existing infrastructure repository to Reeve, then preview, review, and apply one small change.
+For a local trial without cloud resources, start with the [local demos](../examples/README.md#local-demos).
+If you have write access to `reeve-test`, the [guided PR tour](../examples/README.md#guided-pr-tour) lets you explore the flow before configuring your own repository.
 
-For cloud-native setups (S3 locks, OIDC federation, multi-stack monorepo)
-see [configuration.md](configuration.md) and [auth.md](auth.md).
+## Before you begin
 
-## Prerequisites
+You need:
 
-- A GitHub repo with a Pulumi project. The [`examples/toy-stack/`](../examples/toy-stack/)
-  in this repo is a working one - fork and start from there if you want.
-- GitHub Actions enabled.
-- Optional: a running Pulumi backend. The toy stack uses the `random`
-  provider so no cloud credentials are needed.
+- A GitHub repository with Actions enabled and a working Pulumi, Terraform, or OpenTofu project.
+- The engine's state backend and any workload credentials that project already needs.
+- A persistent bucket for Reeve's locks, plans, run history, and audit entries.
+- A reviewer other than the PR author, with an approver policy appropriate to your repository.
 
-## 1. Install reeve locally
+The Reeve bucket and the engine's state backend serve different purposes.
+A filesystem Reeve bucket works for a local trial or a test contained in one job; separate Actions runs need shared persistent storage.
 
-Grab a prebuilt tarball from the
-[releases page](https://github.com/reeveops/reeve/releases) (verify its
-sha256 against the release's cosign-signed `checksums.txt`), or build
-from source:
+## 1. Install the CLI
+
+Install a binary from [Releases](https://github.com/reeveops/reeve/releases), checking the archive against the signed `checksums.txt`, or build the current documented candidate:
 
 ```bash
 git clone https://github.com/reeveops/reeve
 cd reeve
-mise install           # go + tooling (go, golangci-lint, govulncheck, gosec, hk)
-go build -o ./bin/reeve ./cmd/reeve
-./bin/reeve --help
+git checkout d31c814640689c2f2e1b0d02d2bc11a80a94faab
+mise trust
+mise run build
+export PATH="$PWD/bin:$PATH"
 ```
 
-Put `./bin/reeve` on your `$PATH` or invoke it directly.
+The build requires [mise](https://mise.jdx.dev/) and the Go toolchain specified by this repository.
+An older stable CLI may predate the shared-workflow scaffolding below; [versions and binaries](github-actions.md#versions-and-binaries) explains how to keep CLI and workflow behavior aligned.
 
-## 2. Create `.reeve/` with `reeve init`
+## 2. Scaffold your infrastructure root
 
-At the repo root, run:
+Return to the repository containing your infrastructure and run:
 
 ```bash
-reeve init
+reeve init --workflow-ref d31c814640689c2f2e1b0d02d2bc11a80a94faab
 ```
 
-`reeve init` scans the repo for Pulumi projects and Terraform root modules
-(the same scan as `reeve stacks discover`), shows what it found, and walks
-you through a short wizard: the IaC engine (pulumi, terraform, or OpenTofu -
-pick `tofu` explicitly, it reads the same `.tf` files as terraform),
-approvals (CODEOWNERS-based or an explicit approver list), an optional
-commented freeze-window example, an optional Slack notification channel, and
-an approval-freshness window. Everything you skip is written as a commented
-best-practice example you can enable later.
+Choose your engine and approval policy in the wizard.
+One `.reeve/` directory configures one engine; repositories with multiple engines can use [separate roots](github-actions.md#multiple-roots).
 
-Running in a script or CI (or passing `--non-interactive` / `-n`) skips all
-prompts and writes a safe baseline: engine detected from repo files, stacks
-pre-filled, every optional gate off. Existing `.reeve/` files are never
-overwritten - `init` only fills in missing config types unless you pass
-`--force` (which keeps `*.bak` backups).
+For a non-interactive baseline, add `--non-interactive`.
+It enables approval and check defaults, leaves optional integrations unconfigured, and detects HCL as Terraform; OpenTofu users must change `engine.type` to `tofu` and select `opentofu_version` in the caller.
 
-Release binaries also write `.github/workflows/reeve.yml` with the detected
-engine and pin the shared workflow to the release's exact source commit.
-Development builds accept the same pin through `--workflow-ref <full-commit-sha>`.
+Existing configuration is preserved unless you use `--force`, which creates backups; an existing workflow is always preserved.
+Inspect the generated files before committing them.
 
-An existing workflow is preserved.
+A **project** is an infrastructure directory and a **stack** is a Pulumi stack or Terraform/OpenTofu workspace.
+For project `api` and stack `prod`, the reference is `api/prod`; `*/prod` matches production stacks across projects.
 
-Then check the result:
+## 3. Connect storage and credentials
+
+Replace the scaffold's filesystem bucket with your persistent bucket.
+For example, in `.reeve/shared.yaml`:
+
+```yaml
+bucket:
+  type: gcs
+  name: YOUR_REEVE_BUCKET
+```
+
+Follow [self-hosting](self-hosting.md#bucket-provisioning) for S3, GCS, Azure Blob, or R2 provisioning and [authentication](auth.md#which-credentials-go-where) for the corresponding credential wiring.
+Keep the engine's existing state backend; Reeve artifacts do not replace Terraform state or Pulumi state.
+
+For GCS, the shared workflow accepts `gcp_workload_identity_provider` and `gcp_service_account` to authenticate the runner to Reeve's bucket.
+Workload bindings in `.reeve/auth.yaml` and Pulumi's `engine.state.auth_provider` configure engine credentials separately.
+
+For AWS, Azure, or R2 bucket access, use the supported runner or composite-action setup described in [GitHub Actions](github-actions.md#bucket-authentication).
+Adding an AWS workload provider to `auth.yaml` alone does not authenticate the controller's S3 client.
+
+## 4. Check configuration and the workflow
+
+Run these from the infrastructure root:
 
 ```bash
 reeve lint
+reeve stacks
+reeve rules explain api/prod
 ```
 
-### What it wrote
+Replace `api/prod` with a reference printed by `reeve stacks`.
+Check that your production patterns match the intended stacks and that the approver list names real users or teams.
 
-Two config files, the GitHub Actions caller, and `notifications.yaml` when you
-configure Slack. You can also write these by hand.
+The generated `.github/workflows/reeve.yml` calls the maintained shared workflow.
+Compare it with the [canonical caller](github-actions.md#gitops-caller), select one engine version, and add the bucket authentication inputs and permissions your setup requires.
 
-**`.reeve/shared.yaml`** - bucket, approvals, preconditions:
+Keep job ID `reeve` when using the standard `reeve / Reeve` required check.
+If you add federation after scaffolding, add `id-token: write` yourself; `init` does not overwrite an existing workflow.
 
-```yaml
-version: 1
-config_type: shared
-
-bucket:
-  type: filesystem
-  name: ./.reeve-state           # local dir for quick iteration
-
-approvals:
-  sources:
-    - type: pr_review
-      enabled: true
-  default:
-    required_approvals: 1
-    approvers: ["@your-org/infra-reviewers"]
-    dismiss_on_new_commit: true
-
-preconditions:
-  require_up_to_date: true
-  require_checks_passing: true
-  preview_freshness: 2h
-
-apply:
-  trigger: comment               # comment (default): apply on /reeve apply | merge: apply on PR merge
-  allow_fork_prs: false          # deny-by-default; flip with care
-  # auto_ready: true             # reserved — not yet enforced (draft→ready already notifies for approval when a plan has succeeded)
-```
-
-**`.reeve/pulumi.yaml`** - engine + stack declarations:
-
-```yaml
-version: 1
-config_type: engine
-
-engine:
-  type: pulumi
-  binary:
-    path: pulumi
-
-  stacks:
-    - pattern: "projects/*"      # globs are doublestar
-      stacks: [dev, staging, prod]
-
-  change_mapping:
-    ignore_changes:
-      - "**/*.md"
-      - "**/node_modules/**"
-
-  execution:
-    max_parallel_stacks: 2
-    preview_timeout: 10m
-```
-
-## 3. Verify locally
+An optional local preview uses real engine and backend access:
 
 ```bash
-reeve lint                    # strict YAML check + cross-file validation
-reeve stacks                  # prints the declared-and-enumerated stacks
-reeve rules explain prod/api  # shows merged approval rules for one stack
-reeve plan-run --sha $(git rev-parse HEAD) --run-number 1
+reeve plan-run --sha "$(git rev-parse HEAD)" --run-number 1
 ```
 
-`plan-run` renders the PR comment to stdout. No cloud calls, no GitHub calls,
-no external services. Filesystem artifacts land under `.reeve-state/`.
+This renders the PR comment locally and skips GitHub interactions; it can contact cloud services and write artifacts.
+Use [local auth bindings](auth.md#local-development) when CI providers require GitHub OIDC.
 
-## 4. Add the GitHub Actions workflow
+## 5. Open a small infrastructure PR
 
-**`.github/workflows/reeve.yml`**:
+Commit the configuration and workflow through your normal review process, then change one infrastructure value in a new PR.
+The comment-command workflow must be present on the default branch for GitHub to deliver `issue_comment` events.
 
-```yaml
-name: reeve
+Expect a successful Actions preview and a Reeve comment listing the affected stacks and changes.
+A documentation-only change can correctly select no stacks; use a workload change to exercise the first plan.
 
-on:
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
-  merge_group:
-    types: [checks_requested]
-  issue_comment:
-    types: [created]
-  # Only add pull_request_review if you set run_on_approval: true below -
-  # otherwise the action skips review events, so subscribing to them just
-  # burns runner minutes.
-  # pull_request_review:
-  #   types: [submitted]
+![A Reeve preview for two stacks](images/preview.jpg)
 
-permissions:
-  contents: read
-  checks: read
-  pull-requests: write
-  issues: write
+[About this screenshot](images/README.md).
+If no comment appears, use [the troubleshooting table](operations.md#troubleshooting).
 
-jobs:
-  reeve:
-    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
-    with:
-      mode: gitops
-      pulumi_version: latest
+## 6. Review and apply
+
+Have a different, authorized reviewer approve the current commit, then comment:
+
+```text
+/reeve apply
 ```
 
-Pin the workflow call to a reviewed full commit SHA.
-The shared workflow owns routing, checkout, caching, tool setup, timeout, and safe preview concurrency.
-For PR work, it checks out one immutable head SHA and verifies the live head before setup and command execution.
+Draft PRs must become ready for review first.
+On public repositories, configure an approver list or CODEOWNERS rather than relying on a bare approval count.
 
-Scheduled bucket cleanup uses the same workflow with `mode: maintenance` and runs no IaC engine.
-It executes `reeve maintenance run` for expired locks and configured artifact retention.
+Reeve evaluates approval, preview, and other configured gates before applying; the comment explains a block.
+A blocked apply may exit successfully without changing infrastructure, so read the stack results rather than treating a green Actions job as proof of deployment.
 
-Use `opentofu_version` or `terraform_version` instead of `pulumi_version` for an HCL engine.
-Configure engine and state credentials through the federated or secret-manager providers in `.reeve/auth.yaml`.
-`reeve init` adds `id-token: write` when the loaded config declares AWS OIDC, GCP WIF, or Azure federated auth.
-
-It adds the `closed` pull request type only when `apply.trigger` is `merge`.
-
-Keep the caller job ID `reeve` and require the `reeve / Reeve` check in branch protection.
-Reeve derives a custom caller check name from the current run and excludes its prior results from apply gates.
-
-That's it. The action auto-detects the command from the event:
-
-| Event / Comment                                    | Action                   |
-| -------------------------------------------------- | ------------------------ |
-| `pull_request` (opened / reopened / synchronize)   | `reeve run preview`      |
-| `pull_request` (ready_for_review)                  | `reeve run ready`        |
-| `pull_request` (closed and merged, when enabled)   | `reeve run apply`        |
-| `pull_request` (any other action: labeled, ...)    | silent no-op             |
-| `/reeve ready` comment                             | `reeve run ready`        |
-| `/reeve apply` comment                             | `reeve run apply`        |
-| `/reeve refresh` comment                           | `reeve run refresh`      |
-| `/reeve unlock [project/stack]` comment            | frees this PR's locks    |
-| `/reeve explain [project/stack]` comment           | `reeve run explain` - report-only why: rules, locks, gate trace |
-| `/reeve help` comment                              | posts available commands |
-| Any other comment, or any bot-authored comment     | silent no-op             |
-
-Event classification runs before binary setup, checkout, authentication, and engine installation.
-Skipped events do not run those setup steps.
-
-### Run attempts and preview history
-
-- `--run-attempt` defaults to `GITHUB_RUN_ATTEMPT`; an explicit flag takes precedence.
-- A supplied attempt must be a positive integer.
-- New artifacts use the full commit SHA; legacy short-SHA artifacts remain readable.
-- Workflow retries keep separate artifacts, audit records, and lock identities.
-- A retry waits for an earlier attempt's live lock lease to expire before it can proceed.
-- Apply stops when selected preview history is unreadable or invalid, including an already-applied commit.
-- Ready skips its success notification, while explain posts a fail-closed diagnostic report.
-- Authorized break-glass can recover unreadable preview history and records the override in the comment and audit trail.
-- Without break-glass, remove the object key named in the error or push a new commit to create a new preview identity.
-
-### Repository roots and change scope
-
-`--root` may point at a nested infrastructure directory in the checkout.
-Reeve converts repository-relative changed files to paths under that root before preview, apply, refresh, explain, and notification-policy checks.
-
-- Changes outside the configured root select no stacks.
-- Documentation-only or outside-root previews do not open blob storage, acquire engine credentials, initialize an engine session, or dispatch lifecycle notifications.
-- Apply stays bound to the stack set in the preview manifest for the PR head, even if GitHub's live changed-file list moves while the PR is open.
-- The maintained action checks out one immutable PR head and fails if the PR moves before gates, artifacts, apply, or refresh use it.
-
-**`reeve run preview` exit behavior**:
-
-- A preview exits `0` only when every targeted stack plans successfully or is a no-op.
-- If any stack fails, reeve writes the manifest before exiting nonzero.
-- If a PR comment client is available, reeve attempts to post the failure details.
-- Reeve reports a posted comment only when the PR comment was written; local runs and runs without a comment client print the rendered comment instead.
-
-**`reeve run apply` exit codes** (this is what turns the PR check red or
-green):
-
-| Exit | Meaning |
-| ---- | ------- |
-| `0`  | Every targeted stack applied cleanly or was a no-op — or every stack was **blocked** by preconditions/locks. Blocked is a deliberate non-failure: the gates held the apply back, nothing was attempted, and a later re-run can proceed. |
-| `1`  | One or more stacks **failed** to apply (engine, auth, or lock-storage error), the run was cancelled by a signal, post-apply persistence failed, or the run errored before applying (config, VCS, storage). The error message names the failed stacks. A failed apply never renders as a green check. |
-
-The reusable workflow accepts one `command_prefix` (default `"/reeve"`) so
-unrelated comments skip before GitHub assigns a runner. The composite action
-still accepts multiple comma-separated `command-prefix` values when used
-directly. Mention style (`@reeve apply`) is **not** accepted by default because
-`github.com/reeve` is a real person's account. Comments authored by bots (user type `Bot` or a
-login ending in `[bot]`) are always skipped, so reeve's own PR comments can
-never re-trigger a run.
-
-> **Review approvals:** by default an approval does not trigger a run -
-> approvals don't change code, and the apply gate re-checks approvals at
-> apply time. If you want the automatic approved-state notification (e.g.
-> the Slack "ready to apply" update) the moment a PR is approved, set
-> `run-on-approval: "true"` on the action and subscribe the workflow to
-> `pull_request_review: types: [submitted]`.
-
-> **Draft PRs:** apply is blocked. reeve returns an error if `/reeve apply`
-> is attempted on a draft PR.
-> When a draft PR is converted to ready for review, reeve automatically notifies for
-> approval if a plan has already succeeded for the head commit.
-
-Open a PR. reeve posts a comment within ~30 seconds showing the plan for
-every stack touched by the changed files.
-
-### Pinning and binaries
-
-The `uses:` ref decides where the action gets its `reeve` binary. A cache
-keyed by the action repository, build variant, platform, and source hash comes
-first. On a cache hit nothing is downloaded or built:
-
-- **`@vX.Y.Z[-prerelease]`** - downloads that release's signed tarball and verifies it
-  against the release's `checksums.txt`.
-- **`@master` / `@next`** - downloads the per-push prerelease whose signed
-  source hash matches the action source already on disk.
-- **A full commit SHA** - downloads that commit's retained prerelease when its
-  signed source hash matches, then falls back to a source build when unavailable.
-- **Anything else** (a feature branch or fork) - builds from source on the
-  runner. Any missing asset or verification failure also falls back safely.
-
-The prebuilt paths skip the Go toolchain setup + compile, saving ~30s+ on
-first runs and cache misses.
-The action publishes a verified download or local build before workload code runs.
-
-## 5. Move the bucket to real storage
-
-Filesystem buckets work great for smoke tests but every CI run starts fresh,
-so lock state is lost. Switch to S3 / GCS / Azure Blob before enabling
-`apply`.
-
-Change `.reeve/shared.yaml`:
-
-```yaml
-bucket:
-  type: s3                 # or gcs | azblob | r2
-  name: mycompany-reeve
-  region: us-east-1
-```
-
-Commit, push, and the next PR run will write locks and artifacts to the
-real bucket. See [self-hosting.md](self-hosting.md) for bucket provisioning
-recipes.
-
-## 6. Add federated auth for the engine
-
-When you move from the toy stack to real infrastructure, you need short-lived
-cloud credentials for `pulumi apply` to run. See [auth.md](auth.md) -
-the three-minute version:
-
-**`.reeve/auth.yaml`**:
-
-```yaml
-version: 1
-config_type: auth
-
-providers:
-  aws-prod:
-    type: aws_oidc
-    role_arn: arn:aws:iam::111111111111:role/reeve-prod
-    region: us-east-1
-    duration: 1h
-
-bindings:
-  - match: { stack: "prod/*" }
-    providers: [aws-prod]
-```
-
-Set up the AWS IAM role to trust GitHub's OIDC provider for
-`token.actions.githubusercontent.com` with `aud=sts.amazonaws.com` and a
-sub-claim matching your repo. See [auth.md#aws-oidc](auth.md) for the
-trust-policy template.
-
-## 7. Add approvals and locks
-
-Tighten approvals for production in `.reeve/shared.yaml`:
-
-```yaml
-approvals:
-  default:
-    required_approvals: 1
-    approvers: ["@your-org/infra-reviewers"]
-  stacks:
-    "prod/*":
-      required_approvals: 2
-      approvers: ["@your-org/sre", "@your-org/security"]
-      require_all_groups: true    # one from each group, not 2-of-any
-
-locking:
-  ttl: 4h                         # maintenance reaps expired locks
-  queue: fifo
-```
-
-`ttl` bounds every lease - including holders promoted from the queue when
-the previous holder releases or expires.
-
-Locks identify their holder by **PR + run attempt**. Re-running a workflow
-creates a new holder identity, and a *second concurrent run of the same PR*
-(double `/reeve apply`, workflow re-run while the first is still going) is
-refused with "another run of this PR holds the lock" instead of applying
-concurrently. Once the first run finishes or its lease expires, the
-next attempt proceeds normally.
-
-Locks created by an older reeve binary use the previous holder identity and
-remain binding after an upgrade until their lease expires. After confirming
-the old runner has stopped, use `reeve locks unlock --pr N --force` or comment
-`/reeve unlock --force` on the PR to clear its active holders.
-
-`reeve locks list` inspects the live state. `reeve locks explain <stack>`
-shows holder + queue. `reeve locks unlock <project/stack> --pr N` removes a
-closed or abandoned PR from a lock's holder/queue (omit the stack to sweep
-every lock). `reeve rules explain <stack>` shows the merged rule
-resolution.
-
-## 8. Turn on drift detection
-
-Separate workflow, scheduled, uses a read-only IAM role:
-
-**`.github/workflows/drift.yml`**:
-
-```yaml
-name: drift
-on:
-  schedule:
-    - cron: "17 */4 * * *"   # every 4 hours, off the hour
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  id-token: write            # OIDC for the read-only role
-  issues: write              # for github_issue drift channel
-
-jobs:
-  drift:
-    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
-    with:
-      mode: drift
-      pulumi_version: "3.231.0"
-      drift_schedule: prod
-```
-
-Configure schedules + channels in `.reeve/drift.yaml` - see [drift.md](drift.md).
-Use `drift_pattern` for a shard or `drift_if_stale: true` to skip fresh stacks.
-
-## Troubleshooting
-
-- **`pulumi: executable file not found`** - install Pulumi via
-  `pulumi/actions@v6` before running reeve in the same job.
-- **Comment keeps duplicating instead of editing in place** - reeve finds
-  its comment by the hidden HTML marker `<!-- reeve:pr-comment:v1 -->`. If
-  someone manually edited the comment and stripped the marker, reeve will
-  post a new one.
-- **`apply` says "fork PR - apply denied"** - expected. Fork PRs get
-  dry-run-only credentials by default. Opt in with
-  `shared.yaml: apply.allow_fork_prs: true` if you've thought about the
-  supply-chain risk.
-- **`apply` says "PR is in draft"** - convert the PR to ready for review
-  first. Draft PRs are always blocked from apply regardless of config.
-- **OIDC token exchange fails locally** - `aws_oidc`/`gcp_wif`/
-  `azure_federated` only work inside GitHub Actions (they need the
-  `ACTIONS_ID_TOKEN_REQUEST_URL` env var). Use `aws_profile` / `aws_sso` /
-  `gcloud_adc` for local development.
+Saved plans are used by default when available, but a missing or unreadable plan artifact can cause a fresh plan at apply time.
+Read [saved plans and freshness](pull-requests.md#saved-plans-and-freshness) before relying on exact-plan behavior.
 
 ## Next steps
 
-- [configuration.md](configuration.md) - full schema for every `.reeve/*.yaml` file
-- [auth.md](auth.md) - every provider type, plus GitHub App setup
-- [drift.md](drift.md) - schedules, event lifecycle, channel catalog
-- [policy-hooks.md](policy-hooks.md) - wiring OPA / Conftest / CrossGuard
-- [self-hosting.md](self-hosting.md) - bucket provisioning, scope, distribution
+- [PR workflow](pull-requests.md): commands, approvals, merge-triggered apply, and plan behavior.
+- [Maintenance](operations.md#scheduled-maintenance): schedule lock reaping and artifact retention.
+- [Notifications](notifications.md), [drift](drift.md), and [policies](policy-hooks.md): add optional capabilities.
+- [Examples and test scenarios](../examples/README.md): explore configurations and the evolving E2E harness.

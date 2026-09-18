@@ -10,23 +10,22 @@ repository. Human contributor docs live in `CONTRIBUTING.md`.
 - On a PR it previews IaC changes, gates `/reeve apply` behind approval
   policy, and writes locks and audit records to the user's own bucket.
 - Engines: Pulumi, Terraform, OpenTofu. VCS: GitHub.
-- Status: alpha. Breaking config changes are allowed until 1.0;
+- Status: beta, entering the release candidate phase. Breaking config changes are allowed until 1.0;
   `reeve migrate-config` covers renames.
 
 ## Non-negotiable invariants
 
 Violating any of these is a blocking issue, not a nit.
 
-1. **No control plane.** No hosted service, no phone-home, no telemetry, no
-   account. The capability does not exist in the code and must not be added.
+1. **No control plane.** No hosted service, no phone-home analytics, and no Reeve
+   account. Optional telemetry goes only to user-configured destinations.
 2. **Pure core.** `internal/core/**` imports stdlib and sibling
    `internal/core` packages only. Enforced by the `depguard` `core-purity`
    rule in `.golangci.yml`.
 3. **Gates fail closed.** A gate that errors during evaluation denies the
    apply. Never fail open.
-4. **No long-lived secrets.** Credentials are short-lived and federated
-   (AWS OIDC, GCP WIF, Azure federated, GitHub App). Never write a
-   credential to disk, env, logs, or blob storage.
+4. **Explicit credential boundaries.** Prefer short-lived federation; supported secret-manager and acknowledged environment providers remain available.
+   Pass credentials only through their designed runtime environment/files, clean temporary material, and never log or persist credentials as ordinary artifacts.
 5. **Redaction is not optional.** Nothing reaching a PR comment, log line,
    Slack block, or audit entry may bypass `internal/core/redact`.
 6. **Break-glass stays loud.** Every override path remains
@@ -189,14 +188,15 @@ PR head, and never skip checksum or cosign verification on a download path.
 
 Enforced across `docs/`, `README.md`, `openspec/`, and code comments.
 
-- Nothing longer than two sentences.
-- No qualifier language. State the facts.
-- Bullets over prose.
-- No em dashes.
+- Start with the user task and expected result; put optional detail after the working path.
+- Use short connected paragraphs, numbered procedures, and tables for comparisons.
+- State defaults, limits, and prerequisites accurately; distinguish shipped behavior from proposals.
+- Give each explanation one canonical home and link to runnable examples.
+- Keep the evolving reeve-test harness and its actual coverage/version pins explicit.
 
 ## Do not
 
-- Add telemetry, analytics, phone-home, or a hosted component.
+- Add phone-home analytics or a hosted component.
 - Import an adapter, SDK, or `cmd` dependency into `internal/core/**`.
 - Branch on `Engine.Name()` or any other provider identity string.
 - Add a static provider import to `internal/auth/factory` or

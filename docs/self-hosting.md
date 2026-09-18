@@ -1,195 +1,136 @@
 # Self-hosting
 
-reeve is a single Go binary that runs inside your CI. There is no hosted
-offering, no control plane, no "free tier with optional backend". This
-guide covers what you need to stand up on your side of the trust
-boundary.
+Reeve runs in your CI and stores nothing itself. Everything persistent lives in infrastructure you control.
 
-## What you need
+## What you operate
 
-| Component | Purpose | Required? |
-|---|---|---|
-| Blob storage (S3 / GCS / Azure / R2) | locks, run artifacts, audit, drift state | yes |
-| GitHub repo with Actions | reeve runs inside workflows | yes |
-| IAM role trusting GitHub's OIDC provider | short-lived creds for IaC | strongly recommended |
-| GitHub App | higher rate limits, cross-repo install | optional |
-| Slack workspace + bot | PR-scoped notifications + drift channels | optional |
-| OTEL collector | traces + metrics | optional |
-| PagerDuty / incident system | drift escalation | optional |
+| Component | Purpose | Required for a persistent GitOps setup? |
+| --- | --- | --- |
+| GitHub repository and Actions runner | Events, reviews, commands, and execution. | Yes. |
+| Reeve bucket | Locks, saved plans, run artifacts, audit, drift, notification state. | Yes. |
+| IaC state backend | Pulumi/Terraform/OpenTofu state, configured for your workload. | Yes; separate from Reeve's artifact storage. |
+| Cloud identities | Bucket, backend, and workload access. | As required by the chosen services. |
+| GitHub App | Optional branded API identity or installation-level permissions. | No. |
+| Slack, incident service, telemetry collector | Optional notifications and observability. | No. |
 
-**What you never need:** a reeve server, a reeve SaaS account, a reeve
-database, or any credential shared with the reeve maintainers. The
-binary is hermetic.
+No Reeve server, hosted database, account, or credential shared with Reeve maintainers is required.
+The CLI invokes your engine and communicates directly with the services you configure.
 
 ## Scope of trust
 
-Each arrow out of the reeve binary crosses **your** trust boundary:
-
 ```mermaid
 flowchart LR
-  Reeve["<b>reeve binary</b><br/><i>in your CI runner</i>"]
-
-  Reeve -->|"same process"| Pulumi(["pulumi CLI"])
-  Reeve -->|"GITHUB_TOKEN or GitHub App"| GitHub(["GitHub API"])
-  Reeve -->|"your creds, your bucket"| Bucket[("S3 / GCS / Azure / R2")]
-  Reeve -->|"your bot token"| Slack(["Slack API"])
-  Reeve -->|"your endpoint"| OTEL(["OTEL collector"])
-  Reeve -->|"federated, 1h max"| IAM(["Cloud IAM"])
-
-  classDef reeve fill:#e0f2fe,stroke:#0369a1,stroke-width:2px,color:#000;
-  classDef ext fill:#fafafa,stroke:#94a3b8,stroke-dasharray:3 3,color:#000;
-  class Reeve reeve;
-  class Pulumi,GitHub,Bucket,Slack,OTEL,IAM ext;
+  subgraph Runner[Your CI runner]
+    Reeve[Reeve CLI] -->|subprocess| IaC[Pulumi / Terraform / OpenTofu]
+  end
+  Reeve --> GitHub[GitHub API]
+  Reeve --> Bucket[Your Reeve bucket]
+  Reeve --> IAM[Cloud identity providers]
+  Reeve --> Notify[Your notification destinations]
+  Reeve --> OTEL[Your telemetry collector]
+  IaC --> State[Your IaC state backend]
+  IaC --> Cloud[Your infrastructure]
 ```
 
-reeve never calls anything reeve-operated. There is nothing reeve-operated.
-
----
+The diagram shows process and service connections, not an assertion that every destination lies outside your organization's trust boundary.
+Reeve constructs engine environments, but it is not an OS sandbox; isolate untrusted execution using an appropriate runner, user, container, or VM boundary.
 
 ## Bucket provisioning
 
-The bucket holds locks, run artifacts, audit entries, drift state, and
-Slack message IDs. Typical lifetime cost is a few MB/month - this is
-metadata, not plan bodies.
+Choose a private bucket with conditional-write support and grant the Reeve controller access to its namespace.
+Keep it separate from unrelated repositories, or give each configured root a distinct prefix.
+
+Saved engine plans can contain sensitive resource values; unlike the rendered summary, an opaque plan cannot be redacted and remain executable.
+Treat this bucket with the same access controls as your IaC state backend.
 
 ### AWS S3
 
+For a bucket in `us-east-1`:
+
 ```bash
-aws s3api create-bucket \
-  --bucket mycompany-reeve \
-  --create-bucket-configuration LocationConstraint=us-east-1
-
-aws s3api put-bucket-versioning \
-  --bucket mycompany-reeve \
+aws s3api create-bucket --bucket YOUR_REEVE_BUCKET --region us-east-1
+aws s3api put-bucket-versioning --bucket YOUR_REEVE_BUCKET \
   --versioning-configuration Status=Enabled
-
-aws s3api put-public-access-block \
-  --bucket mycompany-reeve \
+aws s3api put-public-access-block --bucket YOUR_REEVE_BUCKET \
   --public-access-block-configuration \
-  "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-
-# Lifecycle for run artifacts (30d), audit (7y-ish)
-aws s3api put-bucket-lifecycle-configuration \
-  --bucket mycompany-reeve \
-  --lifecycle-configuration file://lifecycle.json
+  'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
 ```
 
-`lifecycle.json`:
-
-```json
-{
-  "Rules": [
-    {
-      "ID": "run-artifacts",
-      "Status": "Enabled",
-      "Filter": { "Prefix": "runs/" },
-      "Expiration": { "Days": 30 },
-      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
-    },
-    {
-      "ID": "drift-artifacts",
-      "Status": "Enabled",
-      "Filter": { "Prefix": "drift/runs/" },
-      "Expiration": { "Days": 90 }
-    },
-    {
-      "ID": "audit",
-      "Status": "Enabled",
-      "Filter": { "Prefix": "audit/" },
-      "Transitions": [
-        { "Days": 90, "StorageClass": "GLACIER" }
-      ],
-      "Expiration": { "Days": 2557 }
-    }
-  ]
-}
-```
-
-IAM permissions for the reeve role:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
-      "s3:ListBucket", "s3:GetObjectVersion"
-    ],
-    "Resource": [
-      "arn:aws:s3:::mycompany-reeve",
-      "arn:aws:s3:::mycompany-reeve/*"
-    ]
-  }]
-}
-```
-
-Config:
+Other regions require the matching `LocationConstraint`; see [AWS create-bucket](https://docs.aws.amazon.com/cli/latest/reference/s3api/create-bucket.html).
+Grant `s3:ListBucket` on the bucket and `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on the configured object namespace; add version/KMS permissions when your storage configuration requires them.
 
 ```yaml
-# .reeve/shared.yaml
+# bucket: block in .reeve/shared.yaml
 bucket:
   type: s3
-  name: mycompany-reeve
+  name: YOUR_REEVE_BUCKET
   region: us-east-1
-  prefix: reeve/         # optional - useful if you share a bucket
+  prefix: reeve/
 ```
+
+Use [runner authentication](github-actions.md#bucket-authentication) for the controller.
+The [AWS OIDC recipe](../examples/aws-oidc/README.md) separately configures workload and backend access.
 
 ### GCS
 
 ```bash
-gcloud storage buckets create gs://mycompany-reeve \
-  --location=us --uniform-bucket-level-access
-gcloud storage buckets update gs://mycompany-reeve --lifecycle-file=lifecycle.json
+gcloud storage buckets create gs://YOUR_REEVE_BUCKET \
+  --project=YOUR_PROJECT --location=us --uniform-bucket-level-access
+gcloud storage buckets add-iam-policy-binding gs://YOUR_REEVE_BUCKET \
+  --member=serviceAccount:YOUR_REEVE_SERVICE_ACCOUNT \
+  --role=roles/storage.objectAdmin
 ```
 
 ```yaml
 bucket:
   type: gcs
-  name: mycompany-reeve
+  name: YOUR_REEVE_BUCKET
+  prefix: reeve/
 ```
+
+Connect the service account through the shared workflow's GCP inputs.
+The [GCP recipe](../examples/gcp-wif/README.md) covers federation setup; a separate engine binding supplies workload credentials.
 
 ### Azure Blob
 
 ```bash
-az storage container create \
-  --account-name mycompanyreeve \
-  --name reeve \
-  --auth-mode login
+az storage container create --account-name YOUR_STORAGE_ACCOUNT \
+  --name reeve --auth-mode login
 ```
 
 ```yaml
 bucket:
   type: azblob
-  name: reeve                                              # container name
-  region: https://mycompanyreeve.blob.core.windows.net     # service URL
+  name: reeve
+  region: https://YOUR_STORAGE_ACCOUNT.blob.core.windows.net
+  prefix: reeve/
 ```
 
-### Cloudflare R2
+Grant the runner identity the necessary blob data permissions on this container.
+The controller uses the Azure SDK credential chain; see [bucket authentication](github-actions.md#bucket-authentication).
 
-R2 is S3-compatible; use `type: r2` (enables path-style + custom endpoint
-via `AWS_ENDPOINT_URL_S3`):
+### Cloudflare R2
 
 ```yaml
 bucket:
   type: r2
-  name: mycompany-reeve
+  name: YOUR_REEVE_BUCKET
+  prefix: reeve/
 ```
 
-Workflow:
+Provide the controller's S3-compatible credentials and endpoint in a prepared runner or custom action job:
 
 ```yaml
 env:
   AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-  AWS_ENDPOINT_URL_S3: https://<account>.r2.cloudflarestorage.com
+  AWS_ENDPOINT_URL_S3: https://YOUR_ACCOUNT.r2.cloudflarestorage.com
 ```
 
-(R2 has no OIDC yet, so long-lived R2 keys are one of the few places
-env vars are genuinely the only option. Lock them down to the reeve
-bucket only.)
+Scope credentials to the Reeve bucket and manage their rotation outside the repository.
+These are controller credentials, not automatic engine environment variables.
 
-### Filesystem (dev only)
+### Filesystem
 
 ```yaml
 bucket:
@@ -197,353 +138,42 @@ bucket:
   name: ./.reeve-state
 ```
 
-Good for `plan-run` and local smoke tests. **Not for CI** - Actions
-runners start empty, so locks don't persist across runs.
+Use this for local demos and tests whose lifecycle stays in one job.
+Fresh hosted runners do not share this directory, so it cannot coordinate locks or reuse a preview across separate workflow runs.
 
----
+### Conditional operations
 
-## GitHub Actions setup
+Locks require storage that enforces conditional writes and deletes.
+An S3-compatible endpoint accepting an HTTP header is not proof that it enforces the condition; Reeve checks required behavior and fails when it cannot rely on it.
 
-### Minimum permissions
+The evolving [reeve-test storage lanes](https://github.com/reeveops/reeve-test/blob/master/e2e/cloud-buckets.md) exercise selected adapters.
+Local emulator checks explicitly test unsupported or ignored conditional-delete behavior; a passing negative test does not establish that emulator as a suitable lock backend.
+Read the lane's source pin and result before treating it as acceptance of a particular service/version.
 
-```yaml
-permissions:
-  contents: read
-  checks: read            # required-check preconditions
-  pull-requests: write      # upsert PR comment
-  issues: write             # /reeve apply via issue_comment; github_issue drift channel
-  id-token: write           # only when using aws_oidc / gcp_wif / azure_federated
-```
+## Retention and recovery
 
-### Shared workflow modes
+Schedule [maintenance](operations.md#scheduled-maintenance) to prune old `runs/` artifacts and reap expired locks.
+Choose separate retention for audit records, drift reports, and storage versions according to your needs.
 
-- Use `mode: gitops` for pull request previews and commands.
-- Use `mode: drift` from a scheduled or manual workflow for drift detection.
-- Use `mode: maintenance` from a trusted schedule or manual workflow for lock reaping and artifact retention.
+A lifecycle prefix must include `bucket.prefix`: with `prefix: reeve/`, run objects start at `reeve/runs/`, not `runs/`.
+Do not apply blanket expiration to active lock or notification state.
 
-```yaml
-jobs:
-  reeve:
-    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
-    with:
-      mode: gitops
-```
+Use your provider's lifecycle format; an S3 lifecycle JSON document is not a GCS lifecycle policy.
+See [GCS lifecycle configuration](https://docs.cloud.google.com/storage/docs/lifecycle) and your bucket provider's tooling.
 
-The shared workflow uses the composite action from the same pinned Reeve commit.
-Set `pulumi_version`, `opentofu_version`, or `terraform_version` to install the workload CLI after event classification.
-PR jobs resolve an immutable head SHA and verify it before authentication, engine setup, and Reeve execution.
+Keep backups/versioning appropriate to your recovery needs.
+Write-once audit creation by Reeve is not protection against a bucket administrator deleting objects.
 
-The standard `reeve` caller job publishes the stable `reeve / Reeve` check for branch protection.
-Reeve derives a custom caller check name from the current run; `self_check_names` remains available for nonstandard check publishers.
+## Continue setup
 
-The shared workflow accepts one `command_prefix` so unrelated comments skip before runner assignment.
-Use the composite action directly when multiple prefixes are required.
+- [GitHub Actions](github-actions.md): caller workflows, GitHub App identity, versions, and platform support.
+- [Authentication](auth.md): controller versus backend/workload credentials.
+- [Operations](operations.md): locks, artifacts, monitoring, recovery, and upgrades.
 
-The shared workflow inherits the caller's permissions so GitOps and drift callers can grant different minimum sets.
-Use the permissions shown above for GitOps and omit PR write access from drift callers.
+## Support and licensing
 
-Named secrets include `reeve_token` and `slack_token`.
-Configure engine and state credentials through the federated or secret-manager providers in `.reeve/auth.yaml`.
+Reeve is MIT licensed and committed to remaining permissively licensed.
+Report problems through GitHub issues; use [private vulnerability reporting](../SECURITY.md#reporting-a-vulnerability) for security reports.
 
-The exact-commit self reference requires GitHub.com and runner 2.336.0 or newer.
-GHES users can keep using the composite action directly until GitHub adds self references there.
-
-```yaml
-permissions:
-  contents: read
-  pull-requests: read
-  issues: write
-  id-token: write
-
-jobs:
-  drift:
-    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
-    with:
-      mode: drift
-      drift_schedule: prod
-```
-
-Drift callers may set `drift_schedule`, `drift_pattern`, or `drift_if_stale`.
-Schedule and pattern are mutually exclusive; stale-only filtering composes with either.
-
-```yaml
-permissions:
-  contents: read
-  id-token: write
-
-jobs:
-  maintenance:
-    uses: reeveops/reeve/.github/workflows/reeve.yml@<full-commit-sha>
-    with:
-      mode: maintenance
-```
-
-Maintenance mode installs no IaC engine and runs only on `schedule` or `workflow_dispatch`.
-Grant `id-token: write` only when bucket access uses federation.
-
-### Event triggers
-
-reeve expects these events:
-
-- `pull_request` (`opened`, `reopened`, `synchronize`) - fires `preview`
-- `pull_request` (`ready_for_review`) - fires `ready` (notifies for approval when a plan has succeeded)
-- `pull_request` (any other action, e.g. `labeled`, `assigned`, `edited`) - no-op
-- `pull_request_review` (`submitted`, state `approved`) - fires `approved` (Slack status update), **only** when the action input `run-on-approval` is `"true"`; skipped by default since the apply gate re-checks approvals anyway
-- `issue_comment` (`created`, comment begins with a `command-prefix` entry - default `/reeve` only; `@reeve` is a real person's GitHub account and is no longer accepted by default - followed by `apply` (or `up`), `ready`, `preview` (or `plan`), `approve`, or `help`) - fires respective command; comments authored by bots (user type `Bot` or login ending in `[bot]`) are always skipped to prevent self-trigger loops. `approve` fires `approved` (the Slack "ready to apply" refresh) and only counts as an approval when the opt-in `pr_comment` source is enabled in `approvals.sources`; the apply gate re-reads the comment and re-checks `author_association` at apply time
-- `schedule` - fires `drift run`
-- `workflow_dispatch` - manual re-runs
-
-The composite action classifies the event before restoring a binary, checking out code, authenticating, or installing an engine.
-Rejected comments, reviews, and PR actions stop after that classifier.
-
-For run coalescing, use a `concurrency` group keyed per PR with
-`cancel-in-progress` limited to preview runs: previews never take apply
-locks, so cancelling one loses nothing, while an apply holds per-stack locks
-that only the run itself releases - never cancel an apply mid-run. See the
-workflow in [getting-started](getting-started.md#4-add-the-github-actions-workflow).
-
-### GitHub App (optional but recommended for multi-repo)
-
-- Rate limits: PATs/`GITHUB_TOKEN` cap at 5K req/hour. Apps get 15K per
-  installation, independent of other workflows.
-- Attribution: reeve's comments and audit entries show under the App's
-  branded identity ("reeve-bot") instead of the workflow's implicit
-  identity.
-- Cross-repo: one App install covers many repos.
-
-#### 1. Register the App
-
-Go to **Settings → Developer settings → GitHub Apps → New GitHub App**
-(user account: `https://github.com/settings/apps/new`; org:
-`https://github.com/organizations/<ORG>/settings/apps/new`). Fill in:
-
-- **GitHub App name:** anything unique, e.g. `reeve-bot` - this is the
-  identity that posts PR comments.
-- **Homepage URL:** your repo URL (required, not otherwise used).
-- **Webhook:** uncheck **Active**. reeve is driven by GitHub Actions, not
-  by webhooks, so no callback URL is needed.
-- **Repository permissions:** Contents `read`, Issues `write`, Metadata
-  `read`, Pull requests `write`, Checks `read`.
-- **Subscribe to events:** leave unchecked (webhook is off).
-- **Where can this App be installed?** Only on this account (keep it
-  private unless you're publishing).
-
-Click **Create GitHub App**.
-
-#### 2. Set the App avatar (logo)
-
-On the App's settings page, scroll to **Display information** and upload
-an avatar so reeve's PR comments carry a recognizable icon. This repo
-ships brand assets in [`docs/`](.):
-
-- [`logo.svg`](logo.svg) - full badge (dark rounded square + hex + key/R).
-  Best avatar choice; the dark background reads well as a circular icon.
-- [`logo-hex.svg`](logo-hex.svg) - hex + key/R, transparent background.
-- [`logo-key.svg`](logo-key.svg) - key/R only, transparent background.
-
-GitHub avatars must be raster (PNG/JPG), so rasterize first, e.g.
-`rsvg-convert -w 512 -h 512 docs/logo.svg -o reeve.png`, then upload
-`reeve.png`.
-
-#### 3. Collect credentials
-
-- **App ID:** shown at the top of the App settings page → `GITHUB_APP_ID`.
-- **Private key:** **Generate a private key** in the App settings;
-  downloads a `.pem`. Store it as `GITHUB_APP_PRIVATE_KEY` (literal PEM,
-  file path, or base64 - see [auth.md](auth.md#github-app-github_app)).
-- **Installation ID:** **Install App** (left nav) → install on the target
-  repos/org. After installing, the URL is
-  `…/settings/installations/<INSTALLATION_ID>` → `GITHUB_APP_INSTALLATION_ID`.
-
-#### 4. Wire in `.reeve/auth.yaml`:
-
-```yaml
-providers:
-  github-app:
-    type: github_app
-    app_id: ${env:GITHUB_APP_ID}
-    installation_id: ${env:GITHUB_APP_INSTALLATION_ID}
-    private_key: ${env:GITHUB_APP_PRIVATE_KEY}
-    permissions: ["contents:read", "issues:write", "pull_requests:write"]
-
-bindings:
-  - match: { stack: "**" }
-    providers: [github-app]
-```
-
-The GitHub App provider emits `GITHUB_TOKEN` into the engine environment,
-overriding the workflow's default token.
-
----
-
-## Distribution
-
-Tagged releases (`vX.Y.Z` and semantic-version prereleases) ship per-platform tarballs with a
-`checksums.txt` signed via cosign keyless, plus a container image on GHCR
-and a Homebrew cask push to `reeveops/homebrew-tap` - all produced by
-goreleaser from `.github/workflows/release.yml`. Building from source
-(`go build ./cmd/reeve`) always remains supported.
-
-### Pinning and binaries (GitHub Action)
-
-The composite action resolves its binary in three tiers, cache first:
-
-| Pin                 | Binary source                                                                    |
-| ------------------- | -------------------------------------------------------------------------------- |
-| `@vX.Y.Z[-pre]`     | Release tarball, verified against the release's cosign-signed `checksums.txt`    |
-| `@master` / `@next` | Source-matched per-push prerelease, verified against its checksum and cosign signature |
-| full commit SHA     | That commit's retained source-matched prerelease, with source-build fallback     |
-| anything else       | Built from source on the runner (branches and forks)                             |
-
-A cache keyed `reeve-bin-v2-<action repo>-full-<os>-<arch>-<source hash>`
-fronts all three paths. Only a cache miss triggers a download or build.
-
-The edge workflow publishes a per-commit prerelease on every push to
-`master` and `next`, retaining the newest ten per branch.
-
-The action selects a prerelease whose signed source hash matches the action
-source already on disk, then verifies its checksum and keyless signature.
-Any mismatch or missing retained release falls back to a source build.
-The action saves the verified download or local build before workload checkout.
-
-Prebuilt binaries save the ~30s+ Go toolchain and build cost on cache misses.
-
----
-
-## Upgrading
-
-### Binary
-
-Grab the latest release tarball (or `brew upgrade reeve` if you installed
-via the cask). CI jobs pick up
-new binaries per the pinning table above: `@vX.Y.Z` pins move when you
-edit the workflow; `@master`/`@next` pins track each push via edge
-binaries (or a source build while the edge build is still running).
-
-### Config schema
-
-Schemas are versioned per-file (not globally). When reeve ships a new
-schema version:
-
-```bash
-reeve migrate-config --dry-run   # preview changes
-reeve migrate-config             # writes + keeps *.bak backups
-```
-
-Only files whose `config_type` has a migration land are touched.
-
----
-
-## Monitoring reeve itself
-
-### Runs failing silently?
-
-Every CI run writes a run manifest to `runs/pr-<n>/<run-id>/manifest.json`.
-Tail them with whatever bucket-event tooling you have (S3 EventBridge,
-GCS Pub/Sub). An absence of run manifests on expected PRs means the
-workflow itself didn't fire - check Actions.
-
-### Drift backlog growing?
-
-```bash
-reeve drift status                  # all stacks
-reeve drift status --stack prod/*   # specific
-```
-
-Or watch the `reeve.drift.stacks_in_drift{env="prod"}` gauge if you've
-wired OTEL.
-
-### Lock contention
-
-```bash
-reeve locks list                    # shows holder + queue depth
-reeve locks explain <project/stack> # detail for one stack
-reeve locks unlock <project/stack>  # force-clear one holder, promote its queue
-reeve locks unlock <project/stack> --pr N  # remove a closed/abandoned PR instead
-reeve locks unlock --pr N           # ...from every lock that PR is in
-reeve locks unlock --pr N --force   # ...even a holder whose lease is active (mid-apply)
-```
-
-Long queue depths on a stack indicate apply contention - usually a
-symptom of too-coarse stack granularity or PRs that take too long to
-merge after `/reeve apply`.
-
-Lock holders are identified by **PR + run ID**. A second concurrent run
-of the same PR is refused ("another run of this PR holds the lock")
-rather than applied in parallel, and only the run that acquired a lock
-can release it. A successful apply automatically removes its PR from every lock it
-still appeared in; for PRs closed while holding or queued, use
-`reeve locks unlock --pr N` so the queue doesn't promote a dead PR - or
-comment `/reeve unlock` on the PR itself, which does the same thing
-scoped to that PR (add `project/stack` to free just one lock). If the
-PR still holds a lock with an active lease - usually an apply mid-run -
-the unlock is refused and reeve comments back "this PR is in the middle
-of an apply; comment `/reeve unlock --force` if you are sure". Queue
-entries are always removed; only an active holder needs `--force`.
-Promotion from the queue grants a lease of the configured `locking.ttl`
-(default 4h).
-
-`locking.admin_override` gates only the force paths (`locks unlock`
-without `--pr`), which can clear other PRs' holders. PR-scoped removal
-is self-service: it cannot touch another PR's entries.
-
-### Audit trail
-
-Every apply writes to `audit/<year>/<month>/<day>/<run-id>.json`,
-write-once (If-None-Match on create). Ship these to your SIEM with
-the same bucket-event tooling.
-
-Schema: see [`internal/audit/audit.go`](../internal/audit/audit.go).
-Stable within a major version.
-
----
-
-## Failure modes
-
-### Bucket unavailable mid-apply
-
-reeve writes lock state → apply runs → writes result. If S3 goes away
-between the first two steps, the lock may be held indefinitely from
-reeve's perspective. Wait the configured TTL (default 4h), then run
-`reeve maintenance run` or `reeve locks reap` once the bucket is back.
-
-### Clock skew
-
-Lock TTL uses server-side timestamps (S3 `LastModified`, GCS `updated`)
-when available. The filesystem adapter uses local `time.Now()` and warns
-if `acquired_at` drift exceeds 60s. For cloud adapters, TTL accuracy is
-the bucket's clock accuracy.
-
-### Fork PRs
-
-Deny-by-default. See [auth.md](auth.md#fork-pr-policy) for the security
-rationale and opt-in procedure.
-
-### Supply chain
-
-reeve depends on Go modules, the Pulumi CLI, and cloud SDKs. The
-`go.sum` + release checksums pin exactly what goes into the binary.
-Vendor the modules (`go mod vendor`) and pin the Pulumi CLI version
-in your workflow if you need to cut the supply chain further.
-
----
-
-## FAQ
-
-**Why no control plane?** Because every "just a small control plane for
-X" decision compounds into exactly what reeve is trying to avoid
-becoming. Nothing hosted, ever - including a "free tier API".
-
-**What if I want telemetry for usage analytics?** You can add it
-yourself in a fork. The upstream code does not contain the feature,
-not as a toggle and not as a hook point. If the Slack-style "opt-in
-data sharing" ever gets proposed upstream, the proposal will be
-rejected.
-
-**What about support?** GitHub issues, best effort. No SLA, no paid
-support tier. Pull requests with tests are the fastest path to seeing
-fixes.
-
-**Can I relicense my fork?** MIT lets you do anything, including
-relicensing a fork. The upstream repo stays MIT under its existing
-maintainers.
+Support is best effort, without an SLA.
+Reeve never sends usage analytics to its maintainers; optional OpenTelemetry goes to your configured collector.

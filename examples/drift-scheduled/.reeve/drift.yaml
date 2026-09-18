@@ -2,7 +2,7 @@ version: 1
 config_type: drift
 
 scope:
-  include_patterns: ["prod/*", "staging/*"]
+  include_patterns: ["*/prod", "*/staging"]
   exclude_patterns: ["*/scratch"]
 
 behavior:
@@ -15,8 +15,7 @@ behavior:
     drift_ongoing: false
     run_error: true
   state_bootstrap:
-    mode: require_manual    # flip to "baseline" for first run, then back
-    baseline_max_age: 7d
+    mode: require_manual    # run drift bootstrap against the shared bucket first
 
 classification:
   ignore_properties:
@@ -24,21 +23,19 @@ classification:
       properties: ["tags.LastScanned"]
   treat_as_drift:
     orphaned_state: true
-    missing_state: true
 
 freshness:
   enabled: true
   window: 4h
-  respect_failures: true           # reserved — not yet enforced; failed stacks are always re-checked
 
 schedules:
   critical:
-    patterns: ["prod/payments", "prod/auth"]
+    patterns: ["payments/prod", "auth/prod"]
   prod:
-    patterns: ["prod/*"]
-    exclude_patterns: ["prod/payments", "prod/auth"]
+    patterns: ["*/prod"]
+    exclude_patterns: ["payments/prod", "auth/prod"]
   slow-movers:
-    patterns: ["dev/*", "experiments/*"]
+    patterns: ["*/dev", "experiments/*"]
 
 channels:
   - type: slack
@@ -57,4 +54,4 @@ channels:
   - type: github_issue
     on: [drift_detected, drift_resolved]
     labels: [drift, infra]
-    assignees: ["@org/sre"]
+    assignees: ["YOUR_GITHUB_LOGIN"]

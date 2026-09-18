@@ -1,0 +1,33 @@
+{
+  "project": "api",
+  "stack": "prod",
+  "env": "prod",
+  "counts": {
+    "add": 1,
+    "change": 0,
+    "delete": 0,
+    "replace": 0
+  },
+  "plan_summary": "One instance",
+  "plan": {
+    "config": {
+      "aws:region": "eu-west-1"
+    },
+    "steps": [
+      {
+        "op": "create",
+        "urn": "urn:pulumi:prod::api::aws:ec2/instance:Instance::api",
+        "newState": {
+          "urn": "urn:pulumi:prod::api::aws:ec2/instance:Instance::api",
+          "type": "aws:ec2/instance:Instance",
+          "inputs": {
+            "tags": {
+              "cost-center": "demo",
+              "owner": "platform"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

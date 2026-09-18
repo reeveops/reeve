@@ -373,7 +373,7 @@ Next steps:
      then commit them.
   2. Validate:            reeve lint
   3. Inspect stacks:      reeve stacks
-  4. Dry-run the comment: reeve plan-run --sha $(git rev-parse HEAD) --run-number 1
+  4. Preview locally (uses engine/backend credentials): reeve plan-run --sha $(git rev-parse HEAD) --run-number 1
 
 The workflow is pinned to the exact Reeve source commit used to build this binary.
 See docs/getting-started.md for the full walk-through.
@@ -394,7 +394,7 @@ Next steps:
      included as comments), then commit the directory.
   2. Validate:            reeve lint
   3. Inspect stacks:      reeve stacks
-  4. Dry-run the comment: reeve plan-run --sha $(git rev-parse HEAD) --run-number 1
+  4. Preview locally (uses engine/backend credentials): reeve plan-run --sha $(git rev-parse HEAD) --run-number 1
   5. This development build has no full source commit. Re-run with
      --workflow-ref <full-commit-sha>, or add this workflow manually:
 

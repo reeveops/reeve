@@ -1,62 +1,29 @@
 name: drift
-
 on:
   schedule:
-    - cron: "0 */2 * * *"     # critical: every 2 hours
-    - cron: "17 */6 * * *"    # prod: every 6 hours, off the hour
-    - cron: "0 3 * * *"       # slow-movers: 3am UTC nightly
+    - cron: "17 */2 * * *"
+    - cron: "23 */6 * * *"
+    - cron: "41 3 * * *"
   workflow_dispatch:
     inputs:
       schedule:
-        description: "Schedule name from drift.yaml"
-        required: true
+        description: Named schedule from drift.yaml
         default: prod
-
+        type: choice
+        options: [critical, prod, slow-movers]
 permissions:
   contents: read
+  pull-requests: read
   issues: write
   id-token: write
-
 jobs:
-  critical:
-    if: github.event_name == 'workflow_dispatch' && inputs.schedule == 'critical' ||
-        (github.event_name == 'schedule' && github.event.schedule == '0 */2 * * *')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: reeveops/reeve@master
-        with:
-          command: "drift run"
-          extra-args: "--schedule critical"
-          slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
-          pulumi-version: "3.231.0"
-        env:
-          PD_CHANGE_EVENTS_KEY: ${{ secrets.PD_CHANGE_EVENTS_KEY }}
-
-  prod:
-    if: github.event_name == 'workflow_dispatch' && inputs.schedule == 'prod' ||
-        (github.event_name == 'schedule' && github.event.schedule == '17 */6 * * *')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: reeveops/reeve@master
-        with:
-          command: "drift run"
-          extra-args: "--schedule prod --if-stale"
-          slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
-          pulumi-version: "3.231.0"
-        env:
-          PD_CHANGE_EVENTS_KEY: ${{ secrets.PD_CHANGE_EVENTS_KEY }}
-
-  slow-movers:
-    if: github.event_name == 'workflow_dispatch' && inputs.schedule == 'slow-movers' ||
-        (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: reeveops/reeve@master
-        with:
-          command: "drift run"
-          extra-args: "--schedule slow-movers"
-          slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
-          pulumi-version: "3.231.0"
+  drift:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@d31c814640689c2f2e1b0d02d2bc11a80a94faab
+    with:
+      mode: drift
+      # Prepared runner supplies bucket auth and PD_CHANGE_EVENTS_KEY.
+      runner: reeve-drift
+      pulumi_version: "3.262.0"
+      drift_schedule: ${{ inputs.schedule || (github.event.schedule == '17 */2 * * *' && 'critical') || (github.event.schedule == '23 */6 * * *' && 'prod') || 'slow-movers' }}
+    secrets:
+      slack_token: ${{ secrets.SLACK_BOT_TOKEN }}

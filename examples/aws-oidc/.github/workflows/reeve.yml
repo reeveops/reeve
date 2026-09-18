@@ -1,65 +1,20 @@
 name: reeve
-
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
   issue_comment:
     types: [created]
-  # pull_request_review is intentionally absent: review-triggered runs are
-  # opt-in (action input run-on-approval, default "false"). Add
-  #   pull_request_review: { types: [submitted] }
-  # plus run-on-approval: "true" if you want the automatic approved-state
-  # notification.
-
 permissions:
   contents: read
+  checks: read
   pull-requests: write
   issues: write
-  id-token: write        # OIDC federation
-
-# Split jobs let concurrency differ per command. Previews are safe to cancel
-# when superseded (they never take apply locks), so cancel-in-progress saves
-# CI. Applies must never be cancelled mid-run: they hold per-stack locks
-# that only the run itself releases.
+  id-token: write
 jobs:
-  preview:
-    concurrency:
-      group: reeve-preview-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: reeveops/reeve@master
-        with:
-          command: preview
-          pulumi-version: "3.231.0"
-
-  apply:
-    concurrency:
-      group: reeve-apply-${{ github.event.issue.number }}
-      cancel-in-progress: false   # never kill an apply mid-run
-    if: |
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/reeve apply')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Resolve PR head ref
-        id: pr
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-            });
-            core.setOutput('ref', pr.data.head.sha);
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ steps.pr.outputs.ref }}
-      - uses: reeveops/reeve@master
-        with:
-          command: apply
-          pulumi-version: "3.231.0"
+  reeve:
+    uses: reeveops/reeve/.github/workflows/reeve.yml@d31c814640689c2f2e1b0d02d2bc11a80a94faab
+    with:
+      mode: gitops
+      # Prepared runner: its IAM identity grants access to the Reeve bucket.
+      runner: reeve-aws
+      pulumi_version: "3.262.0"

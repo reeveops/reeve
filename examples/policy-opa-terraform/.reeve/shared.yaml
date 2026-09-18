@@ -1,0 +1,24 @@
+version: 1
+config_type: shared
+
+bucket:
+  type: s3
+  name: mycompany-reeve
+  region: us-east-1
+
+locking:
+  ttl: 4h
+  queue: fifo
+
+approvals:
+  default:
+    required_approvals: 1
+    approvers: ["@org/infra-reviewers"]
+
+preconditions:
+  require_up_to_date: true
+  require_checks_passing: true
+  preview_freshness: 2h
+
+apply:
+  trigger: comment            # comment (default): apply on /reeve apply | merge: apply on PR merge

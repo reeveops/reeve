@@ -1,39 +1,20 @@
 name: reeve
-
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
-  # Only needed because run-on-approval is enabled below (Slack approved-state
-  # notification). Drop this trigger if you disable run-on-approval.
-  pull_request_review:
-    types: [submitted]
   issue_comment:
     types: [created]
-
 permissions:
   contents: read
+  checks: read
   pull-requests: write
   issues: write
   id-token: write
-
-# Cancel superseded previews (pull_request events) only. Never cancel
-# comment- or review-dispatched runs: /reeve apply holds per-stack locks
-# that are released by the run itself, so killing it mid-run is dangerous.
-# Cancelled previews release nothing - they never take apply locks. Two
-# groups so a push can never cancel an in-flight apply.
-concurrency:
-  group: reeve-${{ github.event_name == 'pull_request' && 'preview' || 'command' }}-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   reeve:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: reeveops/reeve@master
-        with:
-          pulumi-version: latest
-          slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
-          # Opt in to review-triggered runs so Slack flips to "approved"
-          # the moment a review lands. Costs one CI run per review.
-          run-on-approval: "true"
+    uses: reeveops/reeve/.github/workflows/reeve.yml@d31c814640689c2f2e1b0d02d2bc11a80a94faab
+    with:
+      mode: gitops
+      pulumi_version: "3.262.0"
+      gcp_workload_identity_provider: ${{ vars.REEVE_GCP_WIF_PROVIDER }}
+      gcp_service_account: ${{ vars.REEVE_GCP_SERVICE_ACCOUNT }}

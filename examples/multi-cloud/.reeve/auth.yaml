@@ -36,7 +36,6 @@ providers:
   # ── Secret manager sourced ───────────────────────────────────────
   cloudflare-token:
     type: aws_secrets_manager
-    source: aws-prod
     secret_id: reeve/cloudflare/api-token
     region: us-east-1
     ttl: 1h
@@ -45,34 +44,20 @@ providers:
 
   datadog-key:
     type: aws_ssm_parameter
-    source: aws-prod
     parameter: /reeve/datadog/api-key
     region: us-east-1
     env_map:
       DATADOG_API_KEY: ""
 
-  # ── GitHub App ───────────────────────────────────────────────────
-  github-app:
-    type: github_app
-    app_id: ${env:GITHUB_APP_ID}
-    installation_id: ${env:GITHUB_APP_INSTALLATION_ID}
-    private_key: ${env:GITHUB_APP_PRIVATE_KEY}
-    permissions: [ "contents:read", "issues:write", "pull_requests:write" ]
-
 bindings:
-# Baseline: every stack uses the GitHub App.
-- match: { stack: "**" }
-  providers: [ github-app ]
-
-# Prod stacks: AWS + GCP + external service tokens.
-- match: { stack: "*/prod" }
+# Bind workload identities per mode; drift does not inherit service tokens.
+- match: { stack: "*/prod", mode: preview }
   providers: [ aws-prod, gcp-prod, cloudflare-token, datadog-key ]
-
-# Payments stack: override AWS with tighter role (still unions with
-# gcp-prod + cloudflare-token + datadog-key from the broader binding).
-- match: { stack: "*/prod/payments" }
+- match: { stack: "*/prod", mode: apply }
+  providers: [ aws-prod, gcp-prod, cloudflare-token, datadog-key ]
+- match: { stack: "payments/prod", mode: preview }
   override: [ aws-payments-strict ]
-
-# Drift uses read-only AWS + GCP; no external service tokens needed.
+- match: { stack: "payments/prod", mode: apply }
+  override: [ aws-payments-strict ]
 - match: { stack: "*/prod", mode: drift }
   providers: [ aws-prod-readonly, gcp-prod-readonly ]

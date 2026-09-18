@@ -4,8 +4,7 @@
 
 One shared channel framework (`internal/notify`) carries every outbound
 human/machine notification for both producers: the PR-flow run pipeline and
-the drift runner. Notifications run **last** in the pipeline so upstream
-failures are captured accurately.
+the drift runner. Start/completion notifications run at their lifecycle points and report the corresponding state.
 
 ## Channel framework
 
@@ -47,9 +46,7 @@ their exact prior behavior (no `planning`, no `break_glass`).
 
 Channels are declared as a generic list (`type` + settings + `on:`), in
 `notifications.yaml` (v2) or `drift.yaml`; both feed the same dispatch. The
-v1 `notifications.yaml` shape (single `slack:` block) keeps loading and maps
-onto the channel model (`slack.events` → `on:`; trigger/icons/rules carry
-over); `reeve migrate-config` rewrites v1 → v2 (with backup and
+v1 `notifications.yaml` shape (single `slack:` block) is rejected with migration instructions; `reeve migrate-config` rewrites v1 → v2 (with backup and
 `--dry-run`), yielding the same effective channel list.
 
 ## Delivery guarantees
@@ -119,12 +116,7 @@ outcome summary.
   into the status message. On a create race the first writer's anchor wins.
   Once the timeline claims the thread, the dashboard channel suppresses its
   own courtesy thread notes so events are not double-posted.
-- `timeline_github` - one PR comment per commit SHA, identified by the
-  marker namespace `<!-- reeve:timeline:v1:{shortsha} -->` and edited in
-  place via the existing comment-upsert machinery (existing markers stay
-  byte-identical). Entry history persists per PR in blob state with
-  compare-and-swap appends so concurrent runs cannot lose each other's
-  entries; each event re-renders the SHA's full comment from state.
+- `timeline_github` - one comment per plan series. A new commit or an explicit new plan starts a series; retry attempts append to the current series, and unmatched completion can create a recovery series.
 
 Both timeline channels stay inside the modularity contract (narrow VCS
 comment surface, no SDK imports) and skip - not fail - when their runtime
@@ -152,3 +144,27 @@ packages.
 
 Mattermost, Rocket.Chat, Teams. Each is a new self-registered adapter in
 `internal/notify/channels/*`.
+
+## Timeline storage and markers
+
+Later series carry `· plan N` in the header. The first series on a commit is
+unnumbered and keeps the marker `reeve:timeline:v1:{sha}`; later series use
+`reeve:timeline:v1:{sha}:{n}`. Existing status/help/apply comment markers are
+untouched, so enabling the timeline never orphans an existing comment.
+
+`timeline_slack` is unaffected by series: entries keep threading under the
+one PR-level anchor.
+
+Entry history is persisted in the state bucket
+(`notifications/pr-{n}/timeline-v2.json`) with conditional writes, so
+concurrent runs merge instead of overwriting each other. The versioned key
+keeps workflows pinned to an older state schema from truncating plan series.
+
+
+## Adding a destination
+
+Implement `notify.Channel` in `internal/notify/channels/<name>`, register its constructor from `init()`, and import it through `internal/notify/all`.
+Use narrow injected dependencies and return `(nil, nil)` when an optional dependency is missing; unknown configured types remain errors.
+
+One implementation can subscribe to both PR and drift events.
+See the existing adapters and [contributor guide](../../../CONTRIBUTING.md) for tests and review conventions.

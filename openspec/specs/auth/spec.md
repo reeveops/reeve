@@ -2,8 +2,7 @@
 
 ## Principle
 
-Zero-trust. Short-lived federated credentials only. reeve consumes creds;
-it does not configure them for the user. No long-lived secrets stored.
+Prefer short-lived federation. Secret-manager and acknowledged environment providers may supply longer-lived values; Reeve consumes them without managing their rotation.
 
 ## Provider types (v1)
 
@@ -12,7 +11,6 @@ it does not configure them for the user. No long-lived secrets stored.
 | Cloud federation | `aws_oidc`, `gcp_wif`, `azure_federated` |
 | Identity | `github_app` |
 | Secret managers | `aws_secrets_manager`, `aws_ssm_parameter`, `gcp_secret_manager`, `azure_key_vault`, `github_secret` |
-| Vault | `vault`, `vault_dynamic_secret` |
 | Local dev (CI-refused) | `aws_profile`, `aws_sso`, `gcloud_adc` |
 | Escape hatch (flagged) | `env_passthrough` |
 
@@ -20,11 +18,11 @@ it does not configure them for the user. No long-lived secrets stored.
 
 ```yaml
 bindings:
-  - match: { stack: "prod/*" }
+  - match: { stack: "*/prod" }
     providers: [aws-prod, gcp-prod]
-  - match: { stack: "prod/*", mode: drift }
-    providers: [aws-prod-readonly]
-  - match: { stack: "prod/payments" }
+  - match: { stack: "*/prod", mode: drift }
+    override: [aws-prod-readonly]
+  - match: { stack: "payments/prod" }
     override: [aws-payments-strict]
     providers: [github-app]
 ```
@@ -115,8 +113,7 @@ Every acquired generation remains owned until command cleanup runs exactly once.
 - Local providers **refuse** under `CI=true`. There is no CLI override.
 - `env_passthrough` requires `providers.<name>.i_understand_this_is_dangerous: true`
   AND emits a loud warning every run. Lint flags as ERROR without the field.
-- Fork PRs receive dry-run-only credentials by default. Full creds require
-  explicit per-repo opt-in documented in the repo config.
+- Fork apply and writing refresh are denied by default. Preview uses explicit preview bindings; the fork gate does not restrict IAM authority automatically.
 - A credential exchange **fails** when the provider response omits the
   token, omits or malforms the expiry, or reports an expiry that is not in
   the future. Applies to every provider that performs an exchange:
@@ -133,3 +130,11 @@ Every acquired generation remains owned until command cleanup runs exactly once.
 Engine state secrets (Pulumi's passphrase/KMS for stack state) live in
 engine config (§8.6), separate from runtime creds in `auth.yaml`. The boundary
 is documented in user-facing docs to avoid confusion.
+
+## Secret-manager retrieval
+
+AWS secret providers use the controller's AWS SDK credential chain; GCP Secret Manager reads controller `CLOUDSDK_AUTH_ACCESS_TOKEN`; Azure Key Vault uses controller `DefaultAzureCredential`.
+The parsed `source` field does not wire a parent provider, and a sibling workload provider does not populate the controller environment.
+
+Retrieved values are mapped explicitly through `env_map` and registered for literal redaction.
+Engine and controller GitHub tokens are separate: a bound `github_app` provider supplies the engine, while CLI/workflow token inputs authenticate the controller.
