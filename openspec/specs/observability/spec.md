@@ -63,6 +63,30 @@ Follows OTEL conventions. Standard env vars
 (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`) work out of
 the box; config file overrides.
 
+### Requirement: Configured endpoint paths
+
+For a configured endpoint URL with no path, Reeve MUST export traces to `/v1/traces` and metrics to `/v1/metrics`.
+An explicitly configured path, including `/`, MUST be preserved for both signals.
+When no endpoint is configured, Reeve MUST leave endpoint selection to the SDK's standard environment settings and defaults.
+
+#### Scenario: Collector URL without a path
+
+- Given an endpoint of `https://collector.example:4318`, including one obtained through environment expansion
+- When a run exports telemetry
+- Then traces use `/v1/traces` and metrics use `/v1/metrics` on that collector
+
+#### Scenario: Explicit collector path
+
+- Given a configured endpoint with a path such as `/collector/ingest` or `/`
+- When a run exports telemetry
+- Then both exporters use that path without appending a signal suffix
+
+#### Scenario: Standard environment endpoints
+
+- Given no configured endpoint and standard OTLP endpoint environment variables
+- When a run exports telemetry
+- Then the SDK applies its base-endpoint or per-signal endpoint semantics
+
 ## Annotation emitters
 
 Thin HTTP-POST layer for Grafana, Datadog, Dash0, generic webhook.
