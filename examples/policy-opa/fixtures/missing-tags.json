@@ -20,11 +20,7 @@
         "newState": {
           "urn": "urn:pulumi:prod::api::aws:ec2/instance:Instance::api",
           "type": "aws:ec2/instance:Instance",
-          "inputs": {
-            "tags": {
-              "cost-center": "demo"
-            }
-          }
+          "inputs": {}
         }
       }
     ]

@@ -2,26 +2,25 @@ package main
 
 import rego.v1
 
-# This recipe accepts Terraform/OpenTofu JSON, not Pulumi output.
-deny contains "expected a Terraform/OpenTofu plan.resource_changes array" if {
+# Pulumi preview JSON is nested under Reeve's plan field.
+deny contains "expected a Pulumi plan.steps array" if {
     input.env == "prod"
     not valid_plan
 }
 
-deny contains sprintf("%s: required tag %s is missing or empty", [resource.address, tag]) if {
+deny contains sprintf("%s: required tag %s is missing or empty", [step.urn, tag]) if {
     input.env == "prod"
-    some resource in input.plan.resource_changes
-    resource.mode == "managed"
-    resource.type == "aws_instance"
-    resource.change.after != null
+    some step in input.plan.steps
+    step.newState.type == "aws:ec2/instance:Instance"
     some tag in {"cost-center", "owner"}
-    tags := object.get(resource.change.after, "tags", null)
+    inputs := object.get(step.newState, "inputs", {})
+    tags := object.get(inputs, "tags", null)
     not valid_tag(tags, tag)
 }
 
 valid_plan if {
     is_object(input.plan)
-    is_array(input.plan.resource_changes)
+    is_array(input.plan.steps)
 }
 
 valid_tag(tags, tag) if {

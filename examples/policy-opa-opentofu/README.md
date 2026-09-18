@@ -1,15 +1,15 @@
-# Pulumi policy hooks
+# OpenTofu policy hooks
 
-The original Pulumi policy example lives here.
+This is the dedicated OpenTofu policy example.
 It covers required tags, allowed regions, an advisory cost hook, production deletion checks, and an advisory change-count limit.
-[Terraform](../policy-opa-terraform/README.md) and [OpenTofu](../policy-opa-opentofu/README.md) have separate configurations and fixtures.
+[Pulumi](../policy-opa/README.md) and [Terraform](../policy-opa-terraform/README.md) have separate configurations and fixtures.
 
 ## Run the local checks
 
 Install [Conftest](https://www.conftest.dev/install/) `0.70.0` and Python 3, then run from the repository root:
 
 ```bash
-bash examples/policy-opa/check.sh
+bash examples/policy-opa-opentofu/check.sh
 ```
 
 The allowed fixture passes. Missing, empty, or unknown tags, a second untagged resource, disallowed or missing regions, production deletes, and malformed engine-plan shapes fail.
@@ -20,7 +20,7 @@ The fixtures are synthetic: no cloud resources, pricing calls, or persistent sta
 
 | File | Purpose |
 | --- | --- |
-| [`.reeve/pulumi.yaml`](.reeve/pulumi.yaml) | `engine.type: pulumi`, project/stack declarations, and hook commands. |
+| [`.reeve/tofu.yaml`](.reeve/tofu.yaml) | `engine.type: tofu`, project/stack declarations, and hook commands. |
 | [`.reeve/shared.yaml`](.reeve/shared.yaml) | Placeholder bucket, approvals, and apply settings to adapt. |
 | [`policies/require_tags.rego`](policies/require_tags.rego) | Require nonempty `cost-center` and `owner` tags in production. |
 | [`policies/restrict_regions.rego`](policies/restrict_regions.rego) | Allow `us-east-1`, `us-east-2`, and `us-west-2` for the declared production region. |
@@ -34,11 +34,11 @@ Run Reeve from the directory containing `policies/` and `scripts/`; `--root` doe
 
 ## What these rules inspect
 
-The tag rule reads Pulumi `plan.steps[].newState.inputs.tags` on `aws:ec2/instance:Instance` resources with a proposed new state.
+The tag rule reads `plan.resource_changes[].change.after.tags` on managed `aws_instance` resources with a proposed new state.
 It rejects a missing engine-plan array and checks every matching resource, rather than searching the human summary for a tag name.
 Extend it with fixtures for other resource types, provider defaults, and engine-specific representations of unknown values before relying on those cases.
 
-The region rule checks Pulumi `plan.config["aws:region"]`.
+The region rule checks `plan.variables.aws_region.value`, assuming your default AWS provider is configured from `var.aws_region`.
 It validates the declared default region, not every resource's effective region: explicit providers, provider aliases, module providers, and per-resource overrides need additional rules.
 Missing or unknown declared regions fail in production.
 

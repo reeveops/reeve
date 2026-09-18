@@ -5,8 +5,8 @@ A blocking hook must pass before Reeve acquires apply credentials and invokes th
 
 ## Start with one check
 
-The [Conftest example](../examples/policy-opa/README.md) includes policies and synthetic inputs for allowed and denied changes.
-Install its pinned tool version, run its checks, then adapt the policy to your workload.
+Choose the Conftest example for your engine: [Pulumi](../examples/policy-opa/README.md), [Terraform](../examples/policy-opa-terraform/README.md), or [OpenTofu](../examples/policy-opa-opentofu/README.md).
+Each has its own configuration and synthetic inputs for allowed and denied changes. Install its pinned tool version, run its checks, then adapt the policy to your workload.
 
 Add a hook under `engine` in your engine configuration:
 
@@ -92,5 +92,6 @@ Validate the tool's expected schema and authenticated execution path in a separa
 
 ## More examples
 
-The [policy example](../examples/policy-opa/README.md) covers a generic production-deletion block, a Terraform resource-tag check, and an advisory change-count limit.
+The [Pulumi](../examples/policy-opa/README.md), [Terraform](../examples/policy-opa-terraform/README.md), and [OpenTofu](../examples/policy-opa-opentofu/README.md) examples cover resource tags, declared-region checks, production deletion blocks, and advisory change-count limits.
+Each also retains the advisory cost-hook sketch and explains the input and authentication work needed to turn it into a pricing integration.
 The [scenario catalog](../examples/README.md#test-harness-and-scenarios) links to the evolving E2E harness and names its current coverage boundaries.

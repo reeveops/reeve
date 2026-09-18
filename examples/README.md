@@ -9,7 +9,7 @@ Recipes contain placeholders and do not all include workload projects or a workf
 | --- | --- | --- |
 | [Pulumi](toy-stack/README.md) | Reeve, Pulumi, Node.js/npm, Python 3; network for dependencies. | Preview three random-provider stacks with local state and no cloud workload credentials. |
 | [Terraform / OpenTofu](toy-stack-terraform/README.md) | Reeve and the selected engine; network for provider initialization. | Preview two root modules and three declared workspaces using local state. |
-| [Policy checks](policy-opa/README.md) | Conftest 0.70.0, Python 3. | Allowed and denied synthetic inputs demonstrate blocking and advisory policies. |
+| Policy checks: [Pulumi](policy-opa/README.md), [Terraform](policy-opa-terraform/README.md), [OpenTofu](policy-opa-opentofu/README.md) | Conftest 0.70.0, Python 3. | Separate engine configurations and allowed/denied fixtures for tags, declared regions, deletion blocks, and advisory change counts. Each retains the cost-hook integration sketch. |
 
 Follow each demo's setup and cleanup instructions in a disposable checkout.
 Local files persisting within a demo are not shared storage for separate hosted CI runs.

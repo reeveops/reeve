@@ -190,5 +190,5 @@ run = "go test ./cmd/reeve -run '^TestDocumentation' -count=1"
 description = "Validate documentation links, examples, selectors, and workflow inputs"
 
 [tasks.policy-example]
-run = "bash examples/policy-opa/check.sh"
-description = "Exercise synthetic policy fixtures (Conftest 0.70.0 and Python 3 required)"
+run = ["bash examples/policy-opa/check.sh", "bash examples/policy-opa-terraform/check.sh", "bash examples/policy-opa-opentofu/check.sh"]
+description = "Check Pulumi, Terraform, and OpenTofu policy fixtures (Conftest 0.70.0 and Python 3 required)"

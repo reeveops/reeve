@@ -10,17 +10,16 @@
   },
   "plan_summary": "One instance",
   "plan": {
-    "config": {
-      "aws:region": "us-east-1"
-    },
-    "steps": [
+    "resource_changes": [
       {
-        "op": "create",
-        "urn": "urn:pulumi:prod::api::aws:ec2/instance:Instance::api",
-        "newState": {
-          "urn": "urn:pulumi:prod::api::aws:ec2/instance:Instance::api",
-          "type": "aws:ec2/instance:Instance",
-          "inputs": {
+        "address": "aws_instance.api",
+        "mode": "managed",
+        "type": "aws_instance",
+        "change": {
+          "actions": [
+            "create"
+          ],
+          "after": {
             "tags": {
               "cost-center": "demo",
               "owner": "platform"
@@ -28,6 +27,7 @@
           }
         }
       }
-    ]
+    ],
+    "variables": {}
   }
 }

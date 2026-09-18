@@ -22,7 +22,8 @@
           "type": "aws:ec2/instance:Instance",
           "inputs": {
             "tags": {
-              "cost-center": "demo"
+              "cost-center": "demo",
+              "owner": null
             }
           }
         }

@@ -11,7 +11,7 @@
   "plan_summary": "One instance",
   "plan": {
     "config": {
-      "aws:region": "us-east-1"
+      "aws:region": "eu-west-1"
     },
     "steps": [
       {
@@ -22,7 +22,8 @@
           "type": "aws:ec2/instance:Instance",
           "inputs": {
             "tags": {
-              "cost-center": "demo"
+              "cost-center": "demo",
+              "owner": "platform"
             }
           }
         }
