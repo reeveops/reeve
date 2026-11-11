@@ -1,6 +1,7 @@
 package github
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,6 +18,14 @@ func issueComment(login, assoc, body, typ string, at time.Time) *gh.IssueComment
 		Body:              gh.String(body),
 		CreatedAt:         &gh.Timestamp{Time: at},
 	}
+}
+
+// editedIssueComment is a comment whose updated_at differs from created_at,
+// the API signal that the body changed after posting.
+func editedIssueComment(login, assoc, body, typ string, at, editedAt time.Time) *gh.IssueComment {
+	c := issueComment(login, assoc, body, typ, at)
+	c.UpdatedAt = &gh.Timestamp{Time: editedAt}
+	return c
 }
 
 func defaultTrigger(t *testing.T) (prefixes []string, verb string, allowed map[string]struct{}) {
@@ -96,6 +105,75 @@ func TestCommentApprovals_ShortNonMatchingSHANotHead(t *testing.T) {
 	out := commentApprovals(comments, prefixes, verb, allowed, headSHA)
 	if len(out) != 1 || !out[0].Pinned || out[0].CommitSHA == headSHA {
 		t.Fatalf("short non-matching SHA must be pinned and not HEAD, got %+v", out)
+	}
+}
+
+// TestCommentApprovals_EditedApprovalComments pins the edit rule: a comment
+// whose updated_at differs from created_at is not an approval. An edit can
+// change reviewed intent silently - the approval that existed before the edit
+// no longer describes what the commenter agreed to. The user is told why,
+// with the corrective step, instead of the edit being ignored silently.
+func TestCommentApprovals_EditedApprovalComments(t *testing.T) {
+	prefixes, verb, allowed := defaultTrigger(t)
+	base := time.Unix(2000, 0)
+	edited := time.Unix(2600, 0)
+	head := headSHA
+	note := fmt.Sprintf("Approval by @reviewer ignored: the comment was edited after posting. Post a new `/reeve approve %s` comment.", head)
+
+	cases := []struct {
+		name      string
+		comments  []*gh.IssueComment
+		wantCount bool
+		wantNotes []string // notes expected in the output
+	}{
+		{"unedited approval counts", []*gh.IssueComment{
+			issueComment("reviewer", "MEMBER", "/reeve approve "+head, "User", base),
+		}, true, nil},
+		{"edited approval does not count", []*gh.IssueComment{
+			editedIssueComment("reviewer", "MEMBER", "/reeve approve "+head, "User", base, edited),
+		}, false, []string{note}},
+		{"repost after an edit counts", []*gh.IssueComment{
+			editedIssueComment("reviewer", "MEMBER", "/reeve approve deadbeefdeadbeef", "User", base, edited),
+			issueComment("reviewer", "MEMBER", "/reeve approve "+head, "User", time.Unix(3000, 0)),
+		}, true, nil},
+		{"edit after an approval supersedes it", []*gh.IssueComment{
+			issueComment("reviewer", "MEMBER", "/reeve approve "+head, "User", base),
+			editedIssueComment("reviewer", "MEMBER", "/reeve approve "+head, "User", time.Unix(3000, 0), edited),
+		}, false, []string{note}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := commentApprovals(c.comments, prefixes, verb, allowed, head)
+			var counted int
+			for _, ap := range out {
+				if ap.Note == "" {
+					counted++
+					if ap.CommitSHA != head {
+						t.Errorf("counted approval must be pinned to HEAD, got %q", ap.CommitSHA)
+					}
+				}
+			}
+			if c.wantCount && counted != 1 {
+				t.Fatalf("want exactly 1 counted approval, got %d (%+v)", counted, out)
+			}
+			if !c.wantCount && counted != 0 {
+				t.Fatalf("edited comment must not count, got %d (%+v)", counted, out)
+			}
+			var gotNotes []string
+			for _, ap := range out {
+				if ap.Note != "" {
+					gotNotes = append(gotNotes, ap.Note)
+				}
+			}
+			if len(gotNotes) != len(c.wantNotes) {
+				t.Fatalf("got notes %v, want %v", gotNotes, c.wantNotes)
+			}
+			for i, want := range c.wantNotes {
+				if gotNotes[i] != want {
+					t.Fatalf("note = %q, want %q", gotNotes[i], want)
+				}
+			}
+		})
 	}
 }
 

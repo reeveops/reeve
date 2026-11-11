@@ -29,6 +29,11 @@ type Approval struct {
 	// from forgeable git timestamps. Evaluate dismisses unpinned approvals when
 	// dismiss_on_new_commit is enabled.
 	Pinned bool
+	// Note is a source-authored, user-facing reason for not counting an
+	// approval. When set, Evaluate skips the approval and puts Note on the
+	// trace verbatim - nothing an approval source refuses may disappear
+	// silently from the PR the user is looking at.
+	Note string
 }
 
 // Source is a pluggable approval backend (v1: pr_review, pr_comment).
@@ -174,6 +179,14 @@ func Evaluate(rules Rules, approvals []Approval, pr PR, codeowners map[string][]
 	effective := make([]Approval, 0, len(approvals))
 	var stale []string
 	for _, a := range approvals {
+		if a.Note != "" {
+			// The source refused this approval itself and authored the
+			// reason (what was refused, which rule, the failing value, the
+			// next step). Render it verbatim and skip every other rule; the
+			// note is the authoritative refusal.
+			res.Trace = append(res.Trace, a.Note)
+			continue
+		}
 		if rules.DismissOnNewCommit {
 			if !a.Pinned {
 				// An unpinned approval (a bare `/reeve approve`) is not bound to
