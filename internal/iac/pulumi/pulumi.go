@@ -296,12 +296,19 @@ func (e *Engine) Preview(ctx context.Context, stack discovery.Stack, opts iac.Pr
 
 // previewDiff runs `pulumi preview --diff` and returns the human-readable
 // colorizable diff output. Errors are non-fatal - caller uses empty string.
+// The diff run must carry the SAME refresh flag and ExtraArgs as the first
+// run: two invocations with different arguments can disagree, and the
+// reviewer-facing diff must explain the plan the preview actually computed.
 func (e *Engine) previewDiff(ctx context.Context, stack discovery.Stack, opts iac.PreviewOpts) string {
 	cwd := opts.Cwd
 	if cwd == "" {
 		cwd = stack.Path
 	}
 	args := []string{"preview", "--stack", stack.Name, "--diff", "--non-interactive"}
+	if opts.Refresh {
+		args = append(args, "--refresh=true")
+	}
+	args = append(args, opts.ExtraArgs...)
 
 	timeout := time.Duration(opts.TimeoutSec) * time.Second
 	if timeout == 0 {

@@ -4,7 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 func TestEnumerateStacks(t *testing.T) {
@@ -50,6 +54,104 @@ func TestEnumerateStacks(t *testing.T) {
 		if !v {
 			t.Fatalf("missing expected stack %s", k)
 		}
+	}
+}
+
+// recordingPulumiBinary writes a fake pulumi binary that appends each
+// invocation's argv to a log file, then answers with canned JSON (the
+// preview run) or a human diff (any run carrying --diff). The log path is
+// returned so tests can put it in the child env (PULUMI_ARGS_LOG) and read
+// it back.
+func recordingPulumiBinary(t *testing.T, dir string) (string, string) {
+	t.Helper()
+	argsLog := filepath.Join(dir, "argv.log")
+	script := "#!/bin/sh\n" +
+		`printf '%s\n' "$*" >> "$PULUMI_ARGS_LOG"` + "\n" +
+		`for a in "$@"; do [ "$a" = "--diff" ] && { echo 'Program running: diff'; exit 0; }; done` + "\n" +
+		`printf '%s' '{"changeSummary":{"create":1},"steps":[{"op":"create","type":"aws:s3/bucket:Bucket","urn":"urn:pulumi:prod::api::aws:s3/bucket:Bucket::b"}]}'` + "\n"
+	fake := filepath.Join(dir, "fake-pulumi")
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return fake, argsLog
+}
+
+// TestPreviewDiffMatchesFirstInvocationArgs pins the argument parity fix:
+// the human-readable diff is a SECOND `pulumi preview --diff` run, and it
+// used to drop the first run's --refresh flag and ExtraArgs. Two runs with
+// different arguments can disagree (a refresh changes the displayed
+// diff; extra operator args change the plan), so the reviewer-facing diff
+// diverged from the saved plan it explains.
+func TestPreviewDiffMatchesFirstInvocationArgs(t *testing.T) {
+	dir := t.TempDir()
+	fake, argsLog := recordingPulumiBinary(t, dir)
+
+	e := New(fake)
+	stack := discovery.Stack{Project: "api", Name: "dev", Path: dir}
+	opts := iac.PreviewOpts{
+		Refresh:   true,
+		ExtraArgs: []string{"--logflow", "--color=never"},
+		Env:       map[string]string{"PULUMI_ARGS_LOG": argsLog},
+	}
+	res, err := e.Preview(context.Background(), stack, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Error != "" {
+		t.Fatalf("preview errored: %q", res.Error)
+	}
+	if res.PlanDiff == "" {
+		t.Fatalf("a non-clean preview must carry the second-run diff: %+v", res)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "argv.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want exactly 2 preview invocations, got %d:\n%s", len(lines), data)
+	}
+	wantTail := "--refresh=true --logflow --color=never"
+	for i, wantHead := range []string{"--json", "--diff"} {
+		if !strings.Contains(lines[i], wantHead) {
+			t.Fatalf("invocation %d must be the %s run: %q", i+1, wantHead, lines[i])
+		}
+		if !strings.HasSuffix(lines[i], wantTail) {
+			t.Fatalf("invocation %d lost parity with the first run: %q (want suffix %q)", i+1, lines[i], wantTail)
+		}
+	}
+}
+
+// TestPreviewDiffSkippedOnCleanNoOp guards the second-run cost: no diff run
+// happens when the preview is a clean no-op.
+func TestPreviewDiffSkippedOnCleanNoOp(t *testing.T) {
+	dir := t.TempDir()
+	fake, argsLog := recordingPulumiBinary(t, dir)
+	// Overwrite the fake so every run prints an empty change set.
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PULUMI_ARGS_LOG\"\nprintf '%s' '{\"changeSummary\":{},\"steps\":[]}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	e := New(fake)
+	res, err := e.Preview(context.Background(),
+		discovery.Stack{Project: "api", Name: "dev", Path: dir},
+		iac.PreviewOpts{Env: map[string]string{"PULUMI_ARGS_LOG": argsLog}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Error != "" {
+		t.Fatalf("preview errored: %q", res.Error)
+	}
+	if counts := res.Counts.Total(); counts != 0 {
+		t.Fatalf("fixture must be a clean no-op, got %d", counts)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "argv.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "--diff") {
+		t.Fatalf("clean no-op must not run the second diff invocation:\n%s", data)
 	}
 }
 
