@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reeveops/reeve/internal/audit"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
 	corelocks "github.com/reeveops/reeve/internal/core/locks"
@@ -371,5 +372,105 @@ func TestShortEtag(t *testing.T) {
 	long := strings.Repeat("a", 20)
 	if got := shortEtag(long); got != strings.Repeat("a", 12)+"…" {
 		t.Errorf("shortEtag(long) = %q", got)
+	}
+}
+
+// TestForceUnlockWritesAuditRecord pins the audit gate on the dangerous
+// unlock shape: an admin force-unlock and a --pr --force removal (what a
+// `/reeve unlock --force` comment dispatches) must record actor, stack,
+// previous holder, and any promotion, and the recorded reason must pass
+// through redaction.
+func TestForceUnlockWritesAuditRecord(t *testing.T) {
+	secretReason := "ghp_" + strings.Repeat("A", 36) + " emergency unlock"
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		scope  string
+		wantPR int
+	}{
+		{"admin force-unlock", []string{"proj/dev", "--force", "--actor", "mallory", "--reason", secretReason}, "admin", 7},
+		{"pr-scoped force removal", []string{"proj/dev", "--pr", "7", "--force", "--actor", "mallory", "--reason", secretReason}, "pr", 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, s := lockRepo(t)
+			acquire(t, s, "proj", "dev", tc.wantPR)
+			enqueue(t, s, "proj", "dev", 8)
+
+			out, err := runReeve(t, append([]string{"locks", "unlock"}, tc.args...)...)
+			if err != nil {
+				t.Fatalf("locks unlock: %v\n%s", err, out)
+			}
+
+			// The override took effect: holder cleared, queue promoted.
+			l, _, err := s.Get(context.Background(), "proj", "dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if l.Holder == nil || l.Holder.PR != 8 {
+				t.Fatalf("queue must be promoted after the override: %+v", l.Holder)
+			}
+
+			// The audit record exists: an intent entry written BEFORE the
+			// mutation and a completion after it.
+			fs, err := filesystem.New(filepath.Join(root, ".reeve-state"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys, err := fs.List(context.Background(), "audit/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var intents, completions []audit.Entry
+			for _, k := range keys {
+				data, _, err := filesystem.ReadBytes(context.Background(), fs, k)
+				if err != nil {
+					t.Fatalf("read %s: %v", k, err)
+				}
+				if err != nil {
+					continue
+				}
+				var e audit.Entry
+				if err := json.Unmarshal(data, &e); err != nil {
+					t.Fatalf("decode audit entry %s: %v", k, err)
+				}
+				if e.Op != "force_unlock" || e.LockOverride == nil {
+					t.Fatalf("audit entry %s is not a force-unlock record: %+v", k, e)
+				}
+				if e.LockOverride.Scope != tc.scope {
+					t.Fatalf("scope = %q, want %q", e.LockOverride.Scope, tc.scope)
+				}
+				if e.Actor != "mallory" {
+					t.Fatalf("actor = %q, want mallory", e.Actor)
+				}
+				prev := e.LockOverride.Previous
+				if len(prev) != 1 || prev[0].Project != "proj" || prev[0].Stack != "dev" ||
+					prev[0].PR != tc.wantPR || prev[0].Actor != "alice" || !prev[0].Active {
+					t.Fatalf("previous holder = %+v, want PR #%d by alice, active", prev, tc.wantPR)
+				}
+				if strings.Contains(e.LockOverride.Reason, secretReason[:8]) {
+					t.Fatalf("audit reason contains the raw secret: %q", e.LockOverride.Reason)
+				}
+				if !strings.Contains(e.LockOverride.Reason, "[redacted]") {
+					t.Fatalf("audit reason must be redacted: %q", e.LockOverride.Reason)
+				}
+				switch e.Outcome {
+				case "force_unlock_intent":
+					intents = append(intents, e)
+				case "success":
+					if e.LockOverride.PromotedPR != 8 {
+						t.Fatalf("promoted PR = %d, want 8", e.LockOverride.PromotedPR)
+					}
+					completions = append(completions, e)
+				}
+			}
+			if len(intents) != 1 || len(completions) != 1 {
+				t.Fatalf("audit entries: intents=%d completions=%d, want 1 each", len(intents), len(completions))
+			}
+			// The intent entry was written write-once before the mutation:
+			// it and the completion carry distinct run ids.
+			if intents[0].RunID != completions[0].RunID+"-intent" {
+				t.Fatalf("intent run id %q must pair with completion %q", intents[0].RunID, completions[0].RunID)
+			}
+		})
 	}
 }

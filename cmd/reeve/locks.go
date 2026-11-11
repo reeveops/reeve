@@ -1,17 +1,22 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/reeveops/reeve/internal/audit"
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/factory"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
 	"github.com/reeveops/reeve/internal/config"
+	corelocks "github.com/reeveops/reeve/internal/core/locks"
 	"github.com/reeveops/reeve/internal/run"
 )
 
@@ -55,24 +60,24 @@ func newLocksCmd() *cobra.Command {
 // openLocks opens the lock store and returns the loaded config alongside
 // it so callers can thread config-derived settings (locking.ttl, admin
 // override) without re-loading.
-func openLocks(cmd *cobra.Command) (*blocks.Store, *config.Config, error) {
+func openLocks(cmd *cobra.Command) (*blocks.Store, *audit.Writer, *config.Config, error) {
 	root, _ := os.Getwd()
 	cfg, err := config.Load(root)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := cfg.Validate(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	store, err := factory.Open(cmd.Context(), cfg.Shared.Bucket, root)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open bucket: %w", err)
+		return nil, nil, nil, fmt.Errorf("open bucket: %w", err)
 	}
-	return blocks.New(store), cfg, nil
+	return blocks.New(store), audit.NewWriter(store), cfg, nil
 }
 
 func locksList(cmd *cobra.Command, _ []string) error {
-	s, _, err := openLocks(cmd)
+	s, _, _, err := openLocks(cmd)
 	if err != nil {
 		return err
 	}
@@ -104,7 +109,7 @@ func locksExplain(cmd *cobra.Command, args []string) error {
 	if parts == nil {
 		return fmt.Errorf("expected project/stack, got %q", ref)
 	}
-	s, _, err := openLocks(cmd)
+	s, _, _, err := openLocks(cmd)
 	if err != nil {
 		return err
 	}
@@ -133,7 +138,7 @@ func locksExplain(cmd *cobra.Command, args []string) error {
 }
 
 func locksReap(cmd *cobra.Command, _ []string) error {
-	s, cfg, err := openLocks(cmd)
+	s, _, cfg, err := openLocks(cmd)
 	if err != nil {
 		return err
 	}
@@ -158,12 +163,16 @@ func locksReap(cmd *cobra.Command, _ []string) error {
 func locksUnlock(cmd *cobra.Command, args []string) error {
 	pr := flagInt(cmd, "pr")
 
-	s, cfg, err := openLocks(cmd)
+	s, aw, cfg, err := openLocks(cmd)
 	if err != nil {
 		return err
 	}
 
 	reason := flagStringOrDefault(cmd, "reason", "")
+	// The reason lands in a permanent audit record; redact it before it is
+	// stored. Nothing reaching a log line or audit entry may bypass
+	// internal/core/redact.
+	redactedReason := run.BuildRedactor(cfg.Shared).Redact(reason)
 	actor := flagStringOrEnv(cmd, "actor", "GITHUB_ACTOR")
 	if actor == "" {
 		actor = os.Getenv("USER")
@@ -199,10 +208,35 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 		if parts == nil {
 			return fmt.Errorf("expected project/stack, got %q", args[0])
 		}
-		l, err := s.ForceUnlock(ctx, parts[0], parts[1], ttl)
-		if err != nil {
+		// Previous holder read BEFORE the override: the audit record names
+		// what was cleared. Fail closed - unreadable lock state, no
+		// force-unlock.
+		current, _, gerr := s.Get(ctx, parts[0], parts[1])
+		if gerr != nil {
+			return fmt.Errorf("force-unlock refused: could not read the current holder for %s/%s (%v)", parts[0], parts[1], gerr)
+		}
+		override := audit.LockOverride{
+			Project: parts[0], Stack: parts[1], Scope: "admin", Reason: redactedReason,
+			Previous: []audit.HolderSnapshot{holderSnapshot(current, parts[0], parts[1])},
+		}
+		unlockID := fmt.Sprintf("unlock-%d", time.Now().UnixNano())
+		if err := writeUnlockIntent(ctx, aw, actor, repoHint(cmd), unlockID, override); err != nil {
 			return err
 		}
+		l, err := s.ForceUnlock(ctx, parts[0], parts[1], ttl)
+		if err != nil {
+			writeUnlockCompletion(ctx, aw, actor, repoHint(cmd), unlockID, override,
+				[]audit.Stack{{Ref: parts[0] + "/" + parts[1], Status: "force_unlock_failed", Error: run.BuildRedactor(cfg.Shared).Redact(err.Error())}},
+				"failed")
+			return err
+		}
+		override.PromotedPR = promotedPR(l)
+		status := "force_unlocked"
+		if l.Holder == nil {
+			status = "unlocked"
+		}
+		completed := []audit.Stack{{Ref: parts[0] + "/" + parts[1], Status: status}}
+		writeUnlockCompletion(ctx, aw, actor, repoHint(cmd), unlockID, override, completed, "success")
 		fmt.Fprintf(w, "unlocked %s/%s by actor=%s reason=%q\n",
 			parts[0], parts[1], actor, reason)
 		if l.Holder != nil {
@@ -216,9 +250,34 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 	// still active (likely a live apply) is refused with a hint.
 	force := flagBool(cmd, "force")
 	if len(args) == 0 {
+		var previous []audit.HolderSnapshot
+		if force {
+			// Killing an active holder is the dangerous shape: record what
+			// will be cleared. Fail closed on an unreadable walk.
+			locks, lerr := s.ListAll(ctx)
+			if lerr != nil {
+				return fmt.Errorf("force-unlock refused: could not read lock state (%v)", lerr)
+			}
+			previous = holderSnapshotsForPR(locks, pr)
+		}
+		override := audit.LockOverride{Scope: "pr", Reason: redactedReason, Previous: previous}
+		unlockID := fmt.Sprintf("unlock-%d", time.Now().UnixNano())
+		if force {
+			if err := writeUnlockIntent(ctx, aw, actor, repoHint(cmd), unlockID, override); err != nil {
+				return err
+			}
+		}
 		n, active, err := s.UnlockPRAll(ctx, pr, "", ttl, force)
 		if err != nil {
+			if force {
+				writeUnlockCompletion(ctx, aw, actor, repoHint(cmd), unlockID, override,
+					[]audit.Stack{{Ref: "locks", Status: "pr_unlock_failed", Error: run.BuildRedactor(cfg.Shared).Redact(err.Error())}}, "failed")
+			}
 			return err
+		}
+		if force {
+			completed := auditStacksForSnapshots(previous)
+			writeUnlockCompletion(ctx, aw, actor, repoHint(cmd), unlockID, override, completed, "success")
 		}
 		fmt.Fprintf(w, "removed PR #%d from %d lock(s) by actor=%s reason=%q\n", pr, n, actor, reason)
 		if len(active) > 0 {
@@ -230,6 +289,24 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 	if parts == nil {
 		return fmt.Errorf("expected project/stack, got %q", args[0])
 	}
+	var previous []audit.HolderSnapshot
+	if force {
+		current, _, gerr := s.Get(ctx, parts[0], parts[1])
+		if gerr != nil {
+			return fmt.Errorf("force-unlock refused: could not read the current lock state for %s/%s (%v)", parts[0], parts[1], gerr)
+		}
+		snap := holderSnapshot(current, parts[0], parts[1])
+		if snap.PR != 0 || snap.RunID != "" || current.Holder != nil {
+			previous = append(previous, snap)
+		}
+	}
+	override := audit.LockOverride{Project: parts[0], Stack: parts[1], Scope: "pr", Reason: redactedReason, Previous: previous}
+	unlockID := fmt.Sprintf("unlock-%d", time.Now().UnixNano())
+	if force {
+		if err := writeUnlockIntent(ctx, aw, actor, repoHint(cmd), unlockID, override); err != nil {
+			return err
+		}
+	}
 	l, err := s.UnlockPR(ctx, parts[0], parts[1], pr, "", ttl, force)
 	if err != nil {
 		if errors.Is(err, blocks.ErrHolderActive) {
@@ -237,11 +314,129 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
+	if force && len(previous) > 0 {
+		override.PromotedPR = promotedPR(l)
+		writeUnlockCompletion(ctx, aw, actor, repoHint(cmd), unlockID, override,
+			[]audit.Stack{{Ref: parts[0] + "/" + parts[1], Status: "force_unlocked"}}, "success")
+	}
 	fmt.Fprintf(w, "removed PR #%d from %s/%s by actor=%s reason=%q\n", pr, parts[0], parts[1], actor, reason)
 	if l.Holder != nil {
 		fmt.Fprintf(w, "holder is now PR #%d (expires %s)\n", l.Holder.PR, l.Holder.ExpiresAt)
 	}
 	return nil
+}
+
+// holderSnapshot records the holder state of one lock for the audit trail.
+// Active states whether the lease was still unexpired: pruning a dead
+// reservation and killing a live apply are different events.
+func holderSnapshot(l corelocks.Lock, project, stack string) audit.HolderSnapshot {
+	snap := audit.HolderSnapshot{Project: project, Stack: stack}
+	if l.Holder == nil {
+		return snap
+	}
+	snap.PR = l.Holder.PR
+	snap.RunID = l.Holder.RunID
+	snap.Actor = l.Holder.Actor
+	snap.ExpiresAt = l.Holder.ExpiresAt
+	if exp, err := time.Parse(time.RFC3339, l.Holder.ExpiresAt); err == nil {
+		snap.Active = time.Now().Before(exp)
+	}
+	return snap
+}
+
+// holderSnapshotsForPR snapshots every lock in which the PR appears as
+// holder or queue entry - the state an UnlockPRAll(force) is about to clear.
+func holderSnapshotsForPR(locks []corelocks.Lock, pr int) []audit.HolderSnapshot {
+	var out []audit.HolderSnapshot
+	for _, l := range locks {
+		if l.Holder != nil && l.Holder.PR == pr {
+			out = append(out, holderSnapshot(l, l.Project, l.Stack))
+			continue
+		}
+		for _, q := range l.Queue {
+			if q.PR == pr {
+				snap := audit.HolderSnapshot{Project: l.Project, Stack: l.Stack, PR: q.PR, RunID: q.RunID, Actor: q.Actor}
+				out = append(out, snap)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func auditStacksForSnapshots(previous []audit.HolderSnapshot) []audit.Stack {
+	out := make([]audit.Stack, 0, len(previous))
+	for _, p := range previous {
+		out = append(out, audit.Stack{Ref: p.Project + "/" + p.Stack, Status: "force_unlocked"})
+	}
+	return out
+}
+
+func promotedPR(l corelocks.Lock) int {
+	if l.Holder == nil {
+		return 0
+	}
+	return l.Holder.PR
+}
+
+// writeUnlockIntent records the force-unlock intent write-once BEFORE the
+// mutation, break-glass style: if the audit store cannot record the
+// override, the force-unlock is refused.
+func writeUnlockIntent(ctx context.Context, aw *audit.Writer, actor, repo, unlockID string, override audit.LockOverride) error {
+	if aw == nil {
+		return fmt.Errorf("force-unlock refused: no audit writer configured; refusing to force-unlock %s/%s without a durable audit record",
+			override.Project, override.Stack)
+	}
+	now := time.Now().UTC()
+	intent := audit.Entry{
+		RunID:        unlockID + "-intent",
+		Op:           "force_unlock",
+		StartedAt:    now.Format(time.RFC3339),
+		FinishedAt:   now.Format(time.RFC3339),
+		Actor:        actor,
+		Repo:         repo,
+		Outcome:      "force_unlock_intent",
+		LockOverride: &override,
+	}
+	if err := aw.Write(ctx, intent); err != nil && !errors.Is(err, blob.ErrPreconditionFailed) {
+		return fmt.Errorf("force-unlock refused: audit record could not be written (%v)", err)
+	}
+	return nil
+}
+
+// writeUnlockCompletion records the force-unlock outcome. The mutation has
+// already happened, so a failure here is logged loudly rather than
+// propagated - returning an error would falsely tell the operator the
+// unlock did not take place.
+func writeUnlockCompletion(ctx context.Context, aw *audit.Writer, actor, repo, unlockID string, override audit.LockOverride, stacks []audit.Stack, outcome string) {
+	if aw == nil {
+		return
+	}
+	now := time.Now().UTC()
+	entry := audit.Entry{
+		RunID:        unlockID,
+		Op:           "force_unlock",
+		StartedAt:    now.Add(-time.Millisecond).Format(time.RFC3339),
+		FinishedAt:   now.Format(time.RFC3339),
+		Actor:        actor,
+		Repo:         repo,
+		Outcome:      outcome,
+		Stacks:       stacks,
+		LockOverride: &override,
+	}
+	if err := aw.Write(ctx, entry); err != nil && !errors.Is(err, blob.ErrPreconditionFailed) {
+		slog.Error("force-unlock completion audit write failed - unlock already applied",
+			"err", err, "unlock_id", unlockID, "actor", actor)
+	}
+}
+
+// repoHint names the repository when running inside one, for entries written
+// outside a PR run.
+func repoHint(cmd *cobra.Command) string {
+	if repo := os.Getenv("GITHUB_REPOSITORY"); repo != "" {
+		return repo
+	}
+	return ""
 }
 
 func actorAllowed(actor string, allowed []string) bool {

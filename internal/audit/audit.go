@@ -40,6 +40,12 @@ type Entry struct {
 	// entry is already write-once (immutable); this block makes the
 	// override loud and self-describing.
 	BreakGlass *BreakGlass `json:"break_glass,omitempty"`
+	// LockOverride is present only for forced lock releases (admin
+	// force-unlock, or a --pr --force removal). Like BreakGlass it is
+	// written as intent BEFORE the mutation, so a force-unlock can never
+	// happen without a durable record naming the actor, the stack, and the
+	// previous holder.
+	LockOverride *LockOverride `json:"lock_override,omitempty"`
 }
 
 // BreakGlass records the emergency-override context of a run: who forced
@@ -72,6 +78,35 @@ type Stack struct {
 	Replace    int    `json:"replace"`
 	DurationMS int64  `json:"duration_ms,omitempty"`
 	Error      string `json:"error,omitempty"` // short error message only
+}
+
+// HolderSnapshot states what a lock override cleared: which stack, whose
+// holder (PR, run, actor), and whether the cleared lease was still active -
+// the difference between pruning a dead reservation and killing a live
+// apply.
+type HolderSnapshot struct {
+	Project   string `json:"project"`
+	Stack     string `json:"stack"`
+	PR        int    `json:"pr"`
+	RunID     string `json:"run_id,omitempty"`
+	Actor     string `json:"actor,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	Active    bool   `json:"active"`
+}
+
+// LockOverride records a forced lock release: the admin force-unlock
+// (`locks unlock project/stack --force`, gated by locking.admin_override)
+// and the PR-scoped `--pr N --force` removal - including what a `/reeve
+// unlock --force` comment dispatches. Scope names the authorization shape:
+// "admin" | "pr".
+type LockOverride struct {
+	Project  string           `json:"project,omitempty"` // single-stack scope
+	Stack    string           `json:"stack,omitempty"`   // single-stack scope
+	Previous []HolderSnapshot `json:"previous,omitempty"`
+	// PromotedPR is the queue entry the override promoted, if any.
+	PromotedPR int    `json:"promoted_pr,omitempty"`
+	Reason     string `json:"reason,omitempty"` // already redacted by the caller
+	Scope      string `json:"scope"`
 }
 
 // Writer persists entries to blob.
