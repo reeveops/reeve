@@ -209,6 +209,10 @@ fetch_main() {
       if [[ -z "$tag" || "$tag" == "null" ]]; then
         echo "no ${ref}-* prerelease matches this action source (edge build may still be running)" >&2
       else
+        # Edge assets carry the commit's full SHA in the name
+        # (reeve_<sha>_linux_<arch>.tar.gz); the tag is <branch>-<sha>.
+        commit_sha="${tag#"${ref}-"}"
+        asset="reeve_${commit_sha}_linux_${arch}.tar.gz"
         echo "Edge ref '$ref': source-matched prerelease is $tag; downloading $asset from $repo"
         if gh release download "$tag" --repo "$repo" \
           --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" \
@@ -228,6 +232,9 @@ fetch_main() {
       if [[ -z "$tag" || "$tag" == "null" ]]; then
         echo "no retained prerelease matches commit $ref and this action source" >&2
       else
+        # Edge assets carry the commit's full SHA in the name; the ref here
+        # IS the full commit SHA.
+        asset="reeve_${ref}_linux_${arch}.tar.gz"
         echo "Commit ref '${ref:0:12}': prerelease is $tag; downloading $asset from $repo"
         if gh release download "$tag" --repo "$repo" \
           --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" \

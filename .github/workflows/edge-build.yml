@@ -2,11 +2,14 @@ name: edge-build
 
 # Per-push prebuilt binaries for the GitHub Action fast-path. Every push to
 # master/next builds linux amd64+arm64 binaries and publishes them as their
-# OWN prerelease tagged <branch>-<shortsha> (e.g. next-5993c47) - one release
-# per commit, never a rolling dumping ground. The action selects a release by
-# its signed source hash, including when the caller uses a full commit SHA.
-# Hand-cut v*.*.* (and vX.Y.Z-rc) tags remain the primary distribution and are
-# entirely the maintainer's call.
+# OWN prerelease tagged <branch>-<fullsha> (e.g.
+# next-8f0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b) - one release per commit,
+# never a rolling dumping ground. Assets carry the full SHA in their names,
+# and an already-published release is never overwritten (reruns stop with a
+# visible note). The action selects a release by its signed source hash,
+# including when the caller uses a full commit SHA. Hand-cut v*.*.* (and
+# vX.Y.Z-rc) tags remain the primary distribution and are entirely the
+# maintainer's call.
 #
 # The <branch>-<sha> tags do NOT match the release workflow's v*.*.* trigger,
 # so publishing here never starts the goreleaser pipeline.
@@ -41,17 +44,22 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="$GITHUB_REF_NAME"
-          SHORTSHA="${GITHUB_SHA::7}"
+          # The FULL commit SHA: short SHAs collide (7-hex ≈ 16M work with
+          # attacker-settable committer timestamps) and consumers cannot bind
+          # an artifact identity to a commit they only have truncated.
+          COMMIT="$GITHUB_SHA"
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           mkdir -p dist
           "$GITHUB_WORKSPACE/.github/scripts/source-hash.sh" "$GITHUB_WORKSPACE" > dist/source-hash.txt
           for ARCH in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath \
-              -ldflags="-s -w -X main.version=${BRANCH}-${SHORTSHA} -X main.commit=${SHORTSHA} -X main.date=${DATE}" \
+              -ldflags="-s -w -X main.version=${BRANCH}-${COMMIT} -X main.commit=${COMMIT} -X main.date=${DATE}" \
               -o "dist/${ARCH}/reeve" ./cmd/reeve
-            tar -C "dist/${ARCH}" -czf "dist/reeve_linux_${ARCH}.tar.gz" reeve
+            # The asset name carries the full SHA: one immutable artifact per
+            # commit, never a rolling name that a later build overwrites.
+            tar -C "dist/${ARCH}" -czf "dist/reeve_${COMMIT}_linux_${ARCH}.tar.gz" reeve
           done
-          (cd dist && sha256sum reeve_linux_*.tar.gz source-hash.txt > checksums.txt)
+          (cd dist && sha256sum reeve_*_linux_*.tar.gz source-hash.txt > checksums.txt)
           ls -l dist
 
       - name: Install cosign
@@ -74,18 +82,16 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="$GITHUB_REF_NAME"
-          SHORTSHA="${GITHUB_SHA::7}"
-          TAG="${BRANCH}-${SHORTSHA}"
+          COMMIT="$GITHUB_SHA"
+          TAG="${BRANCH}-${COMMIT}"
           SOURCE_HASH=$(cat dist/source-hash.txt)
-          # One prerelease per commit. On a re-run of the same commit the tag
-          # already exists; clobber its assets (same source, not accumulation).
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --prerelease \
-              --title "reeve ${BRANCH} (${SHORTSHA})" \
+              --title "reeve ${BRANCH} (${COMMIT})" \
               --target "$GITHUB_SHA" \
               --notes "$(cat <<EOF
-          Prebuilt binaries for commit \`${SHORTSHA}\` on \`${BRANCH}\`,
+          Prebuilt binaries for commit \`${COMMIT}\` on \`${BRANCH}\`,
           consumed by the reeve GitHub Action fast-path: a workflow pinned to
           this branch (\`@${BRANCH}\`) or the full commit SHA. The action
           requires the signed source hash to match its checked-out source.
@@ -99,9 +105,21 @@ jobs:
           EOF
           )" || echo "release create failed (raced with a concurrent push?) - continuing"
           fi
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            dist/reeve_linux_amd64.tar.gz \
-            dist/reeve_linux_arm64.tar.gz \
+          # Never overwrite. Builds are not reproducible (the build date is
+          # embedded), so re-uploading would replace signed artifacts with
+          # differently-signed bytes and invalidate checksums consumers may
+          # already have verified. A rerun of an already-published commit
+          # stops here with a visible note; a failed partial upload (release
+          # exists but assets missing) completes it.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets | map(.name) | index("reeve_'"${COMMIT}"'_linux_amd64.tar.gz") != null' \
+            > /dev/null 2>&1; then
+            echo "edge release $TAG already carries its artifacts; not overwriting"
+            exit 0
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+            "dist/reeve_${COMMIT}_linux_amd64.tar.gz" \
+            "dist/reeve_${COMMIT}_linux_arm64.tar.gz" \
             dist/source-hash.txt \
             dist/checksums.txt \
             dist/checksums.txt.bundle
