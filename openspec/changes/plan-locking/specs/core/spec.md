@@ -25,6 +25,51 @@ timeline. It SHALL NOT be silent.
 - **THEN** the stack still applies, and the timeline carries a
   "plan lock unavailable" entry naming the stack and the reason
 
+### Requirement: The saved plan is digest-bound and its absence fails closed
+
+The manifest entry for a stored plan SHALL record the artifact's SHA-256
+digest. When a manifest records a plan key but the artifact is missing,
+unreadable, oversized, or does not match the recorded digest, apply SHALL fail
+that stack closed instead of computing a fresh plan. Fresh-plan re-planning is
+an explicit recovery operation: an `engine.plan_locking.allow_replan`
+configuration setting (default `false`, deny) and a per-run `--replan` flag
+allow it, and a re-plan SHALL be stated on the timeline and in the audit
+record. A manifest with NO plan key remains the expressly supported
+compatibility path (manifests predating plan locking, or locking disabled at
+preview time) and re-plans with the loud timeline statement.
+
+#### Scenario: A manifest promises a plan that is missing
+
+- **WHEN** the manifest records a plan key and the artifact cannot be
+  fetched
+- **THEN** the apply fails that stack, naming the stack, the run id, the
+  plan key, and the failure
+- **AND** no engine runs for that stack without the explicit recovery path
+
+#### Scenario: The artifact does not match its digest
+
+- **WHEN** the fetched plan artifact's SHA-256 differs from the digest the
+  manifest recorded
+- **THEN** the apply fails that stack, naming the stack, the plan key, and
+  both digests
+- **AND** the mismatched artifact is treated as corrupt, never executed
+
+#### Scenario: The explicit recovery path
+
+- **GIVEN** `engine.plan_locking.allow_replan: true` in trusted
+  configuration, or `--replan` for this run
+- **WHEN** the promised plan is unavailable
+- **THEN** the apply computes a fresh plan
+- **AND** the timeline and the audit record state that the apply re-planned
+  through the recovery path
+
+#### Scenario: Legacy manifest without a plan key
+
+- **WHEN** the manifest for the commit records no plan key
+- **THEN** the stack applies with a fresh plan under the compatibility path
+- **AND** the timeline carries the "plan lock unavailable" entry naming the
+  stack and the reason
+
 #### Scenario: The artifact is scoped to the run
 
 - **WHEN** a plan artifact is stored

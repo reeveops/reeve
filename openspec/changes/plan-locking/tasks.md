@@ -1,5 +1,16 @@
 # Plan locking, refresh, freshness default — tasks
 
+## Digest binding and fail-closed availability (remediation 2026-11-11 delta)
+
+- [ ] Record the plan artifact's SHA-256 on the manifest entry at preview time.
+- [ ] Verify the digest at apply time and fail the stack closed on missing,
+      unreadable, oversized, or mismatched artifacts.
+- [ ] Add the `engine.plan_locking.allow_replan` setting (default deny) and the
+      `--replan` per-run recovery flag, both loud on timeline and audit.
+- [ ] Keep the no-plan-key compatibility path narrow and loud; confirm the
+      fresh-plan timeline entry names the stack and reason.
+- [ ] Malicious-corruption and digest-mismatch tests; recovery-path audit tests.
+
 ## P1 — engine contract
 
 - [x] `PreviewOpts.SavePlanPath` / `PreviewResult.PlanPath` / `ApplyOpts.PlanPath`,
