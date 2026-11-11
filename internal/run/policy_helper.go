@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/core/redact"
@@ -40,13 +41,25 @@ func HooksFromEngine(e *schemas.Engine) []policy.Hook {
 // RunPolicyForStack executes all hooks for one stack. Writes the plan
 // JSON to a temp file first and supplies its path via {{plan_json}}.
 // Returns (passed, results) - passed is true iff all block hooks passed.
+// A plan file that cannot be written fails closed: no hook runs and the
+// caller must deny the apply.
 func RunPolicyForStack(ctx context.Context, hooks []policy.Hook, s discovery.Stack, ss summary.StackSummary, r *redact.Redactor) (bool, []policy.Result, error) {
 	if len(hooks) == 0 {
 		return true, nil, nil
 	}
 	planPath, planDir, err := writePlanJSON(ss)
 	if err != nil {
-		return false, nil, err
+		// Refuse with the reason where the user is looking (the job log):
+		// what was refused (the hooks did not run), which rule refused it
+		// (the plan file could not be written), the failing stack, and what
+		// happens next (the apply is denied). Name-derived detail is
+		// redacted before it leaves here.
+		detail := fmt.Sprintf("%v", err)
+		if r != nil {
+			detail = r.Redact(detail)
+		}
+		return false, nil, fmt.Errorf("policy hooks %s not run for %s: plan file could not be written (%s); apply denied",
+			hookNames(hooks), s.Ref(), detail)
 	}
 	defer os.RemoveAll(planDir)
 
@@ -66,6 +79,15 @@ func RunPolicyForStack(ctx context.Context, hooks []policy.Hook, s discovery.Sta
 		}
 	}
 	return passed, results, nil
+}
+
+// hookNames lists hook names for a refusal, in config order.
+func hookNames(hooks []policy.Hook) string {
+	names := make([]string, 0, len(hooks))
+	for _, h := range hooks {
+		names = append(names, h.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // writePlanJSON dumps both the structured engine plan (parsed from
@@ -110,7 +132,13 @@ func writePlanJSON(ss summary.StackSummary) (path, dir string, err error) {
 	if merr != nil {
 		return "", "", merr
 	}
-	p := filepath.Join(dir, fmt.Sprintf("%s-%s.json", ss.Project, ss.Stack))
+	// Project and stack names come from the repo under review; a name with
+	// `..` or `/` composed verbatim escapes the temp dir (Join cleans
+	// traversal). Slugging the components keeps every name - degenerate
+	// included - inside this directory.
+	p := filepath.Join(dir, fmt.Sprintf("%s-%s.json",
+		blob.SlugComponent(ss.Project, "project"),
+		blob.SlugComponent(ss.Stack, "stack")))
 	if merr = os.WriteFile(p, data, 0o600); merr != nil {
 		_ = os.RemoveAll(dir)
 		return "", "", merr
