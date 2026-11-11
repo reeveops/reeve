@@ -857,6 +857,110 @@ func mustJSON(t *testing.T, value any) string {
 	return string(data)
 }
 
+// classifyActionEventExpectRefusal runs the classifier the same way
+// classifyActionEvent does, but expects the script to refuse the dispatch:
+// a non-zero exit with the refusal on stderr. An unknown comment argument
+// used to be silently ignored, so a typo like --dry-rnu turned a dry run
+// into a writing command. The job must go red and say so.
+func classifyActionEventExpectRefusal(t *testing.T, eventName, eventJSON, command, runOnApproval string) string {
+	t.Helper()
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	outputPath := filepath.Join(dir, "output")
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runOnApproval == "" {
+		runOnApproval = "false"
+	}
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script and fixtures travel through environment variables.
+	cmd := exec.Command(script)
+	for key, value := range map[string]string{
+		"GITHUB_OUTPUT":              outputPath,
+		"GITHUB_EVENT_NAME":          eventName,
+		"GITHUB_EVENT_PATH":          eventPath,
+		"REEVE_INPUT_COMMAND":        command,
+		"REEVE_RUN_ON_APPROVAL":      runOnApproval,
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("unknown argument must refuse the dispatch (exit non-zero), but the classifier exited 0 with output:\n%s", output)
+	}
+	return string(output)
+}
+
+// TestClassifierRefusesUnknownCommentArgs asserts both halves of the failure
+// rule for the strict comment parser: the dispatch is refused (non-zero
+// exit, nothing downstream) AND the refusal names the verb, the failing
+// argument, and the set the verb accepts.
+func TestClassifierRefusesUnknownCommentArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		verb     string
+		arg      string
+		accepted string
+	}{
+		{"typo flag on refresh", "/reeve refresh --dry-rnu", "refresh", "--dry-rnu", "--dry-run, dry-run, --all, all"},
+		{"value-form dry-run on refresh", "/reeve refresh --dry-run=true", "refresh", "--dry-run=true", "--dry-run, dry-run, --all, all"},
+		{"unknown flag on apply", "/reeve apply --typo", "apply", "--typo", "--force, force, --refresh"},
+		{"typo flag on unlock", "/reeve unlock project/prod --froce", "unlock", "--froce", "--force, force, <project/stack> (at most one)"},
+		{"slash-less positional on unlock", "/reeve unlock prod", "unlock", "prod", "--force, force, <project/stack> (at most one)"},
+		{"flag on preview", "/reeve preview --force", "preview", "--force", "(no arguments)"},
+		{"flag on explain", "/reeve explain --all", "explain", "--all", "<project/stack> (at most one)"},
+		{"flag on ready", "/reeve ready --dry-run", "ready", "--dry-run", "(no arguments)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			eventJSON := `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"` + c.body + `","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+			out := classifyActionEventExpectRefusal(t, "issue_comment", eventJSON, "", "false")
+			want := fmt.Sprintf("/reeve %s refused: unknown argument `%s`. Accepted: %s.", c.verb, c.arg, c.accepted)
+			if !strings.Contains(out, want) {
+				t.Fatalf("refusal output must name verb, argument, and accepted set:\nwant: %s\ngot:  %s", want, out)
+			}
+		})
+	}
+}
+
+// TestClassifierStillAcceptsKnownVerbArgs guards against over-refusing:
+// every documented argument form still dispatches.
+func TestClassifierStillAcceptsKnownVerbArgs(t *testing.T) {
+	cases := []struct {
+		name         string
+		body         string
+		wantCommand  string
+		wantContains []string
+	}{
+		{"apply with force and refresh", "/reeve apply --force --refresh", "apply", []string{"--force", "--refresh"}},
+		{"apply bare force alias", "/reeve apply force", "apply", []string{"--force"}},
+		{"refresh with dry-run and all", "/reeve refresh --dry-run --all", "refresh", []string{"--dry-run", "--all"}},
+		{"refresh bare aliases", "/reeve refresh dry-run all", "refresh", []string{"--dry-run", "--all"}},
+		{"unlock with ref and force", "/reeve unlock project/prod --force", "unlock", []string{"--force"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			eventJSON := `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"` + c.body + `","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+			dispatch := classifyActionEvent(t, "issue_comment", eventJSON, "", "false")
+			if !dispatch.Run || dispatch.Command != c.wantCommand {
+				t.Fatalf("dispatch = run=%v command=%q, want run=true command=%q", dispatch.Run, dispatch.Command, c.wantCommand)
+			}
+			got := strings.Join(dispatch.Args, " ")
+			for _, want := range c.wantContains {
+				if !strings.Contains(" "+got+" ", " "+want+" ") {
+					t.Fatalf("args %q must contain %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestBinaryFetchRejectsMissingSignatureVerifier(t *testing.T) {
 	script := repoPath(t, ".github", "scripts", "fetch-binary.sh")
 	sums := filepath.Join(t.TempDir(), "checksums.txt")

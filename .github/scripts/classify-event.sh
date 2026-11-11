@@ -32,6 +32,19 @@ skip() {
   exit 0
 }
 
+# refuse fails the dispatch: the command never runs downstream.
+#
+# Unknown comment arguments used to be silently ignored, so a typo like
+# --dry-rnu turned a dry run into a writing command. Every verb now accepts
+# an exact argument set; the first token outside it refuses the command,
+# naming the argument and everything the verb accepts. Failing this script
+# makes the job red - the refusal is in the job log, in the place the
+# commenter is looking.
+refuse() {
+  printf '/reeve %s refused: unknown argument `%s`. Accepted: %s.\n' "$1" "$2" "$3" >&2
+  exit 1
+}
+
 authorized_association() {
   local association
   association=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
@@ -142,24 +155,44 @@ case "${GITHUB_EVENT_NAME:-}" in
         command="apply"
         append_arg "--trigger-source"
         append_arg "comment"
-        if [[ " $rest " == *" --force "* || " $rest " == *" force "* ]]; then
-          append_arg "--force"
-        fi
-        if [[ " $rest " == *" --refresh "* ]]; then
-          append_arg "--refresh"
-        fi
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in "${arg_tokens[@]}"; do
+          case "$tok" in
+            --force|force)
+              append_arg "--force"
+              ;;
+            --refresh)
+              append_arg "--refresh"
+              ;;
+            *)
+              refuse "${verb}" "$tok" "--force, force, --refresh"
+              ;;
+          esac
+        done
         ;;
       refresh)
         command="refresh"
-        if [[ " $rest " == *" --dry-run "* || " $rest " == *" dry-run "* ]]; then
-          append_arg "--dry-run"
-        fi
-        if [[ " $rest " == *" --all "* || " $rest " == *" all "* ]]; then
-          append_arg "--all"
-        fi
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in "${arg_tokens[@]}"; do
+          case "$tok" in
+            --dry-run|dry-run)
+              append_arg "--dry-run"
+              ;;
+            --all|all)
+              append_arg "--all"
+              ;;
+            *)
+              refuse "${verb}" "$tok" "--dry-run, dry-run, --all, all"
+              ;;
+          esac
+        done
         ;;
       ready)
         command="ready"
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in "${arg_tokens[@]}"; do
+          refuse "${verb}" "$tok" "(no arguments)"
+        done
         ;;
       approve)
         command="approved"
@@ -171,17 +204,37 @@ case "${GITHUB_EVENT_NAME:-}" in
         ;;
       preview|plan)
         command="preview"
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in "${arg_tokens[@]}"; do
+          refuse "${verb}" "$tok" "(no arguments)"
+        done
         append_arg "--plan-requested"
         ;;
       unlock)
         command="unlock"
-        read -r first _ <<< "$rest"
-        if [[ -n "${first:-}" && "$first" != -* && "$first" == */* ]]; then
-          unlock_ref="$first"
-        fi
-        if [[ " $rest " == *" --force "* || " $rest " == *" force "* ]]; then
-          append_arg "--force"
-        fi
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in "${arg_tokens[@]}"; do
+          case "$tok" in
+            --force|force)
+              append_arg "--force"
+              ;;
+            -*)
+              refuse "${verb}" "$tok" "--force, force, <project/stack> (at most one)"
+              ;;
+            */*)
+              if [[ -n "$unlock_ref" ]]; then
+                refuse "${verb}" "$tok" "--force, force, <project/stack> (at most one)"
+              fi
+              unlock_ref="$tok"
+              ;;
+            *)
+              # A slash-less positional is ambiguous (stack? project?):
+              # silently ignoring it unlocked every stack for the PR
+              # instead of the one the commenter meant.
+              refuse "${verb}" "$tok" "--force, force, <project/stack> (at most one)"
+              ;;
+          esac
+        done
         ;;
       explain)
         command="run explain"
@@ -192,10 +245,16 @@ case "${GITHUB_EVENT_NAME:-}" in
         if [[ -n "${first:-}" && "$first" != -* ]]; then
           append_arg "--stack"
           append_arg "$first"
+        elif [[ -n "${first:-}" ]]; then
+          refuse "${verb}" "$first" "<project/stack> (at most one)"
         fi
         ;;
       help)
         command="pr-help"
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in "${arg_tokens[@]}"; do
+          refuse "${verb}" "$tok" "(no arguments)"
+        done
         ;;
       *)
         skip "Unknown reeve command '${verb:-}', skipping."
