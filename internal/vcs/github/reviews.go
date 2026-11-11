@@ -234,7 +234,39 @@ func (c *Client) ChecksGreen(ctx context.Context, sha string, opts vcs.ChecksGre
 		}
 	}
 
+	// Commit statuses (legacy, separate from check runs) are fetched before
+	// the zero-evidence decision: statuses are the second kind of check
+	// evidence, and zero check runs WITH statuses is not the same thing as
+	// zero evidence. A combined "pending" state still blocks like a
+	// non-completed check_run; the subtlety stays: GitHub reports "pending"
+	// with an EMPTY list when a commit has no statuses at all.
+	var state string
+	var statuses []*gh.RepoStatus
+	stOpt := &gh.ListOptions{PerPage: 100}
+	for {
+		st, resp, err := c.gh.Repositories.GetCombinedStatus(ctx, c.owner, c.repo, sha, stOpt)
+		if err != nil {
+			return false, nil, fmt.Errorf("combined status: %w", err)
+		}
+		state = st.GetState()
+		statuses = append(statuses, st.Statuses...)
+		if resp.NextPage == 0 {
+			break
+		}
+		stOpt.Page = resp.NextPage
+	}
+
 	var failing []string
+	// Zero evidence is not passing evidence: no check runs and no statuses
+	// means nothing was observed on this commit. The old behavior read that
+	// empty result as green, so a silent CI outage, a misconfigured
+	// repository, or a repo with no checks at all passed the required-
+	// checks gate. Zero checks is a denial unless the operator opted out
+	// (repos where reeve is the ONLY check).
+	if len(checkRuns) == 0 && len(statuses) == 0 && !opts.AllowZeroChecks {
+		logger.Debug("zero checks observed", "sha", sha)
+		return false, []string{fmt.Sprintf("Required checks: no check runs found on %s. Zero checks is not treated as passing. Wait for CI, or set preconditions.allow_zero_checks if this repo has no other checks.", sha)}, nil
+	}
 	for _, r := range checkRuns {
 		name, status, conclusion, url := r.GetName(), r.GetStatus(), r.GetConclusion(), r.GetDetailsURL()
 		logger.Debug("check_run inspected",
@@ -272,27 +304,6 @@ func (c *Client) ChecksGreen(ctx context.Context, sha string, opts vcs.ChecksGre
 		}
 	}
 
-	// Commit statuses (legacy, separate from check runs). A combined state of
-	// "pending" must block just like a non-completed check_run: a status that
-	// hasn't reported yet is a check still running, not a passing one.
-	// GitHub's own required-checks gate blocks on pending statuses too. The
-	// one subtlety: GitHub reports "pending" with an EMPTY status list when a
-	// commit has no statuses at all, so an empty list never blocks.
-	var state string
-	var statuses []*gh.RepoStatus
-	stOpt := &gh.ListOptions{PerPage: 100}
-	for {
-		st, resp, err := c.gh.Repositories.GetCombinedStatus(ctx, c.owner, c.repo, sha, stOpt)
-		if err != nil {
-			return false, nil, fmt.Errorf("combined status: %w", err)
-		}
-		state = st.GetState()
-		statuses = append(statuses, st.Statuses...)
-		if resp.NextPage == 0 {
-			break
-		}
-		stOpt.Page = resp.NextPage
-	}
 	logger.Debug("combined_status", "state", state, "n", len(statuses))
 	if (state == "failure" || state == "error" || state == "pending") && len(statuses) > 0 {
 		before := len(failing)

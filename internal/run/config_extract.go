@@ -84,6 +84,9 @@ func toPreconditionsConfig(s *schemas.Shared) preconditions.Config {
 	if s.Preconditions.RequireChecksPassing != nil {
 		out.RequireChecksPassing = *s.Preconditions.RequireChecksPassing
 	}
+	if s.Preconditions.AllowZeroChecks != nil {
+		out.AllowZeroChecks = *s.Preconditions.AllowZeroChecks
+	}
 	// Omitted takes the 4h default; an explicit "0" is the deliberate
 	// opt-out. An unparseable value cannot reach here - Config.Validate
 	// rejects it, so a typo can no longer silently leave the gate at zero

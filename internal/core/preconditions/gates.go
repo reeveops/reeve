@@ -5,6 +5,7 @@ package preconditions
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -57,8 +58,13 @@ type GateResult struct {
 
 // Config carries the user-configurable surface from shared.yaml.
 type Config struct {
-	RequireUpToDate         bool
-	RequireChecksPassing    bool
+	RequireUpToDate      bool
+	RequireChecksPassing bool
+	// AllowZeroChecks opts a repository into treating zero observed checks
+	// as passing (repos where reeve is the only check). Default is a
+	// denial - the adapter reports zero evidence as not-green; this config
+	// feeds the opt-out into the checks opts.
+	AllowZeroChecks         bool
 	PreviewFreshness        time.Duration // 0 disables the gate
 	PreviewMaxCommitsBehind int
 	// FailOnForkPRs: if true, apply is denied on fork PRs with no opt-in.
@@ -78,6 +84,10 @@ type Inputs struct {
 	UpToDate         bool
 	CommitsBehind    int
 	ChecksGreen      bool
+	// ChecksFailures carries the adapter's failing-check detail (or the
+	// zero-evidence refusal) so the gate reason names what actually failed
+	// instead of a bare "not passing".
+	ChecksFailures []string
 
 	// Preview artifact state.
 	HasFreshPreview  bool
@@ -230,6 +240,9 @@ func evalGateBase(g GateID, cfg Config, in Inputs) GateResult {
 		}
 		if in.ChecksGreen {
 			return pass(g, "required checks passing")
+		}
+		if len(in.ChecksFailures) > 0 {
+			return fail(g, strings.Join(in.ChecksFailures, "; "))
 		}
 		return fail(g, "required checks are not passing")
 
