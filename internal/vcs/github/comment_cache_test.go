@@ -8,22 +8,36 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	gh "github.com/google/go-github/v66/github"
 )
 
+// withSelfIdentity points the fake client's identity endpoint at a known
+// login, matching what every marker comment fixture below is authored by.
+func withSelfIdentity(mux *http.ServeMux) {
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		fmt.Fprint(w, `{"login":"reeve-bot"}`)
+	})
+}
+
 func TestUpsertCommentReusesOneSnapshotAcrossMarkers(t *testing.T) {
 	var lists, edits int
 	mux := http.NewServeMux()
+	withSelfIdentity(mux)
 	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %s, want GET", r.Method)
 		}
 		lists++
 		fmt.Fprint(w, `[
-			{"id":1,"body":"<!-- marker:one -->"},
-			{"id":2,"body":"<!-- marker:two -->"}
+			{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:one -->"},
+			{"id":2,"user":{"login":"reeve-bot"},"body":"<!-- marker:two -->"}
 		]`)
 	})
 	mux.HandleFunc("/repos/o/r/issues/comments/", func(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +116,7 @@ func TestCommentApprovalReadRefreshesSnapshot(t *testing.T) {
 func TestPostCommentUpdatesExistingSnapshot(t *testing.T) {
 	var lists, creates, edits int
 	mux := http.NewServeMux()
+	withSelfIdentity(mux)
 	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -109,7 +124,7 @@ func TestPostCommentUpdatesExistingSnapshot(t *testing.T) {
 			fmt.Fprint(w, `[]`)
 		case http.MethodPost:
 			creates++
-			fmt.Fprint(w, `{"id":9,"body":"<!-- marker:posted --> created"}`)
+			fmt.Fprint(w, `{"id":9,"user":{"login":"reeve-bot"},"body":"<!-- marker:posted --> created"}`)
 		default:
 			t.Fatalf("method = %s, want GET or POST", r.Method)
 		}
@@ -119,7 +134,7 @@ func TestPostCommentUpdatesExistingSnapshot(t *testing.T) {
 			t.Fatalf("method = %s, want PATCH", r.Method)
 		}
 		edits++
-		fmt.Fprint(w, `{"id":9,"body":"<!-- marker:posted --> updated"}`)
+		fmt.Fprint(w, `{"id":9,"user":{"login":"reeve-bot"},"body":"<!-- marker:posted --> updated"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -170,6 +185,7 @@ func TestIssueCommentSnapshotDoesNotAliasCacheMutations(t *testing.T) {
 func TestUpsertCommentCachesCreatedComment(t *testing.T) {
 	var lists, creates, edits int
 	mux := http.NewServeMux()
+	withSelfIdentity(mux)
 	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -177,7 +193,7 @@ func TestUpsertCommentCachesCreatedComment(t *testing.T) {
 			fmt.Fprint(w, `[]`)
 		case http.MethodPost:
 			creates++
-			fmt.Fprint(w, `{"id":9,"body":"<!-- marker:new --> created"}`)
+			fmt.Fprint(w, `{"id":9,"user":{"login":"reeve-bot"},"body":"<!-- marker:new --> created"}`)
 		default:
 			t.Fatalf("method = %s, want GET or POST", r.Method)
 		}
@@ -200,16 +216,119 @@ func TestUpsertCommentCachesCreatedComment(t *testing.T) {
 	}
 }
 
+// TestUpsertCommentSkipsForeignMarkerComment pins the author boundary: a
+// comment by ANOTHER author that merely contains the marker is not
+// overwritten. The previous behavior matched any comment whose body
+// contained the marker and rewrote it, destroying someone else's text -
+// e.g. a maintainer quoting reeve's board.
+func TestUpsertCommentSkipsForeignMarkerComment(t *testing.T) {
+	var lists, creates, edits int
+	mux := http.NewServeMux()
+	withSelfIdentity(mux)
+	// A foreign comment quoting the marker. Nothing of reeve's exists.
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			lists++
+			fmt.Fprint(w, `[{"id":1,"user":{"login":"maintainer"},"body":"<!-- marker:one --> quoted board"}]`)
+		case http.MethodPost:
+			creates++
+			fmt.Fprint(w, `{"id":2,"user":{"login":"reeve-bot"},"body":"<!-- marker:one --> recreated"}`)
+		default:
+			t.Fatalf("method = %s", r.Method)
+		}
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
+		edits++
+		t.Error("a foreign comment must never be edited")
+		fmt.Fprint(w, `{}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newFakeClient(t, srv)
+
+	if err := c.UpsertComment(context.Background(), 12, "<!-- marker:one --> fresh", "<!-- marker:one -->"); err != nil {
+		t.Fatal(err)
+	}
+	if edits != 0 || creates != 1 {
+		t.Fatalf("edits = %d, creates = %d; want 0 edits and 1 create", edits, creates)
+	}
+}
+
+// TestUpsertCommentEditsOnlyOwnComment: two comments carry the marker, one
+// foreign and one authored by the token's identity; only the own one is
+// edited.
+func TestUpsertCommentEditsOnlyOwnComment(t *testing.T) {
+	var edited int64
+	mux := http.NewServeMux()
+	withSelfIdentity(mux)
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[
+			{"id":1,"user":{"login":"maintainer"},"body":"<!-- marker:one --> quoted"},
+			{"id":2,"user":{"login":"reeve-bot"},"body":"<!-- marker:one --> reeve board"}
+		]`)
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("foreign comment must not be edited")
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/2", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&edited, 1)
+		fmt.Fprint(w, `{"id":2,"user":{"login":"reeve-bot"},"body":"<!-- marker:one --> updated"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newFakeClient(t, srv)
+
+	if err := c.UpsertComment(context.Background(), 12, "<!-- marker:one --> updated", "<!-- marker:one -->"); err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt64(&edited) != 1 {
+		t.Fatalf("own comment edits = %d, want 1", edited)
+	}
+}
+
+// TestUpsertCommentIdentityFailureFailsClosed: when the token's identity
+// cannot be established, the upsert must not touch any comment - neither
+// editing nor creating - instead of guessing which comments are reeve's.
+func TestUpsertCommentIdentityFailureFailsClosed(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "")
+	var edits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"message":"boom"}`)
+	})
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:one -->"}]`)
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
+		edits++
+		t.Error("no comment may be edited when the token identity is unknown")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newFakeClient(t, srv)
+
+	err := c.UpsertComment(context.Background(), 12, "<!-- marker:one --> updated", "<!-- marker:one -->")
+	if err == nil {
+		t.Fatal("an unresolvable token identity must fail the upsert")
+	}
+	if edits != 0 {
+		t.Fatalf("identity failure must edit nothing: edits=%d", edits)
+	}
+}
+
 func TestUpsertCommentRediscoversAfterCachedEditNotFound(t *testing.T) {
 	var lists, edits int
 	mux := http.NewServeMux()
+	withSelfIdentity(mux)
 	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, _ *http.Request) {
 		lists++
 		id := 1
 		if lists > 1 {
 			id = 2
 		}
-		fmt.Fprintf(w, `[{"id":%d,"body":"<!-- marker:stale -->"}]`, id)
+		fmt.Fprintf(w, `[{"id":%d,"user":{"login":"reeve-bot"},"body":"<!-- marker:stale -->"}]`, id)
 	})
 	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
 		edits++

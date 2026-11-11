@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -167,8 +168,23 @@ func (c *Client) upsertCommentLocked(ctx context.Context, number int, body, mark
 	if err != nil {
 		return err
 	}
+	// Marker comments are reeve's; ONLY the account the token authenticates
+	// as may be edited. The previous behavior matched any comment whose body
+	// contained the marker and rewrote it, so a foreign comment quoting the
+	// marker (e.g. a maintainer quoting the board) was destroyed. Identity
+	// resolution failing fails the upsert closed: without it reeve cannot
+	// tell its own comments from anyone else's.
+	author, aerr := c.authenticatedCommentAuthor(ctx)
+	if aerr != nil {
+		return aerr
+	}
 	for _, cm := range comments {
 		if !strings.Contains(cm.GetBody(), marker) {
+			continue
+		}
+		if login := cm.GetUser().GetLogin(); login != author {
+			slog.Warn("marker comment belongs to another author; leaving it alone",
+				"author", login, "marker", marker, "pr", number)
 			continue
 		}
 		edited, resp, err := c.gh.Issues.EditComment(ctx, c.owner, c.repo, cm.GetID(), &gh.IssueComment{Body: gh.String(body)})
