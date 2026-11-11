@@ -128,8 +128,8 @@ jobs:
 ```
 
 Paths outside a root do not select its stacks; paths inside it are mapped relative to that root.
-The current shared workflow groups preview concurrency by repository and PR, without the root path: simultaneous calls for different roots can cancel each other.
-For independent concurrent roots, use custom composite-action jobs with a distinct preview concurrency group for each root.
+The shared workflow keys its preview concurrency group by repository, PR, and root path, so previews for different roots of the same PR run concurrently without cancelling each other.
+A new preview for the same root cancels its predecessor, as usual.
 The evolving [reeve-test layout](https://github.com/reeveops/reeve-test#opentofu--terraform-scenarios-tf) demonstrates separate consumer roots.
 
 ## Drift and maintenance callers
