@@ -2,11 +2,11 @@
 experimental = true
 
 [tools]
-go = "1.26.6"
+go = "1.27.4"
 goreleaser = "latest"
-# Pinned >= 2.12: older binaries (e.g. a runner-preinstalled 2.5.0) fail to
-# load .golangci.yml against this repo's `go 1.26.5` directive.
-golangci-lint = "2.12.2"
+# Pinned >= 2.15: this release is built with Go 1.27, so it can load
+# .golangci.yml against this repo's `go 1.27.4` directive.
+golangci-lint = "2.15.0"
 hk = "latest"
 pkl = "latest"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
