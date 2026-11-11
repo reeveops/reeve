@@ -113,7 +113,7 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 			slog.Warn("credential cache cleanup failed", "err", err)
 		}
 	}()
-	if err := run.PulumiLogin(ctx, engineCfg, stateEnv); err != nil {
+	if err := run.PulumiLogin(ctx, engineCfg, stateEnv, nil); err != nil {
 		return err
 	}
 
@@ -308,7 +308,7 @@ func buildDriftAuth(ctx context.Context, authCfg *schemas.Auth, engineCfg *schem
 		cache = auth.NewCredentialCache(registry)
 		source = cache
 	}
-	stateAuthEnv, stateCleanup, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, source)
+	stateAuthEnv, _, stateCleanup, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, source)
 	if err != nil {
 		if cache != nil {
 			return nil, nil, nil, nil, errors.Join(err, cache.Close())
@@ -318,7 +318,7 @@ func buildDriftAuth(ctx context.Context, authCfg *schemas.Auth, engineCfg *schem
 	stateEnv := mergeDriftEnv(executionEnv, stateAuthEnv)
 	var stateMu sync.RWMutex
 	resolver := func(ctx context.Context, ref string) (map[string]string, func(), error) {
-		env, cleanup, err := run.ResolveAuthEnvWith(ctx, authCfg, source, ref, auth.ModeDrift, run.LocalAuth{})
+		env, _, cleanup, err := run.ResolveAuthEnvWith(ctx, authCfg, source, ref, auth.ModeDrift, run.LocalAuth{})
 		if err != nil {
 			return nil, cleanup, err
 		}
@@ -333,7 +333,7 @@ func buildDriftAuth(ctx context.Context, authCfg *schemas.Auth, engineCfg *schem
 			if err := cache.InvalidateAll(); err != nil {
 				return nil, func() {}, err
 			}
-			refreshedStateAuth, releaseState, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, cache)
+			refreshedStateAuth, _, releaseState, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, cache)
 			if err != nil {
 				return nil, releaseState, err
 			}

@@ -83,9 +83,12 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 			"CLOUDSDK_AUTH_ACCESS_TOKEN":     saToken,
 			"GOOGLE_OAUTH_ACCESS_TOKEN":      saToken,
 		},
-		Kind:      "gcp-sa",
-		Source:    p.name,
-		ExpiresAt: expiresAt,
+		// The tokens are credentials; the credentials-file PATH is not a
+		// secret value.
+		SecretEnvKeys: []string{"CLOUDSDK_AUTH_ACCESS_TOKEN", "GOOGLE_OAUTH_ACCESS_TOKEN"},
+		Kind:          "gcp-sa",
+		Source:        p.name,
+		ExpiresAt:     expiresAt,
 		Cleanup: func() error {
 			return os.RemoveAll(credDir)
 		},

@@ -313,6 +313,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	// docs-only or outside-root change cannot acquire credentials or start an
 	// engine session for zero stacks.
 	var stateEnv map[string]string
+	var stateSecrets map[string]struct{}
 	var credentialSource credentialAcquirer
 	if len(target) > 0 {
 		if in.AuthRegistry != nil {
@@ -331,21 +332,21 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 		}
 		defer executionCleanup()
 		var stateCleanup CleanupFunc
-		stateEnv, stateCleanup, err = resolveStateAuthEnv(ctx, in.Config, credentialSource)
+		stateEnv, stateSecrets, stateCleanup, err = resolveStateAuthEnv(ctx, in.Config, credentialSource)
 		if err != nil {
 			outcome = "failed"
 			return nil, err
 		}
 		defer stateCleanup()
 		stateEnv = mergeEnv(executionEnv, stateEnv)
-		if err := PulumiLogin(ctx, in.Config, stateEnv); err != nil {
+		if err := PulumiLogin(ctx, in.Config, stateEnv, stateSecrets); err != nil {
 			outcome = "failed"
 			return nil, err
 		}
 	}
 
 	appCfg := toApprovalsConfig(in.Shared)
-	summaries := runPreviewTargets(ctx, in, otelProvider, target, runID, stateEnv, appCfg, credentialSource)
+	summaries := runPreviewTargets(ctx, in, otelProvider, target, runID, stateEnv, stateSecrets, appCfg, credentialSource)
 
 	sort := "status_grouped"
 	if in.Shared != nil && in.Shared.Comments.Sort != "" {
@@ -476,7 +477,7 @@ type previewTarget struct {
 // runPreviewTargets previews independent project directories concurrently.
 // Stacks sharing a directory stay serial because engine working data and
 // workspace selection are scoped to that directory.
-func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, target []discovery.Stack, runID string, stateEnv map[string]string, appCfg approvals.Config, credentialSource credentialAcquirer) []summary.StackSummary {
+func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, target []discovery.Stack, runID string, stateEnv map[string]string, stateSecrets map[string]struct{}, appCfg approvals.Config, credentialSource credentialAcquirer) []summary.StackSummary {
 	if len(target) == 0 {
 		return nil
 	}
@@ -511,7 +512,7 @@ func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeve
 					s := item.stack
 					slog.Info("preview stack starting", "stack", s.Ref(), "n", item.index+1, "of", len(target))
 					stackStart := time.Now()
-					ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv, credentialSource)
+					ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv, stateSecrets, credentialSource)
 					rules := approvals.Resolve(appCfg, s.Ref())
 					ss.RequiredApprovers = rules.Approvers
 					summaries[item.index] = ss
@@ -540,10 +541,10 @@ func previewParallelism(in PreviewInput) int {
 	return parallel
 }
 
-func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string, credentialSource credentialAcquirer) summary.StackSummary {
+func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string, stateSecrets map[string]struct{}, credentialSource credentialAcquirer) summary.StackSummary {
 	redactor := BuildRedactor(in.Shared)
 
-	authEnv, authCleanup, authErr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModePreview,
+	authEnv, authSecrets, authCleanup, authErr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModePreview,
 		LocalAuth{Enabled: in.Local, Providers: in.LocalAuthProviders})
 	if authErr != nil {
 		redactedErr := redactor.Redact(authErr.Error())
@@ -555,9 +556,13 @@ func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel
 	}
 	defer authCleanup()
 	authEnv = mergeEnv(stateEnv, authEnv)
-	// Register every credential literal with the redactor - if any leaks
-	// into stdout, it gets scrubbed.
-	for _, v := range authEnv {
+	// Register only provider-marked secret VALUES with the redactor - if
+	// any leaks into stdout, it gets scrubbed; region and path values stay
+	// readable.
+	for v := range authSecrets {
+		redactor.AddSecret(v)
+	}
+	for v := range stateSecrets {
 		redactor.AddSecret(v)
 	}
 

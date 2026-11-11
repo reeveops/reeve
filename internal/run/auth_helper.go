@@ -30,15 +30,16 @@ type CredentialAcquirer interface {
 
 type credentialAcquirer = CredentialAcquirer
 
-// ResolveAuthEnv returns the merged env var map for a single stack + mode
-// plus a cleanup func the caller defers. If cfg is nil or has no bindings,
-// it returns an empty map and the engine receives no workload credentials.
+// ResolveAuthEnv returns the merged env var map for a single stack + mode,
+// the values to register as secrets for redaction, plus a cleanup func the
+// caller defers. If cfg is nil or has no bindings, it returns empty results
+// and the engine receives no workload credentials.
 //
 // The cleanup func runs every Credential.Cleanup the providers attached
 // (e.g. removing the GCP WIF on-disk credential file). Cleanup errors are
 // logged but never propagated - they happen at end-of-run so the work has
 // already shipped.
-func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Registry, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
+func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Registry, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, map[string]struct{}, CleanupFunc, error) {
 	if registry == nil {
 		return resolveAuthEnv(ctx, cfg, nil, stackRef, mode, local)
 	}
@@ -46,14 +47,21 @@ func ResolveAuthEnv(ctx context.Context, cfg *schemas.Auth, registry *auth.Regis
 }
 
 // ResolveAuthEnvWith resolves stack auth through an invocation-scoped source.
-func ResolveAuthEnvWith(ctx context.Context, cfg *schemas.Auth, acquirer CredentialAcquirer, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
+func ResolveAuthEnvWith(ctx context.Context, cfg *schemas.Auth, acquirer CredentialAcquirer, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, map[string]struct{}, CleanupFunc, error) {
 	return resolveAuthEnv(ctx, cfg, acquirer, stackRef, mode, local)
 }
 
-func resolveAuthEnv(ctx context.Context, cfg *schemas.Auth, acquirer credentialAcquirer, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, CleanupFunc, error) {
+// resolveAuthEnv resolves the stack's providers and returns the merged env
+// var map plus the values to register as secrets for redaction. Secret
+// registration is NARROW: a credential that classifies
+// (Credential.SecretEnvKeys) registers only its named values, so region and
+// path values stay readable in engine output; a credential that does not
+// classify fails closed and registers every value (over-redact, never
+// under-redact).
+func resolveAuthEnv(ctx context.Context, cfg *schemas.Auth, acquirer credentialAcquirer, stackRef string, mode auth.Mode, local LocalAuth) (map[string]string, map[string]struct{}, CleanupFunc, error) {
 	noop := func() {}
 	if cfg == nil || acquirer == nil {
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 	bindings := make([]auth.Binding, 0, len(cfg.Bindings))
 	for _, b := range cfg.Bindings {
@@ -74,20 +82,47 @@ func resolveAuthEnv(ctx context.Context, cfg *schemas.Auth, acquirer credentialA
 		LocalProviders: local.Providers,
 	})
 	if len(names) == 0 {
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 	env, creds, err := acquirer.AcquireAll(ctx, names)
 	if err != nil {
 		if local.Enabled {
-			return nil, noop, fmt.Errorf("acquire creds for %s (%s): %w\nhint: in --local runs, bind local-safe providers (aws_profile/aws_sso/gcloud_adc) via a `local:` list on the binding in .reeve/auth.yaml, or pass --local-auth <provider>", stackRef, mode, err)
+			return nil, nil, noop, fmt.Errorf("acquire creds for %s (%s): %w\nhint: in --local runs, bind local-safe providers (aws_profile/aws_sso/gcloud_adc) via a `local:` list on the binding in .reeve/auth.yaml, or pass --local-auth <provider>", stackRef, mode, err)
 		}
-		return nil, noop, fmt.Errorf("acquire creds for %s (%s): %w", stackRef, mode, err)
+		return nil, nil, noop, fmt.Errorf("acquire creds for %s (%s): %w", stackRef, mode, err)
 	}
-	return env, credentialCleanup(creds), nil
+	return env, authSecretValues(creds), credentialCleanup(creds), nil
+}
+
+// authSecretValues resolves the values that must be registered as secrets
+// for the redaction registry. Secrets are opt-out per credential through
+// Credential.SecretEnvKeys; nil keeps the fail-closed default: every value
+// is a secret.
+func authSecretValues(creds []*auth.Credential) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, c := range creds {
+		if c == nil {
+			continue
+		}
+		if c.SecretEnvKeys == nil {
+			for _, v := range c.Env {
+				if v != "" {
+					out[v] = struct{}{}
+				}
+			}
+			continue
+		}
+		for _, k := range c.SecretEnvKeys {
+			if v, ok := c.Env[k]; ok && v != "" {
+				out[v] = struct{}{}
+			}
+		}
+	}
+	return out
 }
 
 // ResolveStateAuthEnv acquires the provider selected by engine.state.
-func ResolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, registry *auth.Registry) (map[string]string, CleanupFunc, error) {
+func ResolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, registry *auth.Registry) (map[string]string, map[string]struct{}, CleanupFunc, error) {
 	if registry == nil {
 		return resolveStateAuthEnv(ctx, engine, nil)
 	}
@@ -95,22 +130,29 @@ func ResolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, registry *
 }
 
 // ResolveStateAuthEnvWith resolves state auth through an invocation-scoped source.
-func ResolveStateAuthEnvWith(ctx context.Context, engine *schemas.Engine, acquirer CredentialAcquirer) (map[string]string, CleanupFunc, error) {
+func ResolveStateAuthEnvWith(ctx context.Context, engine *schemas.Engine, acquirer CredentialAcquirer) (map[string]string, map[string]struct{}, CleanupFunc, error) {
 	return resolveStateAuthEnv(ctx, engine, acquirer)
 }
 
-func resolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, acquirer credentialAcquirer) (map[string]string, CleanupFunc, error) {
+func resolveStateAuthEnv(ctx context.Context, engine *schemas.Engine, acquirer credentialAcquirer) (map[string]string, map[string]struct{}, CleanupFunc, error) {
 	noop := func() {}
+	stateSecrets := map[string]struct{}{}
 	secretsEnv := stateSecretsEnv(engine)
+	if passphrase, ok := secretsEnv["PULUMI_CONFIG_PASSPHRASE"]; ok && passphrase != "" {
+		stateSecrets[passphrase] = struct{}{}
+	}
 	if engine == nil || acquirer == nil || engine.Engine.State.AuthProvider == "" {
-		return secretsEnv, noop, nil
+		return secretsEnv, stateSecrets, noop, nil
 	}
 	name := engine.Engine.State.AuthProvider
 	env, creds, err := acquirer.AcquireAll(ctx, []string{name})
 	if err != nil {
-		return nil, noop, fmt.Errorf("acquire state auth provider %q: %w", name, err)
+		return nil, nil, noop, fmt.Errorf("acquire state auth provider %q: %w", name, err)
 	}
-	return mergeEnv(secretsEnv, env), credentialCleanup(creds), nil
+	for v := range authSecretValues(creds) {
+		stateSecrets[v] = struct{}{}
+	}
+	return mergeEnv(secretsEnv, env), stateSecrets, credentialCleanup(creds), nil
 }
 
 // stateSecretsEnv bridges an explicitly configured state passphrase into the

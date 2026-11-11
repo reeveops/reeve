@@ -75,9 +75,10 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 		Env: map[string]string{
 			"GITHUB_TOKEN": out.Token,
 		},
-		Kind:      "github-app",
-		Source:    p.name,
-		ExpiresAt: out.ExpiresAt,
+		SecretEnvKeys: []string{"GITHUB_TOKEN"},
+		Kind:          "github-app",
+		Source:        p.name,
+		ExpiresAt:     out.ExpiresAt,
 	}, nil
 }
 
