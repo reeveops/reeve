@@ -47,25 +47,34 @@ const digestSep = "__"
 // only. The lock store reads a lock's project/stack from the object's own
 // content rather than parsing them back out of its key.
 func SlugComponent(s, fallback string) string {
-	if s == "" {
-		return passthroughOrDigest(fallback)
-	}
-	return passthroughOrDigest(s)
-}
-
-func passthroughOrDigest(s string) string {
-	if s == "" {
-		return "key" // nothing usable was supplied at all
-	}
-	if isPassthrough(s) {
+	// The ONLY inputs returned verbatim are non-empty pass-through names.
+	// Everything else - including the empty string - lands in the
+	// transformed namespace, which always contains digestSep and which no
+	// pass-through name can reach. An earlier version returned the fallback
+	// verbatim for empty input, so an empty stack name and a stack
+	// literally named "stack" addressed the same lock.
+	if s != "" && isPassthrough(s) {
 		return s
 	}
-	sanitised, _ := sanitizeComponent(s)
-	if strings.Trim(sanitised, "_") == "" {
-		// Nothing survived (e.g. "///"); the digest alone identifies it.
-		sanitised = "key"
+	base, _ := sanitizeComponent(s)
+	if strings.Trim(base, "_") == "" {
+		// Nothing usable survived (empty input, or "///"). The fallback
+		// only supplies something readable to look at; the digest is what
+		// identifies it.
+		base = sanitizeFallback(fallback)
 	}
-	return sanitised + digestSep + shortHash(s)
+	return base + digestSep + shortHash(s)
+}
+
+// sanitizeFallback makes a caller-supplied fallback safe to embed. It never
+// reaches the pass-through namespace on its own - the digest is appended by
+// the caller - so it only has to be free of unsafe runes.
+func sanitizeFallback(fb string) string {
+	b, _ := sanitizeComponent(fb)
+	if strings.Trim(b, "_") == "" {
+		return "key"
+	}
+	return b
 }
 
 // isPassthrough reports whether a name is safe to use verbatim. The set
