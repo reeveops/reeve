@@ -63,6 +63,40 @@ if [[ -n "${REEVE_INPUT_COMMAND:-}" ]]; then
     printf 'command input must be a single line\n' >&2
     exit 1
   fi
+  # An explicit command used to return before every actor check: the caller
+  # was assumed trusted. On comment events it now passes the same bot and
+  # association gates as a comment command, so an explicit command can no
+  # longer smuggle a run past the authorization a comment command would get.
+  # Other events (workflow_dispatch, schedule, push) keep dispatching
+  # unchanged: their caller is the workflow, not a comment.
+  case "${GITHUB_EVENT_NAME:-}" in
+    issue_comment)
+      actor_type=$(jq -r '.comment.user.type // ""' < "$GITHUB_EVENT_PATH")
+      actor_login=$(jq -r '.comment.user.login // ""' < "$GITHUB_EVENT_PATH")
+      if [[ "$actor_type" == "Bot" || "$actor_login" == *"[bot]" ]]; then
+        printf '%s refused: @%s is a bot (self-trigger guard); only a human may pass command.\n' "${REEVE_INPUT_COMMAND}" "${actor_login}" >&2
+        exit 1
+      fi
+      association=$(jq -r '.comment.author_association // "NONE"' < "$GITHUB_EVENT_PATH")
+      if ! authorized_association "$association"; then
+        printf '%s refused: @%s has association %s; allowed: %s.\n' "${REEVE_INPUT_COMMAND}" "${actor_login}" "$association" "${REEVE_ALLOWED_ASSOCIATIONS:-OWNER,MEMBER,COLLABORATOR}" >&2
+        exit 1
+      fi
+      ;;
+    pull_request_review)
+      actor_type=$(jq -r '.review.user.type // ""' < "$GITHUB_EVENT_PATH")
+      actor_login=$(jq -r '.review.user.login // ""' < "$GITHUB_EVENT_PATH")
+      if [[ "$actor_type" == "Bot" || "$actor_login" == *"[bot]" ]]; then
+        printf '%s refused: @%s is a bot (self-trigger guard); only a human may pass command.\n' "${REEVE_INPUT_COMMAND}" "${actor_login}" >&2
+        exit 1
+      fi
+      association=$(jq -r '.review.author_association // "NONE"' < "$GITHUB_EVENT_PATH")
+      if ! authorized_association "$association"; then
+        printf '%s refused: @%s has association %s; allowed: %s.\n' "${REEVE_INPUT_COMMAND}" "${actor_login}" "$association" "${REEVE_ALLOWED_ASSOCIATIONS:-OWNER,MEMBER,COLLABORATOR}" >&2
+        exit 1
+      fi
+      ;;
+  esac
   run=true
   command="$REEVE_INPUT_COMMAND"
   emit
