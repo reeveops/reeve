@@ -20,7 +20,9 @@ import (
 )
 
 // PulumiLogin runs `pulumi login <backendURL>` if a backend URL is configured.
-func PulumiLogin(ctx context.Context, cfg *schemas.Engine, env map[string]string) error {
+// secretValues carries the provider-marked credential values for redacting
+// the login failure output; region and path values stay readable.
+func PulumiLogin(ctx context.Context, cfg *schemas.Engine, env map[string]string, secretValues map[string]struct{}) error {
 	if cfg == nil || cfg.Engine.State.URL == "" {
 		return nil
 	}
@@ -42,7 +44,7 @@ func PulumiLogin(ctx context.Context, cfg *schemas.Engine, env map[string]string
 	cmd.Env = childEnv
 	if err = cmd.Run(); err != nil {
 		r := redact.New()
-		for _, value := range env {
+		for value := range secretValues {
 			r.AddSecret(value)
 		}
 		message := strings.TrimSpace(r.Redact(output.String()))

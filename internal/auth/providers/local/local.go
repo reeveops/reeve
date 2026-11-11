@@ -31,7 +31,9 @@ func (p *AWSProfile) Acquire(ctx context.Context) (*auth.Credential, error) {
 		env["AWS_REGION"] = p.Region
 		env["AWS_DEFAULT_REGION"] = p.Region
 	}
-	return &auth.Credential{Env: env, Kind: "aws-profile", Source: p.ProviderName}, nil
+	// A profile name and region values are not credentials: nothing here
+	// is registered for redaction.
+	return &auth.Credential{Env: env, SecretEnvKeys: []string{}, Kind: "aws-profile", Source: p.ProviderName}, nil
 }
 
 // AWSSSO is a thin wrapper that asks the AWS SDK to use the SSO login
@@ -54,7 +56,9 @@ func (p *AWSSSO) Acquire(ctx context.Context) (*auth.Credential, error) {
 		env["AWS_REGION"] = p.Region
 		env["AWS_DEFAULT_REGION"] = p.Region
 	}
-	return &auth.Credential{Env: env, Kind: "aws-sso", Source: p.ProviderName}, nil
+	// A profile name and region values are not credentials: nothing here
+	// is registered for redaction.
+	return &auth.Credential{Env: env, SecretEnvKeys: []string{}, Kind: "aws-sso", Source: p.ProviderName}, nil
 }
 
 // GcloudADC expects application-default credentials are already set up.
@@ -75,11 +79,13 @@ func (p *GcloudADC) Acquire(ctx context.Context) (*auth.Credential, error) {
 		return nil, fmt.Errorf("gcloud_adc %q: cannot locate home directory: %w", p.ProviderName, err)
 	}
 	adc := filepath.Join(home, ".config", "gcloud", "application_default_credentials.json")
+	// The credentials-file PATH is not a secret value.
 	return &auth.Credential{
 		Env: map[string]string{
 			"GOOGLE_APPLICATION_CREDENTIALS": adc,
 		},
-		Kind: "gcloud-adc", Source: p.ProviderName,
+		SecretEnvKeys: []string{},
+		Kind:          "gcloud-adc", Source: p.ProviderName,
 	}, nil
 }
 
@@ -113,6 +119,8 @@ func (p *EnvPassthrough) Acquire(ctx context.Context) (*auth.Credential, error) 
 		}
 		env[engineKey] = v
 	}
+	// Every passthrough value is a credential by declaration - the nil
+	// SecretEnvKeys default registers all of them for redaction.
 	return &auth.Credential{Env: env, Kind: "env-passthrough", Source: p.ProviderName}, nil
 }
 
