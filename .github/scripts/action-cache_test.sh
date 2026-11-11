@@ -57,6 +57,40 @@ if grep -q 'uses: actions/cache@' "$ACTION_FILE"; then
   fail "monolithic actions/cache would save in a post-job hook"
 fi
 
+# The restored cache entry is checked against the hash recorded at save time
+# before anything executes it. The cache KEY binds the entry to the action
+# source; the verify step binds the FILE to the bytes that were hashed - a
+# corrupted or tampered entry is deleted and the run rebuilds instead.
+verify_step=$(step_block "Verify cached reeve binary")
+assert_contains "$verify_step" "steps.reeve-cache.outputs.cache-hit == 'true'"
+assert_contains "$verify_step" 'sha256sum "$BIN_DIR/reeve"'
+assert_contains "$verify_step" 'expected=$(cut -d'"'"' '"'"' -f1 "$BIN_DIR/reeve.sha256")'
+assert_contains "$verify_step" 'echo "verified=false" >> "$GITHUB_OUTPUT"'
+assert_contains "$verify_step" 'rm -rf "$BIN_DIR"'
+assert_contains "$verify_step" 'rebuilding from source'
+
+# The save path records the sidecar BEFORE caching, and the cache stores the
+# whole directory (binary + sidecar), not a lone file.
+record_step=$(step_block "Record reeve binary hash")
+assert_contains "$record_step" 'sha256sum "$BIN_DIR/reeve"'
+assert_contains "$record_step" 'reeve.sha256'
+assert_contains "$save_step" "path: \${{ runner.temp }}/reeve-bin"
+if [[ "$save_step" == *"reeve-bin/reeve$"* ]]; then
+  fail "cache must store binary + hash sidecar, not the lone file"
+fi
+assert_contains "$restore_step" "path: \${{ runner.temp }}/reeve-bin"
+
+# Every rebuild-path step also runs when the restored entry failed (or
+# lacked) verification: verified=false means rebuild, never execute.
+rebuild_condition="(steps.reeve-cache.outputs.cache-hit != 'true' || steps.reeve-verify.outputs.verified != 'true')"
+for step_name in "Classify prebuilt binary eligibility" "Fetch prebuilt binary" "Stage Go cache metadata" "Set up Go (from reeve's go.mod)" "Build reeve" "Save reeve binary cache"; do
+  step=$(step_block "$step_name")
+  assert_contains "$step" "$rebuild_condition"
+done
+if [[ "$verify_step" == *"$rebuild_condition"* ]]; then
+  fail "the verify step itself must run on a plain cache hit"
+fi
+
 restore_line=$(step_line "Restore reeve binary cache")
 classify_line=$(step_line "Classify prebuilt binary eligibility")
 cosign_line=$(step_line "Install cosign for binary verification")
