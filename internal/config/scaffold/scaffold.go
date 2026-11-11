@@ -81,6 +81,33 @@ type GitHubWorkflowOptions struct {
 	NeedsOIDC    bool
 }
 
+// Scaffolded engine versions. The shared workflow installs the selected CLI
+// from the version input, so a scaffolded caller MUST name a real version:
+// `latest` installs a moving engine on the PR runner, where a provider or
+// language behavior change can land unnoticed mid-review, and the version a
+// PR previewed is not the version the apply runs days later. The values
+// match the pins used by the documentation and examples (pulumi and
+// terraform) and the engine's current stable release (OpenTofu, which the
+// docs do not pin yet); bump them deliberately with releases.
+const (
+	PinnedPulumiVersion    = "3.262.0"
+	PinnedTerraformVersion = "1.16.2"
+	PinnedOpenTofuVersion  = "1.13.9"
+)
+
+// pinnedVersionInput names the engine-version input a scaffolded caller
+// must set for the given engine.
+func pinnedVersionInput(engine string) string {
+	switch engine {
+	case "terraform":
+		return "terraform_version: " + PinnedTerraformVersion
+	case "tofu":
+		return "opentofu_version: " + PinnedOpenTofuVersion
+	default:
+		return "pulumi_version: " + PinnedPulumiVersion
+	}
+}
+
 // RenderGitHubWorkflow produces the GitOps caller for the public reusable
 // workflow. Ref must be a full commit SHA so generated CI never follows a
 // moving branch or tag.
@@ -96,13 +123,7 @@ func RenderGitHubWorkflow(opts GitHubWorkflowOptions) ([]byte, error) {
 		return nil, fmt.Errorf("workflow ref must be a full 40-character commit SHA")
 	}
 
-	versionInput := "pulumi_version: latest"
-	switch engine {
-	case "terraform":
-		versionInput = "terraform_version: latest"
-	case "tofu":
-		versionInput = "opentofu_version: latest"
-	}
+	versionInput := pinnedVersionInput(engine)
 
 	pullRequestTypes := "opened, reopened, synchronize, ready_for_review"
 	if opts.ApplyTrigger == "merge" {
