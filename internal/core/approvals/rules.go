@@ -184,6 +184,18 @@ func Evaluate(rules Rules, approvals []Approval, pr PR, codeowners map[string][]
 					continue
 				}
 			} else if a.CommitSHA != "" && a.CommitSHA != pr.HeadSHA {
+				// A pr_comment approval bound to anything but the full
+				// 40-character HEAD SHA does not count: the commenter named a
+				// short prefix, a typo, or an old commit. Prefixes of the
+				// current HEAD used to rebind to HEAD silently, which let a
+				// pre-planted 7-character prefix approve a future commit
+				// (committer timestamps are attacker-settable, so prefixes
+				// can be ground). State what was refused, the failing value,
+				// and the next step instead of a bare "dismissed".
+				if a.Source == SourcePRComment && len(a.CommitSHA) != len(pr.HeadSHA) {
+					res.Trace = append(res.Trace, fmt.Sprintf("Approval by @%s ignored: `%s` is not the full 40-character SHA of HEAD `%s`. Re-approve with `/reeve approve %s`.", a.Approver, a.CommitSHA, pr.HeadSHA, pr.HeadSHA))
+					continue
+				}
 				res.Trace = append(res.Trace, fmt.Sprintf("dismissed %s (approval on %s, HEAD is %s)", a.Approver, short(a.CommitSHA), short(pr.HeadSHA)))
 				continue
 			}
