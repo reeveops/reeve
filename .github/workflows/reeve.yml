@@ -150,7 +150,11 @@ jobs:
     env:
       REEVE_SELF_CHECK_NAMES: ${{ inputs.self_check_names }}
     concurrency:
-      group: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) && format('reeve-preview-{0}-{1}', github.repository_id, github.event.pull_request.number) || format('reeve-command-{0}-{1}', github.repository_id, github.run_id) }}
+      # The preview group includes the root input: multi-root shared-workflow
+      # previews for the same PR cancel each other without it (a new preview
+      # for root A must not cancel the still-running preview for root B).
+      # Command-invocation runs are keyed by run id and never cancel.
+      group: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) && format('reeve-preview-{0}-{1}-{2}', github.repository_id, github.event.pull_request.number, inputs.root) || format('reeve-command-{0}-{1}', github.repository_id, github.run_id) }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) }}
     steps:
       - name: Run Reeve GitOps
