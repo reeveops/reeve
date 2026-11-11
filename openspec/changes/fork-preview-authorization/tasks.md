@@ -6,6 +6,7 @@
 - [x] Define early trust classification and fail-closed behavior.
 - [x] Define approved-fork credential selection.
 - [x] Define the worker-isolation prerequisite.
+- [x] Resolve the RC default: credentialed fork engine execution ships DISABLED - every fork preview is validation-only until a working isolated worker and validated approved-fork bindings exist; no key, flag, force, or break-glass path enables it. Recorded in proposal.md and design.md with its delta in specs/core/pr-flow.
 - [ ] Approve the OpenSpec design.
 
 ## Implementation
