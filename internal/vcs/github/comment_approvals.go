@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	gh "github.com/google/go-github/v66/github"
@@ -70,6 +71,28 @@ func commentApprovals(comments []*gh.IssueComment, prefixes []string, verb strin
 		// Authorization gate: identical to the action.yml command gate. An
 		// unauthorized commenter's `/reeve approve` MUST NOT count.
 		if !associationAllowed(cm.GetAuthorAssociation(), allowed) {
+			continue
+		}
+		// Edited comments never approve. The body the gate sees is the edited
+		// one, but the edit can silently change reviewed intent, so the
+		// approval is refused and the commenter is told to re-post. GitHub
+		// moves updated_at when a comment is edited; there is no API field
+		// distinguishing body edits from other metadata edits, and the safe
+		// direction is to refuse: over-refusing an editable re-post is cheap,
+		// trusting an edited approval is not.
+		if !cm.GetUpdatedAt().IsZero() && !cm.GetUpdatedAt().Time.Equal(cm.GetCreatedAt().Time) {
+			ap := approvals.Approval{
+				Source:   approvals.SourcePRComment,
+				Approver: login,
+				Note: fmt.Sprintf("Approval by @%s ignored: the comment was edited after posting. Post a new `%s %s` comment.",
+					login, approvals.DefaultCommentCommand, headSHA),
+			}
+			if i, ok := idx[login]; ok {
+				out[i] = ap // the latest state of the comment supersedes
+				continue
+			}
+			idx[login] = len(out)
+			out = append(out, ap)
 			continue
 		}
 		sha, pinned := resolveApprovedCommit(shaArg, headSHA)

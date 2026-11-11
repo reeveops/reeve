@@ -1,6 +1,7 @@
 package approvals
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,38 @@ func TestEvaluateSelfApprovalIgnored(t *testing.T) {
 	res := Evaluate(rules, approvals, pr, nil, pr.Author, evalNow)
 	if res.Satisfied {
 		t.Fatalf("self-approval should not count: %+v", res)
+	}
+}
+
+// TestEvaluateNoteApprovalIsSkippedWithReason pins the rendering contract for
+// source-authored refusals: an approval carrying a user-facing note neither
+// counts nor disappears silently. The pr_comment source uses this for edited
+// approval comments: the comment that existed before the edit no longer
+// describes what the commenter agreed to.
+func TestEvaluateNoteApprovalIsSkippedWithReason(t *testing.T) {
+	head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	pr := PR{Number: 7, HeadSHA: head, Author: "alice"}
+	rules := Rules{RequiredApprovals: 1, DismissOnNewCommit: true}
+	note := fmt.Sprintf("Approval by @bob ignored: the comment was edited after posting. Post a new `/reeve approve %s` comment.", head)
+	list := []Approval{{Source: SourcePRComment, Approver: "bob", Note: note}}
+
+	res := Evaluate(rules, list, pr, nil, pr.Author, evalNow)
+	if res.Satisfied {
+		t.Fatal("an ignored (noted) approval must not satisfy the gate")
+	}
+	if !traceContains(res.Trace, note) {
+		t.Fatalf("trace must carry the source's refusal verbatim: %v", res.Trace)
+	}
+
+	// Self-approval and dismissal rules do not mask the note: the note is the
+	// authoritative reason and is emitted before any counted/dismissed logic.
+	list = []Approval{{Source: SourcePRComment, Approver: "alice", Note: note}}
+	res = Evaluate(rules, list, pr, nil, pr.Author, evalNow)
+	if res.Satisfied {
+		t.Fatal("an ignored (noted) approval must not satisfy the gate, even for the author")
+	}
+	if !traceContains(res.Trace, note) {
+		t.Fatalf("trace must carry the note even when the commenter is the author: %v", res.Trace)
 	}
 }
 
