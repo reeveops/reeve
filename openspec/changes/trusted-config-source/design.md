@@ -8,6 +8,21 @@ Every PR operation snapshots that SHA once and never resolves a moving branch na
 The VCS adapter reads `.reeve` files at the exact base SHA through the repository contents API.
 The adapter rejects symlinks, submodules, oversized files, duplicate config types, and paths outside `.reeve`.
 
+## Break-glass authorization resolves from the trusted revision (decision)
+
+One semantic decision gates this design: the current break-glass model resolves its authorization surface against the PR HEAD ("Head-resolved; self-add flagged, not forbidden"), while the field ownership table makes `shared.*` - which contains `break_glass:` - trusted-owned.
+The two cannot both hold: as long as break-glass authorization resolves from HEAD, a PR that adds itself to `break_glass.authorized` or grants itself CODEOWNERS ownership of a changed path self-authorizes an emergency override of the very gates that were loaded to constrain it - the `reject_self_authorization` hole the opt-in flag documents, open by default.
+
+Decision: **the entire break-glass authorization surface is trusted-resolved.**
+
+- `break_glass.*` is trusted-owned: the effective configuration reads the base revision, like every other security control.
+- The CODEOWNERS consulted by the `codeowners` break-glass source reads the base revision as well: CODEOWNERS is a head-modifiable file, so head-resolved CODEOWNERS would make self-grant possible through the back door the break-glass list just closed.
+- A PR's own authorization additions therefore take effect only after merge. An operator who needs break-glass authority on the base branch lands it there first.
+- `break_glass.reject_self_authorization` stays accepted and gains a strictly enforceable meaning instead of becoming a no-op: when set, a PR that modifies ANY authorizing file (a `.reeve/*.yaml` config or any CODEOWNERS file) is denied break-glass outright - the trusted list is authoritative, but a PR reaching for the files that authorize it is the exact signal the flag distrusts. Default remains false.
+- The `AuthorizingConfigModified` audit signal stays: the modification is inert for the current run, and the audit record still names every touched path.
+
+The emergency-responder availability story is deliberately traded away: an actor not on the base revision's authorization surface cannot grant it to themselves in the PR being broken for.
+
 ## Two parsed configurations
 
 The existing strict decoder parses trusted bytes and checked-out HEAD bytes independently before any merge.

@@ -5,7 +5,8 @@
 - [x] Define immutable trusted revision resolution.
 - [x] Define field ownership and deny-by-default extension.
 - [x] Define merge, visibility, and preview-to-apply consistency.
-- [ ] Approve the OpenSpec design and ownership table.
+- [x] Resolve the break-glass ownership conflict: the authorization surface (`break_glass.*` + its CODEOWNERS source) is trusted-resolved; `reject_self_authorization` keeps enforceable meaning (deny in self-modifying PRs). Recorded in design.md with its delta in specs/core/approvals.
+- [ ] Approve the OpenSpec design and ownership table (maintainer review - this PR).
 
 ## Implementation
 
