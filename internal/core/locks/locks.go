@@ -5,6 +5,7 @@ package locks
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -73,6 +74,35 @@ var ErrHeldBySamePR = errors.New("lock held by another run of the same PR")
 // hold the lock.
 var ErrNotHolder = errors.New("not the current holder")
 
+// LeaseLostError reports that a refresh-only lease extension found the
+// caller no longer holding the lock. The fields state what the lock looked
+// like at the failed refresh, so the caller can say what remains instead of
+// a bare "lost" - another PR holds it, another run of the same PR holds it,
+// or nobody does (released or reaped).
+type LeaseLostError struct {
+	// Released is true when the lock had no holder at all.
+	Released bool
+	// HeldByPR is the PR recorded as holder when the loss was seen. 0 when
+	// the lock was free.
+	HeldByPR int
+	// HeldByOtherRun reports the caller's own PR holding the lock through a
+	// different run ID.
+	HeldByOtherRun bool
+}
+
+func (e *LeaseLostError) Error() string {
+	switch {
+	case e.Released:
+		return "lease lost: the lock has no holder"
+	case e.HeldByPR != 0 && e.HeldByOtherRun:
+		return fmt.Sprintf("lease lost: now held by another run of PR #%d", e.HeldByPR)
+	case e.HeldByPR != 0:
+		return fmt.Sprintf("lease lost: now held by PR #%d", e.HeldByPR)
+	default:
+		return "lease lost: lock state did not match the caller"
+	}
+}
+
 // NewLock returns a fresh free lock.
 func NewLock(project, stack string, now time.Time) Lock {
 	return Lock{
@@ -139,6 +169,38 @@ func TryAcquire(l Lock, applicant Holder, ttl time.Duration, now time.Time) (Loc
 	})
 	l.UpdatedAt = now.UTC().Format(time.RFC3339)
 	return l, false, nil
+}
+
+// RefreshLease extends the holder's lease when the lock's CURRENT holder
+// still identifies the caller (same PR and run). It is refresh-only: unlike
+// TryAcquire it never evicts a foreign holder, never installs a holder,
+// never adopts a promoted reservation, and never enqueues. Any other state
+// is a *LeaseLostError with the observed lock state, and the lock is
+// returned unchanged.
+//
+// A lease whose own expiry has already passed still refreshes when the
+// stored holder is the caller: the CAS write proves the caller is writing
+// over live state it still owns - if another party had taken over, the
+// conditional write fails and the retry re-reads them as the holder (the
+// same interleaving the acquire path handles). What must never happen is
+// the old heartbeat behavior: reusing TryAcquire, which reinstalled a
+// holder after a force-unlock cleared it and let an ownerless apply run on.
+func RefreshLease(l Lock, pr int, runID string, ttl time.Duration, now time.Time) (Lock, error) {
+	h := l.Holder
+	if h == nil {
+		return l, &LeaseLostError{Released: true}
+	}
+	if h.PR != pr || h.RunID != runID {
+		return l, &LeaseLostError{HeldByPR: h.PR, HeldByOtherRun: h.PR == pr}
+	}
+	refreshed := *h
+	refreshed.ExpiresAt = now.Add(promoteTTL(ttl)).UTC().Format(time.RFC3339)
+	// A live run is refreshing: whatever the provenance was, the holder is
+	// actively held now.
+	refreshed.Promoted = false
+	l.Holder = &refreshed
+	l.UpdatedAt = now.UTC().Format(time.RFC3339)
+	return l, nil
 }
 
 // Release transfers the lock to the next queued applicant (or frees it).

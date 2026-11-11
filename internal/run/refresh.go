@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/reeveops/reeve/internal/audit"
@@ -291,12 +292,22 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		}
 
 		var stopHeartbeat func()
+		var cancelRefreshEngine context.CancelFunc
+		var lostRefresh atomic.Pointer[string]
+		refreshCtx := ctx
 		if acquired && !in.DryRun && in.Locks != nil {
+			// The refresh's engine gets its own cancellable context: a lost
+			// lease aborts the refresh the same way it aborts an apply -
+			// the heartbeat may not refresh it back into ownership.
+			refreshCtx, cancelRefreshEngine = context.WithCancel(ctx)
 			stopHeartbeat = in.Locks.StartHeartbeat(ctx, s.Project, s.Name, corelocks.Holder{
 				PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
-			}, ttl)
+			}, ttl, func(reason string) {
+				lostRefresh.Store(&reason)
+				cancelRefreshEngine()
+			})
 		}
-		res, rerr := in.Engine.Refresh(ctx, s, iac.RefreshOpts{
+		res, rerr := in.Engine.Refresh(refreshCtx, s, iac.RefreshOpts{
 			Cwd:         absJoin(in.RepoRoot, s.Path),
 			Env:         authEnv,
 			TimeoutSec:  ApplyTimeoutSec(in.Config),
@@ -304,6 +315,11 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		})
 		if stopHeartbeat != nil {
 			stopHeartbeat()
+			cancelRefreshEngine()
+		}
+		refreshLost := ""
+		if p := lostRefresh.Load(); p != nil {
+			refreshLost = *p
 		}
 		authCleanup()
 		if !in.DryRun && in.Locks != nil {
@@ -315,6 +331,17 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		ss.PlanSummary = redactor.Redact(res.Summary)
 		ss.FullPlan = redactor.Redact(res.Output)
 		switch {
+		case refreshLost != "":
+			// The lock was lost mid-refresh: state writes can no longer be
+			// attributed to this run. Fail with what was observed; the lock
+			// is not retaken.
+			refreshLostMsg := fmt.Sprintf(
+				"Refresh aborted on %s: lock lost at %s (%s). Engine interrupted; state may be partially refreshed. Run `/reeve preview` to see the current state.",
+				s.Ref(), time.Now().UTC().Format(time.RFC3339), refreshLost)
+			slog.Warn("refresh aborted on lock loss", "stack", s.Ref(), "state", refreshLost)
+			ss.Status = summary.StatusError
+			ss.Error = redactor.Redact(refreshLostMsg)
+			anyFailed = true
 		case rerr != nil:
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(rerr.Error())

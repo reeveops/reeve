@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/reeveops/reeve/internal/audit"
@@ -807,23 +808,58 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		// Lease heartbeat: an apply longer than locking.ttl must not have
 		// its LIVE holder reaped mid-flight (two applies would then run
 		// concurrently). Refreshes every ttl/3 until the engine returns.
+		// The refresh is refresh-only, so a heartbeat can never re-acquire.
+		// When the lease is lost mid-apply (force-unlock, reaper, release)
+		// the engine context is cancelled - the existing SIGINT + 30 s
+		// grace path - and the stack fails with the reason; the lock is
+		// never retaken.
+		engineCtx, cancelEngine := context.WithCancel(stackCtx)
+		defer cancelEngine()
+		var lostReason atomic.Pointer[string]
 		stopHeartbeat := in.Locks.StartHeartbeat(stackCtx, s.Project, s.Name, corelocks.Holder{
 			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
-		}, ttl)
-		res, aerr := in.Engine.Apply(stackCtx, s, iac.ApplyOpts{
+		}, ttl, func(reason string) {
+			lostReason.Store(&reason)
+			cancelEngine()
+		})
+		res, aerr := in.Engine.Apply(engineCtx, s, iac.ApplyOpts{
 			Cwd:        absJoin(in.RepoRoot, s.Path),
 			Env:        authEnv,
 			TimeoutSec: ApplyTimeoutSec(in.Config),
 			PlanPath:   lockedPlan,
 			Refresh:    in.Refresh,
 		})
+		cancelEngine()
 		stopHeartbeat()
+		lockLost := ""
+		if p := lostReason.Load(); p != nil {
+			lockLost = *p
+		}
 		authCleanup()
 		// The plan file is a copy of the engine's change set on the runner's
 		// disk; drop it as soon as the engine is done with it rather than at
 		// the end of the run.
 		planCleanup()
 		stackOutcome := "success"
+		if lockLost != "" {
+			// The lock was lost mid-apply: nobody else's state guarantees
+			// are true of this run anymore. Fail the stack with what was
+			// observed and what to do next; the lock is NOT retaken (the
+			// release below can only remove queue entries a lost run has).
+			aborted := fmt.Sprintf(
+				"Apply aborted on %s: lock lost at %s (%s). Engine interrupted; resources may be partially applied. Run `/reeve preview` to see the current state before re-applying.",
+				s.Ref(), time.Now().UTC().Format(time.RFC3339), lockLost)
+			slog.Warn("apply aborted on lock loss", "stack", s.Ref(), "state", lockLost)
+			ss.Status = summary.StatusError
+			ss.Error = redactor.Redact(aborted)
+			stackOutcome = "aborted"
+			endStack(stackOutcome, time.Since(stackStart).Seconds())
+			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "apply aborted on lock loss")
+			summaries = append(summaries, ss)
+			PostAnnotation(ctx, in.Annotations, annotations.EventApplyFailed,
+				s.Project, s.Name, s.Env, "aborted", ss.Error, in.PRNumber, in.CommitSHA)
+			continue
+		}
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())

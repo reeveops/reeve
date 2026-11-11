@@ -138,17 +138,43 @@ func (s *Store) Release(ctx context.Context, project, stack string, pr int, runI
 	return l, err
 }
 
+// RefreshLease runs the refresh-only transition with optimistic
+// concurrency. It cannot install a holder or enqueue: when the caller no
+// longer holds the lock the call fails with a *corelocks.LeaseLostError
+// and nothing is written.
+func (s *Store) RefreshLease(ctx context.Context, project, stack string, holder corelocks.Holder, ttl time.Duration) error {
+	l, etag, err := s.Get(ctx, project, stack)
+	if err != nil {
+		return err
+	}
+	_, _, err = s.maintain(ctx, s.key(project, stack), lockSnapshot{lock: l, etag: etag}, func(cur corelocks.Lock) (corelocks.Lock, bool, error) {
+		next, ferr := corelocks.RefreshLease(cur, holder.PR, holder.RunID, ttl, s.Now())
+		if ferr != nil {
+			return cur, false, ferr
+		}
+		return next, true, nil
+	})
+	return err
+}
+
 // StartHeartbeat spawns a goroutine that refreshes holder's lease every
 // ttl/3 for as long as the work (an engine apply) runs, so an apply longer
-// than locking.ttl is never evicted by the reaper mid-flight. The refresh
-// reuses TryAcquire: same PR + same RunID is an idempotent lease extension.
+// than locking.ttl is never evicted by the reaper mid-flight.
+//
+// The refresh is refresh-ONLY (RefreshLease): a heartbeat can never install
+// a holder or enqueue. When the lease is lost - released, reaped, or
+// force-unlocked mid-operation - the heartbeat reports it once through
+// onLost (reason text describing the observed lock state) and stops
+// refreshing. The caller owns the abort: cancel the engine and fail the
+// operation. A refresh failure that is NOT an ownership loss (the CAS store
+// looks unhealthy) logs a warning and keeps trying - a transient storage
+// error does not kill a running apply, but an ownerless lease may not hide
+// inside one.
 //
 // The heartbeat stops when ctx is cancelled or the returned stop func is
 // called (stop blocks until the goroutine has exited; it is safe to call
-// more than once). A refresh failure logs a warning and keeps trying -
-// repeated failures mean the CAS store is unhealthy, which must be loud but
-// must not kill a running apply.
-func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holder corelocks.Holder, ttl time.Duration) (stop func()) {
+// more than once).
+func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holder corelocks.Holder, ttl time.Duration, onLost func(reason string)) (stop func()) {
 	if s == nil || ttl <= 0 {
 		return func() {}
 	}
@@ -159,6 +185,7 @@ func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holde
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	var once sync.Once
+	lostOnce := sync.Once{}
 	go func() {
 		defer close(exited)
 		t := time.NewTicker(interval)
@@ -170,14 +197,32 @@ func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holde
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				_, ok, err := s.TryAcquire(ctx, project, stack, holder, ttl)
+				err := s.RefreshLease(ctx, project, stack, holder, ttl)
 				switch {
-				case err != nil && ctx.Err() == nil:
+				case err == nil:
+					// lease extended
+				case ctx.Err() != nil:
+					// The work ended while the refresh was in flight;
+					// nothing left to report.
+					return
+				default:
+					var lost *corelocks.LeaseLostError
+					if errors.As(err, &lost) {
+						// Ownership loss is terminal. Report it once and
+						// stop refreshing - the caller must abort; a
+						// heartbeat cannot (and must not) re-acquire.
+						lostOnce.Do(func() {
+							slog.Warn("lock lost mid-operation; abort requested",
+								"project", project, "stack", stack, "pr", holder.PR,
+								"run_id", holder.RunID, "state", lost.Error())
+							if onLost != nil {
+								onLost(lossReason(lost))
+							}
+						})
+						return
+					}
 					slog.Warn("lock heartbeat refresh failed - CAS store may be unhealthy",
 						"project", project, "stack", stack, "pr", holder.PR, "run_id", holder.RunID, "err", err)
-				case err == nil && !ok:
-					slog.Warn("lock heartbeat: no longer the holder - another party owns this lock",
-						"project", project, "stack", stack, "pr", holder.PR, "run_id", holder.RunID)
 				}
 			}
 		}
@@ -185,6 +230,21 @@ func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holde
 	return func() {
 		once.Do(func() { close(done) })
 		<-exited
+	}
+}
+
+// lossReason phrases the observed lock state for the caller's abort message:
+// what remains after the lease was lost.
+func lossReason(lost *corelocks.LeaseLostError) string {
+	switch {
+	case lost.Released:
+		return "released; the lock has no holder"
+	case lost.HeldByPR != 0 && lost.HeldByOtherRun:
+		return fmt.Sprintf("now held by another run of PR #%d", lost.HeldByPR)
+	case lost.HeldByPR != 0:
+		return fmt.Sprintf("now held by PR #%d", lost.HeldByPR)
+	default:
+		return "state unknown at loss detection"
 	}
 }
 
