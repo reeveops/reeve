@@ -182,9 +182,12 @@ func TestLocksUnlockBadRef(t *testing.T) {
 }
 
 func TestLocksUnlockForceClearsHolderAndPromotesQueue(t *testing.T) {
-	_, s := lockRepo(t)
+	root, s := lockRepo(t)
 	acquire(t, s, "proj", "dev", 7)
 	enqueue(t, s, "proj", "dev", 8)
+	// The admin allowlist must name who may force-unlock; an empty list is
+	// a denial (D1), so this test's override lists the actor.
+	setAdminOverride(t, root, "  admin_override:\n    allowed: [admin]\n")
 
 	out, err := runReeve(t, "locks", "unlock", "proj/dev", "--actor", "admin", "--reason", "stuck apply")
 	if err != nil {
@@ -203,6 +206,31 @@ func TestLocksUnlockForceClearsHolderAndPromotesQueue(t *testing.T) {
 	}
 	if l.Holder == nil || l.Holder.PR != 8 {
 		t.Errorf("holder after unlock = %+v, want PR #8", l.Holder)
+	}
+}
+
+// TestLocksUnlockEmptyAllowlistDenies pins D1: an empty (or unset)
+// locking.admin_override.allowed denies EVERYONE. The old behavior treated
+// "unset" as "anyone", which made the gate decorative by default. The
+// refusal names the lock, the rule, and the fix, and nothing mutated.
+func TestLocksUnlockEmptyAllowlistDenies(t *testing.T) {
+	_, s := lockRepo(t)
+	acquire(t, s, "proj", "dev", 7)
+
+	_, err := runReeve(t, "locks", "unlock", "proj/dev",
+		"--actor", "alice", "--reason", "stuck apply")
+	want := "force-unlock refused: locking.admin_override.allowed is empty, so no one may force-unlock proj/dev; add the actor to that list"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("empty allowlist must deny with the exact refusal:\nwant: %s\ngot:  %v", want, err)
+	}
+
+	// The refusal happened before any mutation: the holder is untouched.
+	l, _, err := s.Get(context.Background(), "proj", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Holder == nil || l.Holder.PR != 7 {
+		t.Fatalf("lock state must be unchanged after the refusal: %+v", l.Holder)
 	}
 }
 
