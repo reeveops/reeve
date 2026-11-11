@@ -1,6 +1,7 @@
 package github
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -53,8 +54,8 @@ func TestCommentApprovals_AuthorizedNonBotCounts(t *testing.T) {
 func TestCommentApprovals_ExplicitSHAPinsToHead(t *testing.T) {
 	prefixes, verb, allowed := defaultTrigger(t)
 	comments := []*gh.IssueComment{
-		// Short SHA prefix of HEAD, mixed case, with trailing chatter.
-		issueComment("reviewer", "MEMBER", "/reeve approve ABCDEF1 looks good", "User", time.Unix(2000, 0)),
+		// Full 40-character HEAD SHA in upper case, with trailing chatter.
+		issueComment("reviewer", "MEMBER", "/reeve approve "+strings.ToUpper(headSHA)+" looks good", "User", time.Unix(2000, 0)),
 	}
 	out := commentApprovals(comments, prefixes, verb, allowed, headSHA)
 	if len(out) != 1 {
@@ -65,6 +66,28 @@ func TestCommentApprovals_ExplicitSHAPinsToHead(t *testing.T) {
 	}
 	if out[0].CommitSHA != headSHA {
 		t.Fatalf("pinned approval must carry the full HEAD SHA, got %q", out[0].CommitSHA)
+	}
+}
+
+// TestCommentApprovals_ShortPrefixDoesNotPin pins the grind attack fix: a
+// 7-character prefix of HEAD must NOT bind the approval to HEAD. Committer
+// timestamps are attacker-settable, so a planted approval naming a prefix
+// could otherwise be made to match a future malicious HEAD.
+func TestCommentApprovals_ShortPrefixDoesNotPin(t *testing.T) {
+	prefixes, verb, allowed := defaultTrigger(t)
+	comments := []*gh.IssueComment{
+		// 7-char prefix of HEAD, mixed case, with trailing chatter.
+		issueComment("reviewer", "MEMBER", "/reeve approve "+headSHA[:7]+" looks good", "User", time.Unix(2000, 0)),
+	}
+	out := commentApprovals(comments, prefixes, verb, allowed, headSHA)
+	if len(out) != 1 {
+		t.Fatalf("want 1 approval (bound to the literal prefix, dismissed downstream), got %+v", out)
+	}
+	if out[0].CommitSHA != headSHA[:7] {
+		t.Fatalf("short prefix must bind to the literal arg, got %q", out[0].CommitSHA)
+	}
+	if out[0].CommitSHA == headSHA {
+		t.Fatal("short prefix must never bind to HEAD")
 	}
 }
 
@@ -89,8 +112,8 @@ func TestCommentApprovals_ExplicitStaleSHAPinnedButNotHead(t *testing.T) {
 func TestCommentApprovals_ShortNonMatchingSHANotHead(t *testing.T) {
 	prefixes, verb, allowed := defaultTrigger(t)
 	comments := []*gh.IssueComment{
-		// Below minShortSHA and not a HEAD prefix: bound to the literal token,
-		// which cannot equal HEAD.
+		// Any argument that is not the full 40-character HEAD SHA: bound to
+		// the literal token, which cannot equal HEAD.
 		issueComment("reviewer", "MEMBER", "/reeve approve zzz", "User", time.Unix(2000, 0)),
 	}
 	out := commentApprovals(comments, prefixes, verb, allowed, headSHA)
@@ -191,6 +214,16 @@ func TestCommentApprovals_EmptyAllowlistDeniesAll(t *testing.T) {
 	}
 }
 
+// TestResolveApprovedCommit pins the commit binding rule: pinning happens
+// ONLY when the commenter named the full 40-character HEAD SHA. A prefix of
+// HEAD — even 39 of 40 characters — is bound to the literal argument, so it
+// never matches a future HEAD and is dismissed as stale.
+//
+// The old rule accepted any 7+ character prefix of HEAD as a binding to HEAD.
+// That let an approval be planted for a commit that did not exist yet: committer
+// timestamps are attacker-settable, so a 7-character SHA prefix can be ground
+// for ~2^28 work, and a comment approving that prefix would later bind to the
+// malicious commit once it became HEAD.
 func TestResolveApprovedCommit(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -200,11 +233,12 @@ func TestResolveApprovedCommit(t *testing.T) {
 		wantPinned bool
 	}{
 		{"bare is unpinned", "", headSHA, "", false},
-		{"head prefix pins to full head", "abcdef1234", headSHA, headSHA, true},
-		{"mixed case prefix", "ABCDEF1", headSHA, headSHA, true},
 		{"full head pins", headSHA, headSHA, headSHA, true},
+		{"full head uppercase pins", strings.ToUpper(headSHA), headSHA, headSHA, true},
+		{"7-char prefix of head is stale", headSHA[:7], headSHA, headSHA[:7], true},
+		{"39-char prefix of head is stale", headSHA[:39], headSHA, headSHA[:39], true},
 		{"non-matching long sha is pinned-stale", "0000000deadbeef", headSHA, "0000000deadbeef", true},
-		{"too-short prefix is not treated as head match", "abc", headSHA, "abc", true},
+		{"too-short arg is stale", "abc", headSHA, "abc", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

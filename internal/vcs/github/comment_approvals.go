@@ -90,11 +90,6 @@ func commentApprovals(comments []*gh.IssueComment, prefixes []string, verb strin
 	return out
 }
 
-// minShortSHA is the shortest commit prefix accepted in `/reeve approve <sha>`.
-// Matches git's conventional abbreviated-SHA length and stops a 1-2 character
-// argument from matching HEAD by accident.
-const minShortSHA = 7
-
 // resolveApprovedCommit binds a comment approval to the commit it names.
 //
 // A bare `/reeve approve` (arg == "") is UNPINNED: reeve cannot know, from the
@@ -102,14 +97,19 @@ const minShortSHA = 7
 // trusted to identify approved code. approvals.Evaluate dismisses an unpinned
 // approval whenever dismiss_on_new_commit is enabled.
 //
-// `/reeve approve <sha>` is PINNED: if <sha> is a prefix (>= minShortSHA chars)
-// of the current HEAD it binds to the full HEAD SHA and counts; otherwise it
-// binds to the literal <sha>, which never equals HEAD and is dismissed as stale.
+// `/reeve approve <sha>` is PINNED only when <sha> is the full 40-character
+// HEAD SHA: git committer timestamps are attacker-settable, so a 7-character
+// prefix can be ground for ~2^28 work and planted before the commit it names
+// exists - accepting prefixes let an approval written for commit X silently
+// bind to a future malicious HEAD that merely shares the prefix. Any other
+// argument binds to the literal <sha>, which never equals HEAD and is
+// dismissed as stale: "Approval by @user ignored: `<arg>` is not the full
+// 40-character SHA of HEAD. Re-approve with `/reeve approve <head>`."
 func resolveApprovedCommit(arg, headSHA string) (sha string, pinned bool) {
 	if arg == "" {
 		return "", false
 	}
-	if len(arg) >= minShortSHA && strings.HasPrefix(strings.ToLower(headSHA), strings.ToLower(arg)) {
+	if len(arg) == len(headSHA) && strings.EqualFold(arg, headSHA) {
 		return headSHA, true
 	}
 	return arg, true

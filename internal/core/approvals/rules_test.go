@@ -1,6 +1,7 @@
 package approvals
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,45 @@ func TestEvaluateSelfApprovalIgnored(t *testing.T) {
 	res := Evaluate(rules, approvals, pr, nil, pr.Author, evalNow)
 	if res.Satisfied {
 		t.Fatalf("self-approval should not count: %+v", res)
+	}
+}
+
+// TestEvaluateCommentApprovalShortSHAIgnored asserts both halves of the
+// failure rule for the pr_comment source: a comment approval naming anything
+// but the full HEAD SHA neither counts NOR disappears silently - the trace
+// carries the reason, the failing value, and the corrective step.
+//
+// The old trace said only "dismissed bob (approval on abc1234, HEAD is
+// ...)", which never told a commenter that 7 characters were not enough.
+func TestEvaluateCommentApprovalShortSHAIgnored(t *testing.T) {
+	head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" // 40 chars
+	pr := PR{Number: 7, HeadSHA: head, Author: "alice"}
+	rules := Rules{RequiredApprovals: 1, DismissOnNewCommit: true}
+
+	// A prefix of HEAD must not count, and the refusal must say why and how
+	// to fix it.
+	stale := []Approval{
+		{Source: SourcePRComment, Approver: "bob", CommitSHA: head[:7], Pinned: true, SubmittedAt: evalNow},
+	}
+	res := Evaluate(rules, stale, pr, nil, pr.Author, evalNow)
+	if res.Satisfied {
+		t.Fatal("a 7-char prefix approval must not satisfy the gate")
+	}
+	want := fmt.Sprintf("Approval by @bob ignored: `%s` is not the full 40-character SHA of HEAD `%s`. Re-approve with `/reeve approve %s`.", head[:7], head, head)
+	if !traceContains(res.Trace, want) {
+		t.Fatalf("trace must carry the exact refusal with the failing value and next step:\n want: %s\n trace: %v", want, res.Trace)
+	}
+
+	// A stale approval naming a full 40-char commit keeps the dismissal form.
+	stale = []Approval{
+		{Source: SourcePRComment, Approver: "bob", CommitSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Pinned: true, SubmittedAt: evalNow},
+	}
+	res = Evaluate(rules, stale, pr, nil, pr.Author, evalNow)
+	if res.Satisfied {
+		t.Fatal("a stale 40-char approval must not satisfy the gate")
+	}
+	if !traceContains(res.Trace, "dismissed bob (approval on bbbbbbb, HEAD is aaaaaaa)") {
+		t.Fatalf("trace must dismiss a stale 40-char approval with both SHAs: %v", res.Trace)
 	}
 }
 
