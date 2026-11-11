@@ -102,6 +102,19 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metad
 	}
 	defer r.Close()
 
+	// Take the same shard lock the writers hold for the whole read: open,
+	// stat, and version. writeAtomic publishes the new generation before
+	// renaming the new object into place, so a read outside the lock can
+	// pair the old body with the new version - and a later PutIfMatch with
+	// that version would install a transition derived from the stale body,
+	// defeating the read-modify-write guarantee. Lock state keys keep their
+	// extra legacy lock on the write paths only; a read does not need it.
+	lock, err := acquireShardLock(r, k)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer lock.release()
+
 	f, err := r.Open(osKey(k))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -119,8 +132,10 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, *blob.Metad
 		_ = f.Close()
 		return nil, nil, err
 	}
-	// f outlives the root handle deliberately: an *os.File stays valid after
-	// the directory descriptor it was opened from is closed.
+	// f outlives the root handle and the lock release deliberately: an
+	// *os.File stays valid after the directory descriptor it was opened from
+	// is closed, and the bytes behind the handle no longer change once this
+	// read pinned the object's version.
 	return f, &blob.Metadata{ETag: etag, LastModified: st.ModTime().Unix(), Size: st.Size()}, nil
 }
 

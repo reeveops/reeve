@@ -51,7 +51,13 @@ func TestPutGet(t *testing.T) {
 	}
 }
 
-func TestGetDoesNotCreateLockfiles(t *testing.T) {
+// TestGetSynchronizesOnBoundedShardLocks supersedes an older rule that Get
+// created no lockfiles at all: reads now take the shard lock, because the
+// generation sidecar is published before the new object is renamed into
+// place, and an unlocked read paired an old body with a new version. The
+// bounded-storage property still holds - Get must never take a per-key
+// lockfile, only a bounded shard.
+func TestGetSynchronizesOnBoundedShardLocks(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "runs"), 0o750); err != nil {
@@ -64,13 +70,143 @@ func TestGetDoesNotCreateLockfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, _, err := s.Get(t.Context(), "runs/manifest.json")
+	const key = "runs/manifest.json"
+	r, md, err := s.Get(t.Context(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = r.Close()
-	if _, err := os.Stat(filepath.Join(dir, lockNamespace)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Get created lock namespace: %v", err)
+	if md == nil || md.ETag == "" {
+		t.Fatalf("Get on a legacy object returned no version: %+v", md)
+	}
+
+	perKey := filepath.Join(dir, osKey(lockPathFor(key)))
+	if _, err := os.Stat(perKey); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Get took a per-key lockfile: %v", err)
+	}
+	locks, err := os.ReadDir(filepath.Join(dir, lockNamespace))
+	if err != nil {
+		t.Fatalf("Get left no lock namespace to inspect: %v", err)
+	}
+	for _, lock := range locks {
+		if !strings.HasPrefix(lock.Name(), "shard-") {
+			t.Fatalf("Get created lockfile %q, want a bounded shard", lock.Name())
+		}
+	}
+}
+
+// TestGetUnderConcurrentWriteKeepsBodyAndVersionConsistent runs readers
+// against a concurrent writer and asserts that every read pairs the body
+// with a version that was published for that body.
+//
+// writeAtomic publishes the new generation before renaming the new object
+// into place. Get used to stat the object and read the generation outside
+// any lock, so a read interleaved between the two steps returned the old
+// body with the new version. A caller could then PutIfMatch with that
+// version and overwrite a replacement derived from the stale body, defeating
+// the read-modify-write guarantee the lock store is built on.
+//
+// The mismatch needs a specific interleaving, so this loops a writer and
+// several readers and fails on any single torn observation instead of
+// asserting one deterministic interleaving.
+func TestGetUnderConcurrentWriteKeepsBodyAndVersionConsistent(t *testing.T) {
+	t.Parallel()
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	const key = "runs/pr-1/manifest.json"
+	bodies := []string{"manifest-A", "manifest-B"}
+
+	var mu sync.Mutex
+	versionBody := map[string]string{}
+	type observation struct {
+		body    string
+		version string
+	}
+	var observations []observation
+	failures := []string{}
+	fail := func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		failures = append(failures, fmt.Sprintf(format, args...))
+	}
+
+	if _, err := s.Put(ctx, key, strings.NewReader(bodies[0])); err != nil {
+		t.Fatal(err)
+	}
+	// Readers may observe this first version at any time, so it counts as
+	// published from the start.
+	objects, err := s.ListMetadata(ctx, key)
+	if err != nil || len(objects) != 1 {
+		t.Fatalf("list initial object: objects=%v err=%v", objects, err)
+	}
+	versionBody[objects[0].Version] = bodies[0]
+
+	const writes = 300
+	const readers = 4
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(done)
+		for i := 0; i < writes; i++ {
+			body := bodies[i%len(bodies)]
+			md, err := s.Put(ctx, key, strings.NewReader(body))
+			if err != nil {
+				fail("write %d: %v", i, err)
+				return
+			}
+			mu.Lock()
+			versionBody[md.ETag] = body
+			mu.Unlock()
+		}
+	}()
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				body, md, err := ReadBytes(ctx, s, key)
+				if err != nil {
+					fail("reader %d: %v", n, err)
+					return
+				}
+				mu.Lock()
+				observations = append(observations, observation{body: string(body), version: md.ETag})
+				mu.Unlock()
+			}
+		}(r)
+	}
+	wg.Wait()
+
+	// A version is registered once its write returned, and by then the
+	// rename has happened. A read that paired body X with version V is torn
+	// exactly when V was published for a different body. Observations are
+	// judged only after every write has registered, so a reader catching a
+	// just-renamed object before the writer records its version passes.
+	var torn int
+	for _, obs := range observations {
+		want, ok := versionBody[obs.version]
+		if !ok {
+			fail("version %q was never published", obs.version)
+			torn++
+			continue
+		}
+		if want != obs.body {
+			fail("body %q does not match its published version %q (published as %q)", obs.body, obs.version, want)
+			torn++
+		}
+	}
+	if torn > 0 {
+		t.Fatalf("%d torn reads of %d: %v", torn, len(observations), failures)
 	}
 }
 
