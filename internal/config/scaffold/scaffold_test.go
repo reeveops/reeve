@@ -94,9 +94,9 @@ func TestRenderGitHubWorkflow(t *testing.T) {
 		engine string
 		want   string
 	}{
-		{engine: "pulumi", want: "pulumi_version: latest"},
-		{engine: "terraform", want: "terraform_version: latest"},
-		{engine: "tofu", want: "opentofu_version: latest"},
+		{engine: "pulumi", want: "pulumi_version: " + PinnedPulumiVersion},
+		{engine: "terraform", want: "terraform_version: " + PinnedTerraformVersion},
+		{engine: "tofu", want: "opentofu_version: " + PinnedOpenTofuVersion},
 	} {
 		t.Run(tc.engine, func(t *testing.T) {
 			t.Parallel()
@@ -343,5 +343,27 @@ func TestExistingTypes(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Errorf("unexpected extra entries: %v", got)
+	}
+}
+
+// TestScaffoldPinsRealEngineVersions pins the no-`latest` rule: a scaffolded
+// caller must never install a moving engine version. A `latest` engine on a
+// PR runner means a provider or language behavior change can land unnoticed
+// mid-review, and the version a PR previewed is not the version the apply
+// runs days later.
+func TestScaffoldPinsRealEngineVersions(t *testing.T) {
+	for _, engine := range []string{"pulumi", "terraform", "tofu"} {
+		out, err := RenderGitHubWorkflow(GitHubWorkflowOptions{Engine: engine, Ref: "0123456789abcdef0123456789abcdef01234567"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), ": latest") {
+			t.Errorf("engine %s: scaffold must not write a moving version:\n%s", engine, out)
+		}
+		for _, v := range []string{PinnedPulumiVersion, PinnedOpenTofuVersion, PinnedTerraformVersion} {
+			if v == "" || v == "latest" {
+				t.Errorf("pinned engine version constant must be a real version, got %q", v)
+			}
+		}
 	}
 }

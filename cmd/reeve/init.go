@@ -356,16 +356,23 @@ func plural(n int, one, many string) string {
 	return many
 }
 
+// scaffoldPinnedVersionInput names the engine-version input for next-steps
+// text, matching what the scaffold writes into the workflow.
+func scaffoldPinnedVersionInput(engine string) string {
+	switch engine {
+	case "terraform":
+		return "terraform_version: " + scaffold.PinnedTerraformVersion
+	case "tofu":
+		return "opentofu_version: " + scaffold.PinnedOpenTofuVersion
+	default:
+		return "pulumi_version: " + scaffold.PinnedPulumiVersion
+	}
+}
+
 func printNextSteps(w io.Writer, workflowOpts scaffold.GitHubWorkflowOptions) {
 	engine := workflowOpts.Engine
 	workflowRef := workflowOpts.Ref
-	versionInput := "pulumi_version: latest"
-	switch engine {
-	case "tofu":
-		versionInput = "opentofu_version: latest"
-	case "terraform":
-		versionInput = "terraform_version: latest"
-	}
+	versionInput := scaffoldPinnedVersionInput(engine)
 	if workflowRef != "" {
 		fmt.Fprint(w, `
 Next steps:

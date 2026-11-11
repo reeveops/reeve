@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/reeveops/reeve/internal/config"
+	"github.com/reeveops/reeve/internal/config/scaffold"
 	"github.com/reeveops/reeve/internal/config/schemas"
 )
 
@@ -115,7 +116,7 @@ func TestInitWritesPinnedWorkflowForReleaseBuild(t *testing.T) {
 		"merge_group:",
 		"types: [checks_requested]",
 		"mode: gitops",
-		"pulumi_version: latest",
+		"pulumi_version: " + scaffold.PinnedPulumiVersion,
 	} {
 		if !strings.Contains(string(workflow), want) {
 			t.Errorf("workflow missing %q:\n%s", want, workflow)
@@ -206,7 +207,7 @@ func TestInitWorkflowRefSelectsDetectedEngineAndPreservesExisting(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(workflow), "terraform_version: latest") {
+	if !strings.Contains(string(workflow), "terraform_version: "+scaffold.PinnedTerraformVersion) {
 		t.Fatalf("terraform workflow input missing:\n%s", workflow)
 	}
 
