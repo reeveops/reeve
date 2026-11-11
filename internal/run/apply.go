@@ -724,8 +724,38 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 				ss.Status = summary.StatusBlocked
 			}
 			anyBlocked = true
+			// The lock gate has its own path: being blocked BY the lock is
+			// the deliberate queue-the-apply flow - the waiting place is the
+			// queue entry, and promotion happens when the holder finishes.
+			// Any OTHER failing gate means this PR lost its place: remove the
+			// queue entry made during the lock attempt instead of leaving a
+			// ghost reservation that would be promoted later. A run blocked
+			// ONLY by the lock gate keeps its queue entry on purpose.
+			otherGateFailed := false
+			for _, g := range ss.Gates {
+				if g.Outcome != "fail" {
+					continue // pass, skipped, and overridden gates did not deny
+				}
+				if g.Gate != string(preconditions.GateLock) {
+					otherGateFailed = true
+					break
+				}
+			}
 			if acquired {
 				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "gates blocked")
+			} else if otherGateFailed && in.Locks != nil {
+				// Blocked by non-lock gates while queued: the reservation
+				// can never be used (its gates will fail again), so remove
+				// the queue entry the lock attempt created.
+				_, derr := in.Locks.UnlockPR(ctx, s.Project, s.Name, in.PRNumber, runID, ttl, false)
+				if derr != nil {
+					// Fail loud, not silent: the queue entry is still there
+					// and the user must know it.
+					slog.Warn("lock queue removal failed", "stack", s.Ref(), "pr", in.PRNumber, "err", derr)
+					ss.Error = fmt.Sprintf("Could not remove this PR from the lock queue for %s (%v); re-run `/reeve apply` once the gates pass.", s.Ref(), derr)
+				} else {
+					ss.Error = fmt.Sprintf("Removed from the lock queue for %s; re-run `/reeve apply` once the gates pass.", s.Ref())
+				}
 			}
 			summaries = append(summaries, ss)
 			continue
