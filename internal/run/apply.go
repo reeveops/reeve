@@ -24,6 +24,7 @@ import (
 	"github.com/reeveops/reeve/internal/core/render"
 	"github.com/reeveops/reeve/internal/core/summary"
 	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/log"
 	"github.com/reeveops/reeve/internal/notify"
 	"github.com/reeveops/reeve/internal/observability/annotations"
 	reeveotel "github.com/reeveops/reeve/internal/observability/otel"
@@ -161,6 +162,15 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	start := time.Now()
 	runID := runIdentity("apply", in.RunNumber, in.RunAttempt, in.CommitSHA)
 
+	// One invocation-scoped redactor for the whole run. Every sink takes it:
+	// the log handler (installed here so a log line can never output past
+	// it), the PR comment, the timeline, and the audit entry. Secrets
+	// registered per stack below accumulate on this instance, so a secret
+	// learned for stack A masks everywhere.
+	redactor := BuildRedactor(in.Shared)
+	log.SetRedactor(redactor)
+	defer log.SetRedactor(nil)
+
 	// Break-glass fail-fast: a missing justification never starts a run.
 	if in.BreakGlass != nil && strings.TrimSpace(in.BreakGlass.Justification) == "" {
 		return nil, errors.New("break-glass apply requires a non-empty justification")
@@ -239,7 +249,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	var previewLoadErr error
 	previewLoadReason := ""
 	if err != nil {
-		previewLoadReason = BuildRedactor(in.Shared).Redact(err.Error())
+		previewLoadReason = redactor.Redact(err.Error())
 		if in.BreakGlass == nil {
 			return nil, &previewSnapshotLoadError{cause: err, detail: previewLoadReason}
 		}
@@ -453,11 +463,16 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			return nil, fmt.Errorf("break-glass denied: %s", detail)
 		}
 		bgDecision = &dec
+		// The justification is operator free text; it passes through the
+		// redactor at every sink (log attr, timeline, audit, PR note). The
+		// log handler wraps redaction too, so the attribute below never
+		// emits a credential-shaped value.
+		redactedJustification := redactor.Redact(in.BreakGlass.Justification)
 		slog.Warn("BREAK-GLASS apply authorized",
 			"actor", in.Actor, "source", dec.Source,
-			"justification", in.BreakGlass.Justification,
+			"justification", redactedJustification,
 			"authorizing_config_modified_in_pr", len(bgTouched) > 0)
-		detail := fmt.Sprintf("actor %s authorized via %s — justification: %q", in.Actor, dec.Source, in.BreakGlass.Justification)
+		detail := fmt.Sprintf("actor %s authorized via %s — justification: %q", in.Actor, dec.Source, redactedJustification)
 		if len(bgTouched) > 0 {
 			detail += fmt.Sprintf(" — ⚠️ authorizing config modified in this PR (%s)", strings.Join(bgTouched, ", "))
 		}
@@ -488,7 +503,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			RunURL:     in.CIRunURL,
 			Outcome:    "break_glass_intent",
 			BreakGlass: &audit.BreakGlass{
-				Justification:             in.BreakGlass.Justification,
+				Justification:             redactor.Redact(in.BreakGlass.Justification),
 				AuthorizedVia:             bgDecision.Source,
 				AuthorizingConfigModified: len(bgTouched) > 0,
 				AuthorizingPathsModified:  bgTouched,
@@ -612,7 +627,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			// The backend error can quote configuration (endpoints, bucket
 			// paths, credentials); it reaches the PR comment and the CI log, so
 			// redact it here where the summary is built.
-			ss.Error = BuildRedactor(in.Shared).Redact(fmt.Sprintf("lock acquire: %v", err))
+			ss.Error = redactor.Redact(fmt.Sprintf("lock acquire: %v", err))
 			summaries = append(summaries, ss)
 			continue
 		}
@@ -687,7 +702,8 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 
 		// Run hooks only after the independent gates pass, then evaluate the
 		// policy result as the final gate decision for this stack.
-		redactor := BuildRedactor(in.Shared)
+		// The invocation redactor is reused: per-stack secrets registered
+		// below accumulate, so later stacks mask earlier stacks' values too.
 		hooks := HooksFromEngine(in.Config)
 		if !pcResult.Blocked && len(hooks) > 0 {
 			policyTarget := ss
@@ -863,7 +879,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	if bgDecision != nil {
 		bgNote = &render.BreakGlassNote{
 			Actor:              in.Actor,
-			Justification:      in.BreakGlass.Justification,
+			Justification:      redactor.Redact(in.BreakGlass.Justification),
 			AuthorizedVia:      bgDecision.Source,
 			Overridden:         overriddenGates,
 			ConfigModifiedInPR: len(bgTouched) > 0,
@@ -895,10 +911,15 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	// at the end with a clear message.
 	manifestErr := writeApplyManifest(pctx, in.Blob, in.PRNumber, runID, summaries, in.CommitSHA)
 	if manifestErr != nil {
+		// The error may echo bucket paths, endpoints, or credential-shaped
+		// values. Redact once, use the masked text at every sink: job log,
+		// timeline, PR comment. The stack results above still reflect what
+		// actually applied; the run exits nonzero with the reason.
+		manifestMsg := redactor.Redact(manifestErr.Error())
 		slog.Error("apply manifest persistence failed - infra may have changed; recording outcome on the PR anyway",
-			"err", manifestErr, "run_id", runID, "pr", in.PRNumber)
-		timeline.add(pctx, "⚠️", "manifest persistence failed", manifestErr.Error())
-		body += fmt.Sprintf("\n\n> [!WARNING]\n> **Run manifest persistence failed.** The stack results above reflect what actually applied, but the run manifest could not be written to blob storage (`%v`). The run exits nonzero; investigate the storage backend before re-running.", manifestErr)
+			"err", manifestMsg, "run_id", runID, "pr", in.PRNumber)
+		timeline.add(pctx, "⚠️", "manifest persistence failed", manifestMsg)
+		body += fmt.Sprintf("\n\n> [!WARNING]\n> **Run manifest persistence failed.** The stack results above reflect what actually applied, but the run manifest could not be written to blob storage (`%s`). The run exits nonzero; investigate the storage backend before re-running.", manifestMsg)
 	}
 
 	// 5b. Timeline terminal event + applied-state pointer. Only a fully clean
@@ -1003,7 +1024,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 		if bgDecision != nil {
 			entry.BreakGlass = &audit.BreakGlass{
-				Justification:             in.BreakGlass.Justification,
+				Justification:             redactor.Redact(in.BreakGlass.Justification),
 				AuthorizedVia:             bgDecision.Source,
 				OverriddenGates:           overriddenGates,
 				AuthorizingConfigModified: len(bgTouched) > 0,
@@ -1037,8 +1058,11 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	// Post-apply persistence failure: everything above was still reported
 	// best-effort (timeline, comment, notify, audit), but the run must exit
 	// nonzero - infra changed and part of the durable record is missing.
+	// The returned error reaches the job log and the action summary, so it
+	// goes out redacted like every other sink.
 	if perr := errors.Join(manifestErr, commentErr); perr != nil {
-		return result, fmt.Errorf("apply run finished (outcome=%s) but post-apply persistence failed: %w", outcome, perr)
+		return result, fmt.Errorf("apply run finished (outcome=%s) but post-apply persistence failed: %s",
+			outcome, redactor.Redact(perr.Error()))
 	}
 	return result, nil
 }
