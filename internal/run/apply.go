@@ -500,35 +500,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 	}
 
-	// Notify approved + applying before the loop (creates the message on
-	// the apply trigger path). A break-glass run emits break_glass instead
-	// of approved - approvals were bypassed, not granted.
-	if in.PRNumber > 0 && in.Notifications != nil {
-		channels := BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.VCS)
-		preSummaries := make([]summary.StackSummary, 0, len(target))
-		for _, s := range target {
-			preSummaries = append(preSummaries, summary.StackSummary{
-				Project: s.Project, Stack: s.Name, Env: s.Env,
-			})
-		}
-		preInput := PRNotifyInput{
-			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
-			PRTitle: pr.Title, PRAuthor: pr.Author, Stacks: preSummaries,
-		}
-		if bgDecision != nil {
-			if err := NotifyPREvent(ctx, channels, notify.EventBreakGlass, preInput); err != nil {
-				slog.Warn("notify break_glass failed", "err", err, "pr", in.PRNumber)
-			}
-		} else {
-			if err := NotifyPREvent(ctx, channels, notify.EventApproved, preInput); err != nil {
-				slog.Warn("notify approved failed", "err", err, "pr", in.PRNumber)
-			}
-		}
-		if err := NotifyPREvent(ctx, channels, notify.EventApplying, preInput); err != nil {
-			slog.Warn("notify applying failed", "err", err, "pr", in.PRNumber)
-		}
-	}
-
 	executionEnv, executionCleanup, err := iac.ExecutionEnv()
 	if err != nil {
 		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
@@ -561,6 +532,11 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 
 	// 3. Per-stack: acquire lock → eval gates → apply or block.
+	// The approved/applying notifications move BELOW per-stack gate
+	// evaluation: a run whose gates deny never announces "approved" or
+	// "applying" - the gate comment already names the gate. Announced once,
+	// at the first stack whose gates pass.
+	notified := false
 	summaries := make([]summary.StackSummary, 0, len(target))
 	anyBlocked := false
 	overriddenSeen := map[preconditions.GateID]bool{}
@@ -729,6 +705,37 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			}
 			summaries = append(summaries, ss)
 			continue
+		}
+
+		// Gates passed for at least one stack: NOW announce approved (or
+		// break-glass) + applying, before any engine or credential work.
+		// A break-glass run emits break_glass instead of approved -
+		// approvals were bypassed, not granted.
+		if !notified && in.PRNumber > 0 && in.Notifications != nil {
+			notified = true
+			channels := BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.VCS)
+			preSummaries := make([]summary.StackSummary, 0, len(target))
+			for _, s := range target {
+				preSummaries = append(preSummaries, summary.StackSummary{
+					Project: s.Project, Stack: s.Name, Env: s.Env,
+				})
+			}
+			preInput := PRNotifyInput{
+				PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+				PRTitle: pr.Title, PRAuthor: pr.Author, Stacks: preSummaries,
+			}
+			if bgDecision != nil {
+				if err := NotifyPREvent(ctx, channels, notify.EventBreakGlass, preInput); err != nil {
+					slog.Warn("notify break_glass failed", "err", err, "pr", in.PRNumber)
+				}
+			} else {
+				if err := NotifyPREvent(ctx, channels, notify.EventApproved, preInput); err != nil {
+					slog.Warn("notify approved failed", "err", err, "pr", in.PRNumber)
+				}
+			}
+			if err := NotifyPREvent(ctx, channels, notify.EventApplying, preInput); err != nil {
+				slog.Warn("notify applying failed", "err", err, "pr", in.PRNumber)
+			}
 		}
 
 		if !stateAuthAcquired {
