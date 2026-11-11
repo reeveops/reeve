@@ -30,6 +30,19 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # workflow_dispatch is the intentional hand-off to a release. Tag
+      # pushes are the tag-creation path. A dispatch from any ref BUT master
+      # would compute the next tag from master's history and tag a commit
+      # the dispatcher did not intend to release - refuse it at the first
+      # step, before any token or tag exists.
+      - name: Refuse non-master dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/master' }}
+        env:
+          STARTED_FROM: ${{ github.ref }}
+        run: |
+          echo "::error::workflow_dispatch releases require the master ref; this run started on ${STARTED_FROM}. Push a v*.*.* tag instead."
+          exit 1
+
       # Mint a short-lived token from the reeve-tap GitHub App. The app is
       # installed on reeveops/reeve and reeveops/homebrew-tap with write access
       # to code, which is what GoReleaser needs to commit the Homebrew cask.
@@ -48,6 +61,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      # The release runs the repository's own gates first: mise run check
+      # (fmt + vet + lint + vulnerability + security scan + race tests)
+      # against the same toolchain versions the local task uses. A release
+      # without green checks must not exist.
+      - name: Set up mise
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+
+      - name: Run release checks
+        run: mise run check
 
       # Tag-push releases use the pushed tag as-is. Dispatch releases compute
       # the next version from the latest stable tag and push the new tag with
