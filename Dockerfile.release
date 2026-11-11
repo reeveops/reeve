@@ -1,4 +1,9 @@
-FROM gcr.io/distroless/static-debian12:nonroot
+# The base is pinned by the multi-arch INDEX digest: the digested reference
+# cannot drift when distroless re-publishes the tag, and the index keeps the
+# registry resolving the platform-specific image for each docker buildx
+# target. Update deliberately: resolve the current tag's digest and replace
+# this line.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 ARG TARGETPLATFORM
 COPY $TARGETPLATFORM/reeve /usr/bin/reeve
