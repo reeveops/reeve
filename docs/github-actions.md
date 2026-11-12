@@ -219,9 +219,9 @@ The cosign signature of the `checksums.txt` must come from the workflow that pro
 | `vX.Y.Z` or a semantic prerelease tag | `release.yml@refs/tags/<the requested version>` |
 | `master` / `next` / a full commit SHA | `edge-build.yml@refs/heads/master` |
 
-A signature from any other workflow or ref is refused: the job log states the requested version, the identity required, the identity found, and the fallback. The prebuilt binary is never used in that case; the action builds reeve from source for that run.
+A signature from a workflow or ref that is not the artifact kind's required identity is not accepted: the prebuilt binary is never used, and the run falls back to a source build with the reason in the job log - the requested version, the identity required (`release.yml@refs/tags/<version>` for a version tag, `edge-build.yml@refs/heads/master` for a per-commit build), the identity the signature actually carries, and the next step. This is the same verification policy the binary fetch applies everywhere else: only a digest mismatch against the verified signed checksums fails the run; a wrong signing identity means a source build for that run.
 
-Breaking: releases up to v0.8.0 inclusive were signed from `refs/heads/master`, so they no longer verify against the per-version-tag identity rule. There is no exception for them; consumers of those versions fall back to a source build (or pin a post-v0.8.0 release).
+Breaking: releases up to v0.8.0 inclusive were signed from `refs/heads/master`, so they no longer verify against the per-version-tag identity rule. There is no exception for them: their signature is not accepted and the action builds reeve from source for that run (the reason, including the identity mismatch, is in the job log) - or pin a post-v0.8.0 release.
 
 The shared workflow uses the composite action from its own exact commit.
 Its self-reference syntax requires GitHub.com and runner 2.336.0 or newer; use the composite action on GHES until that platform supports self references.
