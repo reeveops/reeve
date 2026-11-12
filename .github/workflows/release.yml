@@ -28,31 +28,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A workflow_dispatch run on a non-tag ref other than master is refused
+  # with the ref it saw and the forms it may take. Dispatches on a version
+  # tag go straight to the release job with no failed job in the run.
+  refuse-bad-dispatch-ref:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref != 'refs/heads/master' &&
+      !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse dispatch on an unsupported ref
+        env:
+          SEEN: ${{ github.ref }}
+        run: |
+          echo "::error::workflow_dispatch releases start on refs/heads/master (the job computes and pushes the next version tag) or on an existing version tag ref (refs/tags/vX.Y.Z), not on ${SEEN}. Push a v*.*.* tag instead."
+          exit 1
+
   # A workflow_dispatch run on master ONLY computes and pushes the next
   # version tag, then starts the build/sign run on the tag ref. It never
   # builds or signs here: the cosign signing identity is the ref the
   # workflow runs on, so a version-tagged artifact must carry the identity
   # of a run on refs/tags/<version> - which a run on master cannot provide.
+  # The job runs only for dispatches ON MASTER: the release run this job
+  # dispatches is itself a workflow_dispatch (on the tag ref), so a
+  # master-only condition is what keeps that run's tag job green (skipped).
   #
   # A tag pushed with GITHUB_TOKEN does not trigger a push run (same-token
   # events are not forwarded), so starting the release run is an explicit
   # workflow_dispatch: one of the two event types GITHUB_TOKEN may trigger.
   tag:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the version tag
       actions: write  # start the release run on the tag ref
     steps:
-      # A dispatch from any ref BUT master would compute the next tag from
-      # master's history and tag a commit the dispatcher did not intend to
-      # release - refuse it at the first step, before any tag exists.
+      # Defense in depth behind the job-level if: a non-master ref that
+      # reaches this job is refused before any tag is computed.
       - name: Refuse non-master dispatch
         if: ${{ github.ref != 'refs/heads/master' }}
         env:
           STARTED_FROM: ${{ github.ref }}
         run: |
-          echo "::error::workflow_dispatch releases require the master ref; this run started on ${STARTED_FROM}. Push a v*.*.* tag instead."
+          echo "::error::workflow_dispatch tag computation requires the master ref; this run started on ${STARTED_FROM}. Push a v*.*.* tag instead."
           exit 1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,16 +131,28 @@ jobs:
       packages: write # publish the GHCR image
       id-token: write # sigstore keyless
     steps:
-      # Defense in depth behind the job-level if: if this job is ever
-      # reached on a non-tag ref, it fails naming the ref it saw and the
-      # ref it requires. Nothing has run yet - no token, no checkout.
+      # Defense in depth behind the job-level if: the release builds only a
+      # FULL version (vX.Y.Z or vX.Y.Z-<prerelease>). Branch refs are kept
+      # out by the job condition; a non-version tag ref that is reached here
+      # anyway - including the floating v0/v1 major aliases - fails with the
+      # ref it saw and the form it requires. Nothing has run yet - no token,
+      # no checkout.
       - name: Refuse non-version-tag ref
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         env:
           STARTED_FROM: ${{ github.ref }}
+          TAG: ${{ github.ref_name }}
+        # The release builds a FULL version: vX.Y.Z or vX.Y.Z-<prerelease>.
+        # Any other ref - branches, and tags like the floating `v0` major
+        # alias - is refused with the ref seen and the form required. The
+        # run that dispatched this one pushed the version tag itself, so a
+        # legitimate release always arrives here as a full version.
         run: |
-          echo "::error::release build/sign requires a version tag ref (refs/tags/v*); this run started on ${STARTED_FROM}. Push a v*.*.* tag, or dispatch the release from master."
-          exit 1
+          set -euo pipefail
+          REF_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          if [[ "$GITHUB_REF" != "refs/tags/$TAG" ]] || ! [[ "$TAG" =~ $REF_RE ]]; then
+            echo "::error::release build/sign requires a full version tag ref (refs/tags/vX.Y.Z or vX.Y.Z-<prerelease>); this run started on ${STARTED_FROM} (tag '${TAG}'). The floating major tags (v0, v1, ...) are pointers, not releases."
+            exit 1
+          fi
 
       # Mint a short-lived token from the reeve-tap GitHub App. The app is
       # installed on reeveops/reeve and reeveops/homebrew-tap with write access
