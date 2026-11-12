@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -403,20 +404,77 @@ func TestDeleteCommentsReusesAndUpdatesSnapshot(t *testing.T) {
 	}
 }
 
-// TestUpsertCommentRespectsAuthorOverride pins the explicit setting: the
-// declared comment author bypasses /user resolution - and a wrong /user is
-// never guessed. When /user fails with no override, the write is refused.
-func TestUpsertCommentRespectsAuthorOverride(t *testing.T) {
-	// (a) /user fails, override set → the override wins and the write
-	// proceeds.
-	var lists, edits int
+// newAuthorClient builds a Client that mirrors New's operator-override
+// loading (comments.author / --comment-author folded to REEVE_COMMENT_AUTHOR)
+// against the test server's direct mux.
+func newAuthorClient(t *testing.T, srv *httptest.Server) *Client {
+	t.Helper()
+	c := newFakeClient(t, srv)
+	if a := strings.TrimSpace(os.Getenv("REEVE_COMMENT_AUTHOR")); a != "" {
+		c.commentAuthorOverride.Store(&a)
+	}
+	return c
+}
+
+// TestUpsertCommentExplicitAuthorWinsOverDefaultToken pins the precedence:
+// the explicit setting (comments.author / --comment-author) outranks the
+// action-supplied default-token knowledge even when the token IS the
+// runner's default github.token. The declared author reeve-bot owns the
+// marker comment; had the default-token author (github-actions[bot]) been
+// used, the upsert would create a duplicate instead of editing.
+func TestUpsertCommentExplicitAuthorWinsOverDefaultToken(t *testing.T) {
+	var userCalls, edits, creates int
 	mux := http.NewServeMux()
 	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		userCalls++
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"message":"boom"}`)
+	})
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `[{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:auth -->"}]`)
+		case http.MethodPost:
+			creates++
+			fmt.Fprint(w, `{"id":2,"user":{"login":"reeve-bot"},"body":"created"}`)
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
+		edits++
+		fmt.Fprint(w, `{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:auth --> updated"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("REEVE_TOKEN_IS_DEFAULT", "true")
+	t.Setenv("REEVE_COMMENT_AUTHOR", "reeve-bot")
+	c := newAuthorClient(t, srv)
+
+	if err := c.UpsertComment(context.Background(), 12, "<!-- marker:auth --> updated", "<!-- marker:auth -->"); err != nil {
+		t.Fatal(err)
+	}
+	if userCalls != 0 {
+		t.Fatalf("an explicit setting must bypass /user entirely: userCalls=%d", userCalls)
+	}
+	if creates != 0 || edits != 1 {
+		t.Fatalf("the declared author must win over the default-token author: edits=%d creates=%d", edits, creates)
+	}
+}
+
+// TestUpsertCommentExplicitAuthorWinsWithCustomToken: a custom token whose
+// /user fails is fine when the author is declared explicitly - the write
+// proceeds and /user is not consulted.
+func TestUpsertCommentExplicitAuthorWinsWithCustomToken(t *testing.T) {
+	var userCalls, edits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		userCalls++
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprint(w, `{"message":"boom"}`)
 	})
 	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, _ *http.Request) {
-		lists++
 		fmt.Fprint(w, `[{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:auth -->"}]`)
 	})
 	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
@@ -425,39 +483,100 @@ func TestUpsertCommentRespectsAuthorOverride(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	c := newFakeClient(t, srv)
-	c.SetCommentAuthor("reeve-bot")
+
+	t.Setenv("REEVE_TOKEN_IS_DEFAULT", "false")
+	t.Setenv("REEVE_COMMENT_AUTHOR", "reeve-bot")
+	c := newAuthorClient(t, srv)
 
 	if err := c.UpsertComment(context.Background(), 12, "<!-- marker:auth --> updated", "<!-- marker:auth -->"); err != nil {
 		t.Fatal(err)
 	}
-	if edits != 1 {
-		t.Fatalf("edits = %d, want 1", edits)
+	if userCalls != 0 || edits != 1 {
+		t.Fatalf("the declared author must win without touching /user: userCalls=%d edits=%d", userCalls, edits)
 	}
+}
 
-	// (b) /user fails, NO override → the write is refused with the fix in
-	// the refusal; no comment is edited or created.
-	t.Setenv("GITHUB_ACTIONS", "")
-	mux2 := http.NewServeMux()
-	mux2.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+// TestUpsertCommentDefaultTokenWritesWithoutConfig pins the default setup:
+// with the runner's default github.token (REEVE_TOKEN_IS_DEFAULT=true) and
+// no operator setting, the author is KNOWN to be github-actions[bot] and
+// reeve's comment is edited - /user is not called, nothing is refused.
+func TestUpsertCommentDefaultTokenWritesWithoutConfig(t *testing.T) {
+	var userCalls, edits, creates int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		userCalls++
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprint(w, `{"message":"boom"}`)
 	})
-	mux2.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `[{"id":1,"user":{"login":"github-actions[bot]"},"body":"<!-- marker:auth -->"}]`)
+		case http.MethodPost:
+			creates++
+			fmt.Fprint(w, `{"id":2,"user":{"login":"github-actions[bot]"},"body":"created"}`)
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
+		edits++
+		fmt.Fprint(w, `{"id":1,"user":{"login":"github-actions[bot]"},"body":"<!-- marker:auth --> updated"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("REEVE_TOKEN_IS_DEFAULT", "true")
+	// No REEVE_COMMENT_AUTHOR: the default setup must work with no config.
+	_ = os.Unsetenv("REEVE_COMMENT_AUTHOR") // empty value = no override
+	c := newAuthorClient(t, srv)
+
+	if err := c.UpsertComment(context.Background(), 12, "<!-- marker:auth --> updated", "<!-- marker:auth -->"); err != nil {
+		t.Fatalf("the default-token path must write comments with no config: %v", err)
+	}
+	if userCalls != 0 {
+		t.Fatalf("the default-token author is known; /user must not be consulted: userCalls=%d", userCalls)
+	}
+	if creates != 0 || edits != 1 {
+		t.Fatalf("the default-token author must match reeve's own comment: edits=%d creates=%d", edits, creates)
+	}
+}
+
+// TestUpsertCommentCustomTokenFailingUserRefused pins the fail-closed rule:
+// with a CUSTOM token (the action has not declared the default-token
+// author) and a failing /user and no setting, the write is refused with the
+// typed error naming the setting - never guessed.
+func TestUpsertCommentCustomTokenFailingUserRefused(t *testing.T) {
+	var userCalls, writes int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		userCalls++
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"message":"boom"}`)
+	})
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:auth -->"}]`)
 	})
-	srv2 := httptest.NewServer(mux2)
-	defer srv2.Close()
-	c2 := newFakeClient(t, srv2)
-	err := c2.UpsertComment(context.Background(), 12, "<!-- marker:auth --> updated", "<!-- marker:auth -->")
+	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
+		writes++
+		fmt.Fprint(w, `{"id":1,"user":{"login":"reeve-bot"},"body":"edited"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("REEVE_TOKEN_IS_DEFAULT", "false")
+	_ = os.Unsetenv("REEVE_COMMENT_AUTHOR") // empty value = no override
+	c := newAuthorClient(t, srv)
+
+	err := c.UpsertComment(context.Background(), 12, "<!-- marker:auth --> updated", "<!-- marker:auth -->")
 	var cae *CommentAuthorError
 	if !errors.As(err, &cae) {
-		t.Fatalf("the refusal must be the typed CommentAuthorError, got %v", err)
+		t.Fatalf("a custom token with no setting and a failing /user must refuse, got %v", err)
 	}
 	if !strings.Contains(cae.Error(), "set comments.author or --comment-author") {
 		t.Fatalf("the refusal must name the setting: %v", cae)
 	}
-	if edits != 1 || lists < 1 {
-		t.Fatalf("the successful path must still edit exactly one comment")
+	if userCalls != 1 || writes != 0 {
+		t.Fatalf("/user must be consulted once and no comment written: userCalls=%d writes=%d", userCalls, writes)
 	}
 }

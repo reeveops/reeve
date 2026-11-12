@@ -27,11 +27,9 @@ type Client struct {
 	owner string
 	repo  string
 	// commentAuthorOverride is the operator-declared login the token writes
-	// comments as (REEVE_COMMENT_AUTHOR). When set, /user is consulted only
-	// if the override is empty... the override short-circuits identity
-	// resolution entirely - the one safe path when /user is unavailable
-	// (GHES restrictions) and App installation tokens are in use, where the
-	// old github-actions[bot] guess was wrong.
+	// comments as (comments.author / --comment-author, folded to
+	// REEVE_COMMENT_AUTHOR). It outranks both the action-supplied default-
+	// token author and /user resolution.
 	commentAuthorOverride atomic.Pointer[string]
 
 	commentMu    sync.Mutex
@@ -73,24 +71,14 @@ func New(ctx context.Context, token, owner, repo string) (*Client, error) {
 		}
 	}
 	client := &Client{gh: ghc, owner: owner, repo: repo}
-	// The operator-declared comment author (REEVE_COMMENT_AUTHOR) short-
-	// circuits identity resolution - the one safe path when /user is
-	// unavailable under App installation tokens.
+	// The operator-declared comment author (comments.author /
+	// --comment-author, folded to REEVE_COMMENT_AUTHOR by the shared flag
+	// seam) short-circuits /user resolution. The action-supplied default-
+	// token author is resolved later, in authenticatedCommentAuthor.
 	if a := strings.TrimSpace(os.Getenv("REEVE_COMMENT_AUTHOR")); a != "" {
 		client.commentAuthorOverride.Store(&a)
 	}
 	return client, nil
-}
-
-// SetCommentAuthor declares the login this token writes comments as,
-// bypassing /user resolution. The CLI flag (--comment-author) and the
-// comment-author config key thread through here.
-func (c *Client) SetCommentAuthor(login string) {
-	a := strings.TrimSpace(login)
-	if a == "" {
-		return
-	}
-	c.commentAuthorOverride.Store(&a)
 }
 
 // apiBaseURL returns the non-default API base URL from GITHUB_API_URL, or
@@ -365,17 +353,30 @@ func cloneIssueComment(comment *gh.IssueComment) *gh.IssueComment {
 }
 
 // authenticatedCommentAuthor identifies the account whose token writes reeve
-// comments. The operator override (REEVE_COMMENT_AUTHOR, a CLI flag on every
-// command and a config key) wins. Otherwise /user resolves it: user tokens
-// return the user, App installation tokens return the app's bot user
-// (`<slug>[bot]`). When /user fails, the identity is NOT guessed - the old
-// `github-actions[bot]` assumption is wrong for App installation tokens
-// (their bot is `<slug>[bot]`) and a wrong author makes every upsert post a
-// duplicate comment forever. The caller must say so in the job log and
-// refuse the comment write (or set the override).
+// comments. Precedence, highest first:
+//  1. the operator override (comments.author / --comment-author, riding
+//     REEVE_COMMENT_AUTHOR),
+//  2. the action-supplied default-token knowledge: when the composite action
+//     sees that github-token IS the runner's default github.token, it sets
+//     REEVE_TOKEN_IS_DEFAULT=true and the author is github-actions[bot] -
+//     known from the token kind, not guessed, so /user is not consulted at
+//     all (the default token cannot be relied on to resolve an identity
+//     through it),
+//  3. /user: user tokens return the user, App installation tokens return the
+//     app's bot user (`<slug>[bot]`).
+//
+// When none of these resolve, the identity is NOT guessed - a wrong author
+// makes every upsert post a duplicate comment forever. The caller refuses
+// the write with the typed error naming the explicit setting.
 func (c *Client) authenticatedCommentAuthor(ctx context.Context) (string, error) {
 	if o := c.commentAuthorOverride.Load(); o != nil && *o != "" {
 		return *o, nil
+	}
+	// The default GITHUB_TOKEN always writes as github-actions[bot]: this is
+	// a property of the token kind the action detected, not a guess to fall
+	// back on when /user is unreachable.
+	if os.Getenv("REEVE_TOKEN_IS_DEFAULT") == "true" {
+		return "github-actions[bot]", nil
 	}
 	user, _, err := c.gh.Users.Get(ctx, "")
 	if err == nil && user.GetLogin() != "" {
@@ -391,7 +392,8 @@ func (c *Client) authenticatedCommentAuthor(ctx context.Context) (string, error)
 // CommentAuthorError is the typed refusal when the comment author cannot be
 // determined: the comment write is refused (never guessed - the old
 // github-actions[bot] assumption was wrong for App installation tokens)
-// and the text names the explicit setting that fixes it.
+// and the text names the explicit setting that fixes it. The default-token
+// path never reaches it: the action declares its author.
 type CommentAuthorError struct {
 	cause error
 }

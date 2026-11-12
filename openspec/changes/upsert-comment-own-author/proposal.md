@@ -37,3 +37,14 @@ escape hatch: `comments.author` in shared yaml and the `--comment-author`
 CLI flag (every repo command), declaring the login the token writes as and
 bypassing `/user` resolution entirely. No new keys were needed for the
 match-author rule itself.
+
+**Second-round follow-up:** the removed `github-actions[bot]` fallback broke
+the DEFAULT Actions setup: with the runner's default `github.token` the
+identity now resolves by KNOWING, not guessing - the composite action sees
+when its github-token input equals `github.token` and passes
+`REEVE_TOKEN_IS_DEFAULT=true`; the client then uses
+`github-actions[bot]` without consulting `/user`. Custom tokens still
+resolve through `/user` and refuse with the typed error on failure. The
+unused `SetCommentAuthor` was removed; the operator setting threads through
+the shared flag seam (`REEVE_COMMENT_AUTHOR`), with precedence operator
+setting > default-token author > `/user`.
