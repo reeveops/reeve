@@ -170,17 +170,12 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 	}
 
 	if pr <= 0 {
-		// Admin gate: shared.yaml locking.admin_override. Force-clearing
-		// other PRs' holders is the dangerous path; PR-scoped removal
-		// below is not.
+		// Reason requirement: no stack knowledge needed, so it stays before
+		// argument parsing. The allowlist gate runs below, once the stack is
+		// known, so its refusal can name the lock.
 		admin := cfg.Shared.Locking.AdminOverride
 		if admin.RequiresReason && reason == "" {
 			return fmt.Errorf("locks unlock: --reason is required (shared.yaml locking.admin_override.requires_reason=true)")
-		}
-		if len(admin.Allowed) > 0 {
-			if !actorAllowed(actor, admin.Allowed) {
-				return fmt.Errorf("locks unlock: actor %q is not in locking.admin_override.allowed", actor)
-			}
 		}
 	}
 
@@ -198,6 +193,19 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 		parts := splitRef(args[0])
 		if parts == nil {
 			return fmt.Errorf("expected project/stack, got %q", args[0])
+		}
+		// Admin gate: shared.yaml locking.admin_override. Force-clearing
+		// another PR's holder is the dangerous path; PR-scoped removal
+		// below is not. An EMPTY allowlist denies everyone (D1): the gate
+		// is a list of specific accounts, not an opt-in switch - the old
+		// behavior treated "unset" as "anyone", which made the gate
+		// decorative by default.
+		admin := cfg.Shared.Locking.AdminOverride
+		if len(admin.Allowed) == 0 {
+			return fmt.Errorf("force-unlock refused: locking.admin_override.allowed is empty, so no one may force-unlock %s/%s; add the actor to that list", parts[0], parts[1])
+		}
+		if !actorAllowed(actor, admin.Allowed) {
+			return fmt.Errorf("force-unlock refused %s/%s: actor %q is not in locking.admin_override.allowed; add the actor to that list (shared.yaml locking.admin_override.allowed) and re-run", parts[0], parts[1], actor)
 		}
 		l, err := s.ForceUnlock(ctx, parts[0], parts[1], ttl)
 		if err != nil {
