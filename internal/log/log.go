@@ -16,6 +16,7 @@ package log
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -26,25 +27,42 @@ import (
 )
 
 // invocationRedactor is the process-scoped redaction registry every log
-// record passes through. Runs install their invocation-scoped redactor
-// (registered auth env values + credential rules) at startup; a nil
-// redactor is a passthrough.
+// record passes through. Install() seeds it with the credential-rule floor
+// (a logger with no redactor installed must not be reachable); a run
+// replaces it with its invocation-scoped redactor (registered auth env
+// values + the same rules) and clears it when done.
 var invocationRedactor atomic.Pointer[redact.Redactor]
 
 // SetRedactor installs the redactor applied to every log record from this
-// process. Call it once per run, after registering values that are secret
-// in that run. nil clears it (plain passthrough), so tests and non-running
-// callers are unaffected.
-func SetRedactor(r *redact.Redactor) { invocationRedactor.Store(r) }
-
-// redactValue applies the current redactor to a value the sink is about to
-// emit. Only strings (and the string leaves of groups) carry leak potential;
-// other kinds pass through untouched.
-func redactValue(a slog.Attr) slog.Attr {
-	red := invocationRedactor.Load()
-	if red == nil {
-		return a
+// process. A run calls it once after registering values that are secret in
+// that run; nil restores the credential-rule floor (never a bare
+// passthrough), so tests and non-running callers keep sensible masking.
+func SetRedactor(r *redact.Redactor) {
+	if r == nil {
+		invocationRedactor.Store(redact.NewDefault())
+		return
 	}
+	invocationRedactor.Store(r)
+}
+
+// currentRedactor returns the redactor every record passes through. Install
+// guarantees this is never nil.
+func currentRedactor() *redact.Redactor {
+	if r := invocationRedactor.Load(); r != nil {
+		return r
+	}
+	d := redact.NewDefault()
+	invocationRedactor.Store(d)
+	return d
+}
+
+// redactValue applies the redactor to a value the sink is about to emit.
+// EVERY kind can leak: errors carry request URLs and configuration, Stringers
+// render operator-controlled text, LogValuers resolve at emit time. Any
+// non-string kind whose text rendering is not already clean is replaced by
+// its redacted string form - a masked log line beats a leaking typed value.
+func redactValue(a slog.Attr) slog.Attr {
+	red := currentRedactor()
 	switch a.Value.Kind() {
 	case slog.KindString:
 		return slog.String(a.Key, red.Redact(a.Value.String()))
@@ -56,18 +74,44 @@ func redactValue(a slog.Attr) slog.Attr {
 		}
 		return slog.Attr{Key: a.Key, Value: slog.GroupValue(out...)}
 	default:
+		// Resolve LogValuers now so their expansion is redacted too; then
+		// render the value to text and mask it. A clean rendering is kept
+		// in its original shape (numbers, durations, bools); anything the
+		// redactor touched becomes its redacted string.
+		text := valueText(a.Value)
+		if masked := red.Redact(text); masked != text {
+			return slog.String(a.Key, masked)
+		}
 		return a
+	}
+}
+
+// valueText renders an attribute value the way the sink would. Errors
+// render as their message, Stringers as their String(), everything else via
+// fmt.Sprint on the resolved value.
+func valueText(v slog.Value) string {
+	v = v.Resolve()
+	switch v.Kind() {
+	case slog.KindAny:
+		switch any := v.Any().(type) {
+		case error:
+			return any.Error()
+		case fmt.Stringer:
+			return any.String()
+		default:
+			return fmt.Sprint(any)
+		}
+	default:
+		return fmt.Sprint(v.Any())
 	}
 }
 
 // redactRecord copies r with the message and all attribute values passed
 // through the current redactor.
 func redactRecord(r slog.Record) slog.Record {
-	red := invocationRedactor.Load()
+	red := currentRedactor()
 	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
-	if red != nil {
-		out.Message = red.Redact(r.Message)
-	}
+	out.Message = red.Redact(r.Message)
 	r.Attrs(func(a slog.Attr) bool {
 		out.AddAttrs(redactValue(a))
 		return true
@@ -128,6 +172,11 @@ func ParseFormat(name string) Format {
 // red "Error:" - routing normal logs to stdout stops debug traces from looking
 // like failures. When w is non-nil (tests), everything goes to w.
 func Install(w io.Writer, level slog.Level, format Format) *slog.Logger {
+	// A logger with no redactor installed must not be reachable: every
+	// command bootstraps its logging here, and this seeds the credential-rule
+	// floor before any record can be emitted. A run upgrades it via
+	// SetRedactor with its invocation-scoped redactor.
+	currentRedactor()
 	opts := &slog.HandlerOptions{Level: level}
 	var h slog.Handler
 	if w != nil {

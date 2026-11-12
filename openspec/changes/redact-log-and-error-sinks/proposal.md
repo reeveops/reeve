@@ -32,3 +32,16 @@ violates the stated invariant: no output path bypasses `internal/core/redact`.
 - No config change.
 - Output text may change slightly where a credential-shaped value used to
   leak; masked values render as `[redacted]`.
+
+**Follow-ups (review):** the handler redacts EVERY attribute kind - errors,
+`fmt.Stringer`s and LogValuers render to text at emit time and pass the
+redactor (the old handler only handled `KindString`, so an error attribute
+leaked raw). Non-string values whose rendering survives redaction keep their
+original shape; anything touched becomes its redacted string form. The
+credential-rule floor now lives in `core/redact` and `log.Install` seeds it at
+process start: every command (preview, refresh, drift, and every other
+command) boots its logging through `Install`, and a logger with no redactor
+installed is not reachable. `SetRedactor(nil)` restores the rule floor, never
+a bare passthrough. The apply persistence error is a typed wrapper whose
+printed text is redacted while `errors.Is/errors.As` keep working against the
+cause.

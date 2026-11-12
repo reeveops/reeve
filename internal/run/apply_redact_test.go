@@ -78,3 +78,42 @@ func TestManifestErrorIsRedactedInSinks(t *testing.T) {
 		t.Fatalf("comment must show the masked value:\n%s", comments)
 	}
 }
+
+// TestManifestPersistsTypedCause pins that the redacted persistence error
+// stays unwrappable: callers must be able to errors.Is/errors.As the cause
+// while the printed text is masked - the old fmt.Errorf inlined the redacted
+// string and destroyed the error chain.
+func TestManifestPersistsTypedCause(t *testing.T) {
+	ctx := context.Background()
+	blobStore, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The cause carries a credential-shaped value: its TEXT must be masked
+	// while the error chain stays intact.
+	cause := errors.New("put runs/pr-18/apply-7/manifest.json: token ghp_" + strings.Repeat("A", 36) + " EOF from backend")
+	store := &manifestFailStore{Store: blobStore, fail: cause}
+	engine := &bgEngine{enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"}}}
+	fv := &bgVCS{changed: []string{"projects/api/main.ts"}, headSHA: bgSHA}
+	in := plainApplyInput(t, engine, fv, store)
+
+	out, err := Apply(ctx, in)
+	if err == nil {
+		t.Fatal("expected the persistence failure")
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("the redacted persistence error must unwrap to its cause: %v", err)
+	}
+	if strings.Contains(err.Error(), "ghp_AAAA") {
+		t.Fatalf("the printed text leaked the credential: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("the printed text must carry the redaction marker: %v", err)
+	}
+	if !strings.Contains(err.Error(), "post-apply persistence failed") {
+		t.Fatalf("the printed text must keep the run context: %v", err)
+	}
+	if out == nil || out.CommentBody == "" {
+		t.Fatal("the outcome must still be returned alongside the error")
+	}
+}

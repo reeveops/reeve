@@ -2,6 +2,7 @@ package log
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -102,14 +103,107 @@ func TestSinkRedactsRegisteredSecret(t *testing.T) {
 	}
 }
 
-// TestSinkWithoutRedactorPassthrough: with no redactor installed the sink
-// is a plain passthrough - install must not alter output.
-func TestSinkWithoutRedactorPassthrough(t *testing.T) {
+// TestSinkWithoutRedactorUsesRuleFloor: nil restores the credential-rule
+// floor, never a bare passthrough - a logger with no redactor installed
+// must not be reachable. Plain text survives; a rule-matching credential is
+// masked even then.
+func TestSinkWithoutRedactorUsesRuleFloor(t *testing.T) {
 	var buf bytes.Buffer
 	logger := Install(&buf, slog.LevelInfo, FormatText)
 	SetRedactor(nil)
-	logger.Info("plain message", "k", "plain-value with nothing to hide")
-	if !strings.Contains(buf.String(), "plain-value with nothing to hide") {
-		t.Fatalf("passthrough altered output: %s", buf.String())
+	logger.Info("plain message", "k", "plain-value with nothing to hide",
+		"cred", "ghp_"+strings.Repeat("A", 36))
+	out := buf.String()
+	if !strings.Contains(out, "plain-value with nothing to hide") {
+		t.Fatalf("plain text must survive the rule floor: %s", out)
 	}
+	if strings.Contains(out, "ghp_AAAA") {
+		t.Fatalf("credential leaked with only the rule floor: %s", out)
+	}
+	if !strings.Contains(out, "[redacted]") {
+		t.Fatalf("the rule floor must mask rule-matching values: %s", out)
+	}
+}
+
+// TestSinkRedactsEveryAttributeKind pins the sink guarantee across kinds:
+// error attributes, fmt.Stringers and LogValuers render to text at emit
+// time and MUST pass the redactor - the old handler only handled
+// KindString, so an error attribute leaked raw.
+func TestSinkRedactsEveryAttributeKind(t *testing.T) {
+	secret := "s3cr3t-value-42"
+	secretError := errors.New("put https://state.example/plan.json failed near " + secret)
+	stringer := stringerWithSecret{secret}
+	resolver := &logValuerWithSecret{secret}
+
+	for _, c := range []struct {
+		name   string
+		format Format
+	}{
+		{"text", FormatText},
+		{"json", FormatJSON},
+	} {
+		t.Run(c.name+"/error", func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := Install(&buf, slog.LevelInfo, c.format)
+			SetRedactor(funcWithSecrets(secret))
+			t.Cleanup(func() { SetRedactor(nil) })
+			logger.Warn("manifest persistence failed", "err", secretError)
+			out := buf.String()
+			if strings.Contains(out, secret) {
+				t.Fatalf("error attribute leaked: %s", out)
+			}
+			if !strings.Contains(out, "put https://state.example/plan.json failed near") {
+				t.Fatalf("error text must survive redacted: %s", out)
+			}
+			if !strings.Contains(out, "[redacted]") {
+				t.Fatalf("expected the masked value: %s", out)
+			}
+		})
+		t.Run(c.name+"/stringer", func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := Install(&buf, slog.LevelInfo, c.format)
+			SetRedactor(funcWithSecrets(secret))
+			t.Cleanup(func() { SetRedactor(nil) })
+			logger.Warn("stack render failed", "stack", stringer)
+			out := buf.String()
+			if strings.Contains(out, secret) {
+				t.Fatalf("Stringer attribute leaked: %s", out)
+			}
+			if !strings.Contains(out, "stack-api/prod near") {
+				t.Fatalf("Stringer text must survive redacted: %s", out)
+			}
+		})
+		t.Run(c.name+"/logvaluer", func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := Install(&buf, slog.LevelInfo, c.format)
+			SetRedactor(funcWithSecrets(secret))
+			t.Cleanup(func() { SetRedactor(nil) })
+			logger.Warn("state fetch failed", "value", slog.AnyValue(resolver))
+			out := buf.String()
+			if strings.Contains(out, secret) {
+				t.Fatalf("LogValuer attribute leaked: %s", out)
+			}
+			if !strings.Contains(out, "resolved-cred") {
+				t.Fatalf("LogValuer text must survive redacted: %s", out)
+			}
+		})
+	}
+}
+
+func funcWithSecrets(secrets ...string) *redact.Redactor {
+	r := redact.NewDefault()
+	for _, s := range secrets {
+		r.AddSecret(s)
+	}
+	return r
+}
+
+type stringerWithSecret struct{ secret string }
+
+func (s stringerWithSecret) String() string { return "stack-api/prod near " + s.secret }
+
+type logValuerWithSecret struct{ secret string }
+
+func (s *logValuerWithSecret) LogValue() slog.Value {
+	return slog.StringValue("resolved-cred " + s.secret)
 }

@@ -1058,14 +1058,31 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	// Post-apply persistence failure: everything above was still reported
 	// best-effort (timeline, comment, notify, audit), but the run must exit
 	// nonzero - infra changed and part of the durable record is missing.
-	// The returned error reaches the job log and the action summary, so it
-	// goes out redacted like every other sink.
+	// The returned error reaches the job log and the action summary, so its
+	// TEXT is redacted like every other sink, while callers keep
+	// errors.Is/errors.As against the cause (a typed wrapper, not a
+	// fmt.Errorf with the text inlined).
 	if perr := errors.Join(manifestErr, commentErr); perr != nil {
-		return result, fmt.Errorf("apply run finished (outcome=%s) but post-apply persistence failed: %s",
-			outcome, redactor.Redact(perr.Error()))
+		return result, &redactedPersistenceError{cause: perr, outcome: outcome, text: redactor.Redact(perr.Error())}
 	}
 	return result, nil
 }
+
+// redactedPersistenceError carries the post-apply persistence failure with a
+// redacted Error() text and the original cause chain intact - callers can
+// still errors.Is(err, blob.ErrPreconditionFailed) or errors.As against the
+// store error while the printed text stays masked.
+type redactedPersistenceError struct {
+	cause   error
+	outcome string
+	text    string
+}
+
+func (e *redactedPersistenceError) Error() string {
+	return fmt.Sprintf("apply run finished (outcome=%s) but post-apply persistence failed: %s", e.outcome, e.text)
+}
+
+func (e *redactedPersistenceError) Unwrap() error { return e.cause }
 
 // failedStackRefs returns the refs of stacks whose apply errored, in run
 // order. Non-empty means the run must surface a nonzero exit.
