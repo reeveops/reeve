@@ -129,6 +129,11 @@ runs:
         REEVE_RUN_ON_APPROVAL: ${{ inputs.run-on-approval }}
         REEVE_ALLOWED_ASSOCIATIONS: ${{ inputs.allowed-associations }}
         REEVE_COMMAND_PREFIXES: ${{ inputs.command-prefix }}
+        # A refused comment command both fails the job and posts the
+        # refusal as a PR reply (the commenter watches the PR, not the job
+        # log). Best effort: a posting failure never changes the refusal
+        # outcome.
+        REEVE_REFUSAL_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
         "$ACTION_PATH/.github/scripts/classify-event.sh"

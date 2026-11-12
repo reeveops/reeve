@@ -489,11 +489,6 @@ func TestActionClassifier(t *testing.T) {
 			wantArgs:    []string{"--break-glass"},
 		},
 		{
-			name:      "malformed explain",
-			eventName: "issue_comment",
-			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve explain one two","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
-		},
-		{
 			name:        "merged pull request",
 			eventName:   "pull_request",
 			eventJSON:   `{"action":"closed","pull_request":{"number":42,"merged":true}}`,
@@ -1115,4 +1110,126 @@ func repoPath(t *testing.T, parts ...string) string {
 	t.Helper()
 	root := filepath.Join("..", "..")
 	return filepath.Join(append([]string{root}, parts...)...)
+}
+
+// TestClassifierRefusalIsPostedAsPRReply pins the reviewer-visible half of
+// the refusal: a refused comment command fails the job AND posts the
+// refusal (command received, rule, accepted forms) as a reply on the PR.
+// The posting is best effort; the refused job stays red either way.
+func TestClassifierRefusalIsPostedAsPRReply(t *testing.T) {
+	dir := t.TempDir()
+	curlLog := filepath.Join(dir, "curl.calls")
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	curlScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CURL_LOG\"\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte(curlScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	eventPath := filepath.Join(dir, "event.json")
+	event := `{"action":"created","issue":{"number":7,"pull_request":{}},"comment":{"body":"/reeve preview --force","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+	if err := os.WriteFile(eventPath, []byte(event), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(dir, "output")
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script; PATH is prefixed with a fake-curl dir and fixtures travel through environment variables.
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"CURL_LOG="+curlLog,
+		"REEVE_REFUSAL_TOKEN=fake-token",
+		"GITHUB_REPOSITORY=o/r",
+		"GITHUB_API_URL=https://api.example.invalid",
+		"GITHUB_EVENT_NAME=issue_comment",
+		"GITHUB_EVENT_PATH="+eventPath,
+		"GITHUB_OUTPUT="+outputPath,
+		"REEVE_ALLOWED_ASSOCIATIONS=OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES=/reeve",
+		"REEVE_RUN_ON_APPROVAL=false",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the refused command must fail the job, got exit 0:\n%s", output)
+	}
+	const refusal = "/reeve preview refused: unknown argument `--force`. Accepted: (no arguments). Nothing ran."
+	if !strings.Contains(string(output), refusal) {
+		t.Fatalf("job log must carry the refusal:\nwant: %s\ngot:  %s", refusal, output)
+	}
+
+	calls, err := os.ReadFile(curlLog)
+	if err != nil {
+		t.Fatalf("the refusal must have been posted to the PR: %v", err)
+	}
+	if !strings.Contains(string(calls), "repos/o/r/issues/7/comments") {
+		t.Fatalf("the PR reply must target the refused PR's issue comments:\n%s", calls)
+	}
+	if !strings.Contains(string(calls), "api.example.invalid") {
+		t.Fatalf("the reply must use the ambient API URL:\n%s", calls)
+	}
+	// The comment body travels as the -d payload argument; the refusal text
+	// must appear verbatim there.
+	if !strings.Contains(string(calls), refusal) {
+		t.Fatalf("the PR reply body must carry the refusal verbatim:\nwant: %s\ngot:  %s", refusal, calls)
+	}
+}
+
+// TestClassifierRefusalPostingIsBestEffort pins that a posting failure
+// never softens the refusal: the job still fails and the reason still
+// reaches the job log.
+func TestClassifierRefusalPostingIsBestEffort(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	curlScript := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte(curlScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join(dir, "event.json")
+	event := `{"action":"created","issue":{"number":7,"pull_request":{}},"comment":{"body":"/reeve preview --force","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+	if err := os.WriteFile(eventPath, []byte(event), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(dir, "output")
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script and the fixture travels through environment variables.
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"REEVE_REFUSAL_TOKEN=fake-token",
+		"GITHUB_REPOSITORY=o/r",
+		"GITHUB_EVENT_NAME=issue_comment",
+		"GITHUB_EVENT_PATH="+eventPath,
+		"GITHUB_OUTPUT="+outputPath,
+		"REEVE_ALLOWED_ASSOCIATIONS=OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES=/reeve",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("the refused command must still fail the job when the reply cannot be posted")
+	}
+	if !strings.Contains(string(output), "/reeve preview refused: unknown argument `--force`") {
+		t.Fatalf("the refusal must still reach the job log:\n%s", output)
+	}
+	if !strings.Contains(string(output), "warning: could not post the refusal reply on PR #7") {
+		t.Fatalf("the posting failure must be stated:\n%s", output)
+	}
+}
+
+// TestClassifierRefusesExplainExtraSelector: `explain a b` is a refusal
+// (red job, posted reply), not a quiet skip - a malformed command must
+// never dispatch as something else.
+func TestClassifierRefusesExplainExtraSelector(t *testing.T) {
+	event := `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve explain one two","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+	out := classifyActionEventExpectRefusal(t, "issue_comment", event, "", "false")
+	const want = "/reeve explain refused: unknown argument `two`. Accepted: <project/stack> (at most one). Nothing ran."
+	if !strings.Contains(out, want) {
+		t.Fatalf("the extra selector must be refused with the accepted form:\nwant: %s\ngot:  %s", want, out)
+	}
 }

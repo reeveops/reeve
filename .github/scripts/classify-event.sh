@@ -39,10 +39,44 @@ skip() {
 # an exact argument set; the first token outside it refuses the command,
 # naming the argument and everything the verb accepts. Failing this script
 # makes the job red - the refusal is in the job log, in the place the
-# commenter is looking.
+# commenter is looking - and the refusal is ALSO posted as a reply on the
+# PR when the posting context is available, because the commenter watches
+# the PR, not the job log.
+#
+# The PR reply is best effort: a posting failure never changes the refusal
+# outcome (the job stays red either way); it only loses the convenience
+# reply. The token is never echoed or logged.
 refuse() {
-  printf '/reeve %s refused: unknown argument `%s`. Accepted: %s.\n' "$1" "$2" "$3" >&2
+  refuse_reason "$1" "unknown argument \`$2\`. Accepted: $3."
+}
+
+refuse_reason() {
+  local reason="/reeve $1 refused: $2 Nothing ran."
+  printf '%s\n' "$reason" >&2
+  post_refusal_reply "$reason"
   exit 1
+}
+
+# post_refusal_reply posts the refusal text as a PR comment reply when the
+# posting context is available (token, PR number). Failures warn and return;
+# the caller is refusing the command regardless.
+post_refusal_reply() {
+  local body="$1"
+  if [[ -z "${REEVE_REFUSAL_TOKEN:-}" || -z "${GITHUB_REPOSITORY:-}" || -z "${GITHUB_EVENT_PATH:-}" ]]; then
+    return 0
+  fi
+  local number
+  number=$(jq -r '.issue.number // .pull_request.number // empty' < "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+  if [[ -z "$number" ]]; then
+    return 0
+  fi
+  if ! curl -sf -X POST \
+    -H "Authorization: Bearer $REEVE_REFUSAL_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/issues/$number/comments" \
+    -d "$(jq -n --arg b "$body" '{body:$b}')" > /dev/null 2>&1; then
+    printf 'warning: could not post the refusal reply on PR #%s\n' "$number" >&2
+  fi
 }
 
 authorized_association() {
@@ -156,7 +190,7 @@ case "${GITHUB_EVENT_NAME:-}" in
         append_arg "--trigger-source"
         append_arg "comment"
         read -ra arg_tokens <<< "${rest:-}"
-        for tok in "${arg_tokens[@]}"; do
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
           case "$tok" in
             --force|force)
               append_arg "--force"
@@ -173,7 +207,7 @@ case "${GITHUB_EVENT_NAME:-}" in
       refresh)
         command="refresh"
         read -ra arg_tokens <<< "${rest:-}"
-        for tok in "${arg_tokens[@]}"; do
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
           case "$tok" in
             --dry-run|dry-run)
               append_arg "--dry-run"
@@ -190,7 +224,7 @@ case "${GITHUB_EVENT_NAME:-}" in
       ready)
         command="ready"
         read -ra arg_tokens <<< "${rest:-}"
-        for tok in "${arg_tokens[@]}"; do
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
           refuse "${verb}" "$tok" "(no arguments)"
         done
         ;;
@@ -205,7 +239,7 @@ case "${GITHUB_EVENT_NAME:-}" in
       preview|plan)
         command="preview"
         read -ra arg_tokens <<< "${rest:-}"
-        for tok in "${arg_tokens[@]}"; do
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
           refuse "${verb}" "$tok" "(no arguments)"
         done
         append_arg "--plan-requested"
@@ -213,7 +247,7 @@ case "${GITHUB_EVENT_NAME:-}" in
       unlock)
         command="unlock"
         read -ra arg_tokens <<< "${rest:-}"
-        for tok in "${arg_tokens[@]}"; do
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
           case "$tok" in
             --force|force)
               append_arg "--force"
@@ -240,7 +274,7 @@ case "${GITHUB_EVENT_NAME:-}" in
         command="run explain"
         read -r first second _ <<< "$rest"
         if [[ -n "${second:-}" ]]; then
-          skip "explain takes at most one project/stack selector, got: $rest - skipping."
+          refuse "${verb}" "$second" "<project/stack> (at most one)"
         fi
         if [[ -n "${first:-}" && "$first" != -* ]]; then
           append_arg "--stack"
@@ -252,7 +286,7 @@ case "${GITHUB_EVENT_NAME:-}" in
       help)
         command="pr-help"
         read -ra arg_tokens <<< "${rest:-}"
-        for tok in "${arg_tokens[@]}"; do
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
           refuse "${verb}" "$tok" "(no arguments)"
         done
         ;;

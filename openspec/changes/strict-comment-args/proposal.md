@@ -34,3 +34,12 @@ refusal; the break-glass justification is the comment body).
 - No config change.
 - **Behavior change:** previously-tolerated unknown or typo'd arguments now
   refuse the dispatch with a red job instead of silently ignoring.
+
+**Follow-up (review):** a refusal is now ALSO posted as a reply on the PR
+(the commenter watches the PR, not the job log), best effort - a posting
+failure never changes the refusal outcome. The posting context rides the
+existing action token; PR-side, nothing else changes. `explain a b` is now a
+refusal with the accepted form instead of a quiet skip: a malformed command
+must never dispatch as something else. The loop expansions use the
+`${arr[@]+...}` guard so `set -u` holds on bash < 4.4 (macOS runners ship
+bash 3.2).
