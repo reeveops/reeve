@@ -16,6 +16,7 @@ import (
 	"github.com/reeveops/reeve/internal/core/render"
 	"github.com/reeveops/reeve/internal/core/summary"
 	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/log"
 	"github.com/reeveops/reeve/internal/vcs"
 )
 
@@ -95,6 +96,10 @@ type RefreshOutput struct {
 // It is still a state mutation, so every stack is refreshed under its own
 // lock and the run is audited.
 func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
+	// The invocation redactor covers the log sink for the whole command:
+	// registered credential values mask from the moment they resolve.
+	redactor := InstallInvocationRedactor(in.Shared)
+	defer log.SetRedactor(nil)
 	start := time.Now()
 	runID := runIdentity("refresh", in.RunNumber, in.RunAttempt, in.CommitSHA)
 
@@ -258,7 +263,6 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			}
 		}
 
-		redactor := BuildRedactor(in.Shared)
 		if !pulumiLoginDone {
 			if loginErr := PulumiLogin(ctx, in.Config, stateEnv); loginErr != nil {
 				ss.Status = summary.StatusError

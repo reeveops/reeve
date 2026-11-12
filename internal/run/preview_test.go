@@ -255,7 +255,7 @@ func TestPreviewConcurrencyBoundAndProjectIsolation(t *testing.T) {
 	}
 	done := make(chan []summary.StackSummary, 1)
 	go func() {
-		done <- runPreviewTargets(ctx, in, nil, targets, "run-1", nil, approvals.Config{}, nil)
+		done <- runPreviewTargets(ctx, in, nil, targets, "run-1", nil, approvals.Config{}, nil, BuildRedactor(&schemas.Shared{}))
 	}()
 
 	nextStarted := func() discovery.Stack {
@@ -474,7 +474,7 @@ func TestRunPreviewOneRedactsAuthFailureLog(t *testing.T) {
 
 	got := runPreviewOne(context.Background(), PreviewInput{
 		Shared: &schemas.Shared{}, AuthConfig: cfg, AuthRegistry: reg,
-	}, nil, stack, "run-1", nil, reg)
+	}, nil, stack, "run-1", nil, reg, BuildRedactor(&schemas.Shared{}))
 	if got.Status != summary.StatusError {
 		t.Fatalf("status = %s, want error", got.Status)
 	}

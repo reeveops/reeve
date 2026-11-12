@@ -167,8 +167,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	// it), the PR comment, the timeline, and the audit entry. Secrets
 	// registered per stack below accumulate on this instance, so a secret
 	// learned for stack A masks everywhere.
-	redactor := BuildRedactor(in.Shared)
-	log.SetRedactor(redactor)
+	redactor := InstallInvocationRedactor(in.Shared)
 	defer log.SetRedactor(nil)
 
 	// Break-glass fail-fast: a missing justification never starts a run.

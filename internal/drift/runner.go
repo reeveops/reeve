@@ -16,6 +16,7 @@ import (
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/core/redact"
 	"github.com/reeveops/reeve/internal/iac"
+	invlog "github.com/reeveops/reeve/internal/log"
 	reeveotel "github.com/reeveops/reeve/internal/observability/otel"
 )
 
@@ -164,6 +165,14 @@ func (i Item) Ref() string { return i.Project + "/" + i.Stack }
 // Run executes drift checks for every declared-and-included stack. State
 // transitions persist; events surface via RunOutput.Events.
 func Run(ctx context.Context, opts Options) (*RunOutput, error) {
+	// The invocation redactor covers the log sink for the whole command: the
+	// credential values registered per stack below mask from the moment they
+	// resolve. The caller-built redactor (its rules include the shared
+	// config) is the same instance.
+	if opts.Redactor != nil {
+		invlog.SetRedactor(opts.Redactor)
+		defer invlog.SetRedactor(nil)
+	}
 	now := time.Now
 	if opts.Now != nil {
 		now = opts.Now

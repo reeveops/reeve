@@ -25,3 +25,15 @@ redacted form at every place it surfaces.
 - **THEN** the job log, timeline event, PR comment, and the returned run
   error all show the redacted form
 - **AND** the run still exits nonzero and still reports its stack outcomes
+
+#### Scenario: Every credential-resolving command installs the invocation redactor
+
+- **GIVEN** a command resolves credentials or registers secret values -
+  apply, preview, refresh, drift, or any other entry point that resolves an
+  auth env
+- **WHEN** the command logs anything after the credential resolves
+- **THEN** the process log redactor is the command's invocation redactor
+  (installed at command entry), so a registered value that matches no
+  pattern rule is still masked
+- **AND** values the run never registered still pass through - masking is
+  registration-driven, not blanket

@@ -45,3 +45,12 @@ installed is not reachable. `SetRedactor(nil)` restores the rule floor, never
 a bare passthrough. The apply persistence error is a typed wrapper whose
 printed text is redacted while `errors.Is/errors.As` keep working against the
 cause.
+
+**Follow-up (round 2):** `InstallInvocationRedactor` is installed at entry
+in EVERY command that resolves credentials: apply, preview, refresh, and
+drift (`drift.Run` installs its caller-built redactor). Preview and refresh
+previously built per-stack redactors for their own sinks without installing
+the values into the log handler; drift registered values onto a redactor
+that only covered its reports. Tests per command path (preview, refresh,
+drift) log a secret value matching no pattern rule through the repo's real
+log stack and assert the marker; an unregistered value still passes.
