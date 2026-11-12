@@ -466,6 +466,25 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			timeline.add(ctx, "⚠️", "preview history unavailable", "continuing under authorized break-glass: "+previewLoadReason)
 		}
 
+		// The break-glass notification fires as soon as the override is
+		// AUTHORIZED - whatever the gates then decide. It announces an
+		// emergency override in flight; the blocked stacks' gate comment is
+		// the record of what did not run.
+		if in.PRNumber > 0 && in.Notifications != nil {
+			channels := BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.VCS)
+			bgSummaries := make([]summary.StackSummary, 0, len(target))
+			for _, s := range target {
+				bgSummaries = append(bgSummaries, summary.StackSummary{Project: s.Project, Stack: s.Name, Env: s.Env})
+			}
+			bgInput := PRNotifyInput{
+				PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+				PRTitle: pr.Title, PRAuthor: pr.Author, Stacks: bgSummaries,
+			}
+			if err := NotifyPREvent(ctx, channels, notify.EventBreakGlass, bgInput); err != nil {
+				slog.Warn("notify break_glass failed", "err", err, "pr", in.PRNumber)
+			}
+		}
+
 		// Break-glass intent audit: an emergency override MUST leave a
 		// durable trace even if the process dies mid-apply, so the intent
 		// entry is written BEFORE any lock, credential, or engine call - and
@@ -500,35 +519,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 	}
 
-	// Notify approved + applying before the loop (creates the message on
-	// the apply trigger path). A break-glass run emits break_glass instead
-	// of approved - approvals were bypassed, not granted.
-	if in.PRNumber > 0 && in.Notifications != nil {
-		channels := BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.VCS)
-		preSummaries := make([]summary.StackSummary, 0, len(target))
-		for _, s := range target {
-			preSummaries = append(preSummaries, summary.StackSummary{
-				Project: s.Project, Stack: s.Name, Env: s.Env,
-			})
-		}
-		preInput := PRNotifyInput{
-			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
-			PRTitle: pr.Title, PRAuthor: pr.Author, Stacks: preSummaries,
-		}
-		if bgDecision != nil {
-			if err := NotifyPREvent(ctx, channels, notify.EventBreakGlass, preInput); err != nil {
-				slog.Warn("notify break_glass failed", "err", err, "pr", in.PRNumber)
-			}
-		} else {
-			if err := NotifyPREvent(ctx, channels, notify.EventApproved, preInput); err != nil {
-				slog.Warn("notify approved failed", "err", err, "pr", in.PRNumber)
-			}
-		}
-		if err := NotifyPREvent(ctx, channels, notify.EventApplying, preInput); err != nil {
-			slog.Warn("notify applying failed", "err", err, "pr", in.PRNumber)
-		}
-	}
-
 	executionEnv, executionCleanup, err := iac.ExecutionEnv()
 	if err != nil {
 		return nil, fmt.Errorf("prepare engine execution environment: %w", err)
@@ -560,13 +550,21 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			"state is reconciled with live infrastructure before this apply; the applied change set is computed after the refresh, so it is not the plan the PR previewed")
 	}
 
-	// 3. Per-stack: acquire lock → eval gates → apply or block.
+	// 3. Per-stack, two phases: gates first for EVERY target stack, then
+	// the approved/applying announcement lists exactly the stacks that
+	// passed, and only those go into the engine phase. A run whose gates
+	// deny never announces "approved" or "applying" - the gate comment
+	// already names the gate.
 	summaries := make([]summary.StackSummary, 0, len(target))
 	anyBlocked := false
 	overriddenSeen := map[preconditions.GateID]bool{}
 	var overriddenGates []string
-	pulumiLoginDone := false
-	stateAuthAcquired := false
+	type applyPlan struct {
+		s    discovery.Stack
+		ss   summary.StackSummary
+		prev PreviewStatus
+	}
+	var approved []applyPlan
 	for _, s := range target {
 		ss := summary.StackSummary{
 			Project: s.Project, Stack: s.Name, Env: s.Env,
@@ -727,6 +725,55 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			if acquired {
 				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "gates blocked")
 			}
+			summaries = append(summaries, ss)
+			continue
+		}
+
+		// Gates passed for this stack: it joins the apply phase.
+		approved = append(approved, applyPlan{s: s, ss: ss, prev: prev})
+	}
+
+	// The gates have now been evaluated for every target stack. Announce
+	// approved + applying listing ONLY the stacks whose gates passed - a
+	// blocked stack never appears in the announcement. A break-glass run
+	// already announced its override at authorization time; approvals were
+	// bypassed, not granted, so no approved event is sent.
+	if len(approved) > 0 && in.PRNumber > 0 && in.Notifications != nil {
+		channels := BuildNotifyChannels(ctx, in.Notifications, in.Blob, in.VCS)
+		passingSummaries := make([]summary.StackSummary, 0, len(approved))
+		for _, ap := range approved {
+			passingSummaries = append(passingSummaries, ap.ss)
+		}
+		preInput := PRNotifyInput{
+			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunURL: in.CIRunURL,
+			PRTitle: pr.Title, PRAuthor: pr.Author, Stacks: passingSummaries,
+		}
+		if bgDecision == nil {
+			if err := NotifyPREvent(ctx, channels, notify.EventApproved, preInput); err != nil {
+				slog.Warn("notify approved failed", "err", err, "pr", in.PRNumber)
+			}
+		}
+		if err := NotifyPREvent(ctx, channels, notify.EventApplying, preInput); err != nil {
+			slog.Warn("notify applying failed", "err", err, "pr", in.PRNumber)
+		}
+	}
+
+	// 3b. Apply phase: only the stacks whose gates passed.
+	pulumiLoginDone := false
+	stateAuthAcquired := false
+	for _, ap := range approved {
+		s := ap.s
+		ss := ap.ss
+		prev := ap.prev
+		redactor := BuildRedactor(in.Shared)
+
+		// Cancelled during the earlier stacks' applies: this stack never
+		// starts. The lock it holds from the gate phase is released; the
+		// record says why.
+		if ctx.Err() != nil {
+			ss.Status = summary.StatusError
+			ss.Error = "run cancelled before this stack was applied: " + ctx.Err().Error()
+			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "run cancelled before apply")
 			summaries = append(summaries, ss)
 			continue
 		}
