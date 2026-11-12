@@ -68,6 +68,46 @@ type Holder struct {
 	RecordedAt string `json:"recorded_at,omitempty"`
 }
 
+// HoldStatus renders the observable hold facts a lock reader needs: whether
+// the apply's persistent hold started, where the lease stood, and whether an
+// outcome was recorded. The one ambiguous state is a holder that started its
+// hold with NO recorded outcome and an expired lease: nothing was released
+// and nothing failed cleanly, so the run most likely died (runner killed) -
+// the reader must validate the stack's real state before unlocking. Every
+// surface that shows a holder renders through this or its own wording of it.
+func (h *Holder) HoldStatus(now time.Time) string {
+	if h == nil {
+		return ""
+	}
+	status := ""
+	if h.HoldStarted {
+		status = "hold started"
+		if exp, err := time.Parse(time.RFC3339, h.ExpiresAt); err == nil {
+			if exp.Before(now) {
+				status += ", lease expired at " + h.ExpiresAt
+			} else {
+				status += ", lease expires " + h.ExpiresAt
+			}
+		}
+	}
+	switch {
+	case h.Outcome != "":
+		status += fmt.Sprintf(", recorded outcome %q", h.Outcome)
+		if h.RecordedAt != "" {
+			status += fmt.Sprintf(" (recorded %s)", h.RecordedAt)
+		}
+		if h.RunURL != "" {
+			status += "; run " + h.RunURL
+		}
+		if h.AuditKey != "" {
+			status += "; audit record `" + h.AuditKey + "`"
+		}
+	case h.HoldStarted:
+		status += ", no outcome recorded - the run most likely died (runner killed); validate the stack's real state before unlocking"
+	}
+	return status
+}
+
 // QueueItem is a waiting applicant.
 type QueueItem struct {
 	PR         int    `json:"pr"`
