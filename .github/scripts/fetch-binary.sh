@@ -85,54 +85,12 @@ map_arch() {
   esac
 }
 
-# verify_sha256 <file> <checksums-file>
-# Checks <file> against its (basename-keyed) line in a sha256sum-format
-# checksums file. Returns non-zero on a missing entry or a mismatch.
 # checksum_entry <file> <sums-file>: prints the recorded digest for file's
 # basename, or "" when the checksums file lists no entry for it.
 checksum_entry() {
   local base
   base=$(basename "$1")
   awk -v f="$base" '$2 == f || $2 == "*" f {print $1; exit}' "$2"
-}
-
-# checksum_lookup <entry-name> <file> <sums-file> <expected-var> <actual-var>:
-# looks the digest up by entry-name (the released asset's name), hashes the
-# file in hand (which may come from the cache under a different name), ALWAYS
-# sets the two digest variables, and returns 0 only on a match. A missing
-# entry is reported but both digests are populated for the hard-fail text.
-checksum_lookup() {
-  local entry="$1" file="$2" sums="$3"
-  local exp act
-  exp=$(checksum_entry "$entry" "$sums")
-  act=$(sha256sum "$file" | cut -d' ' -f1)
-  printf -v "$4" '%s' "${exp:-<none>}"
-  printf -v "$5" '%s' "$act"
-  if [[ -z "$exp" ]]; then
-    echo "no checksum entry for $entry in $(basename "$sums")" >&2
-    return 1
-  fi
-  [[ "$exp" == "$act" ]]
-}
-
-# checksum_matches <file> <sums-file> <expected-var> <actual-var>: sets the
-# digest variables and returns 0 only on a match. The distinction between a
-# missing entry and a mismatch feeds the hard-fail messages.
-checksum_matches() {
-  local file="$1" sums="$2"
-  local exp act
-  exp=$(checksum_entry "$file" "$sums")
-  if [[ -z "$exp" ]]; then
-    echo "no checksum entry for $(basename "$file") in $(basename "$sums")" >&2
-    return 1
-  fi
-  act=$(sha256sum "$file" | cut -d' ' -f1)
-  if [[ "$exp" != "$act" ]]; then
-    return 1
-  fi
-  printf -v "$3" '%s' "$exp"
-  printf -v "$4" '%s' "$act"
-  return 0
 }
 
 verify_sha256() {
@@ -206,15 +164,16 @@ fetch_main() {
   local dest="${REEVE_DEST:?REEVE_DEST is required}"
   local archive_dir="${REEVE_ARCHIVE_DIR:-}"
   local cache_key="${REEVE_CACHE_KEY:-}"
-  local arch kind workdir asset sums source_hash_file tag ok=false
+  local arch kind workdir asset sums sums_dir source_hash_file tag expected actual
 
   fallback() {
     echo "$1 - falling back to source build"
     echo "fetched=false" >> "$out"
   }
 
-  # Mandatory-verification failure: nothing was or will be consumed. The
-  # run fails with the reason, per the release-signing trust design.
+  # The ONE hard failure: a digest mismatch against the verified signed
+  # checksums - a tamper signal. Nothing was or will be consumed, and the
+  # reason lands on stderr before the run fails.
   verify_hard_fail() {
     echo "prebuilt verification failed: $1" >&2
     echo "fetched=false" >> "$out"
@@ -291,95 +250,104 @@ fetch_main() {
   esac
 
   sums_dir="$workdir"
+  local expected actual sums_log asset_log cached_file
+  # The cache stores one archive per RESOLVED release tag: an archive cached
+  # for a different tag (edge resolves a new prerelease for the same source
+  # hash) is a cache MISS, never a mismatch. Only a mismatch for the same
+  # tag is the hard tamper failure.
+  cached_file="$archive_dir/$(printf '%s' "$tag" | sed 's|[^A-Za-z0-9._-]|_|g').tar.gz"
 
-  # 1. LIVE checksums + bundle, every run. Their fetch failure is a run
-  # failure: no archive - cached or fresh - is ever consumed without them.
+  # 1. LIVE checksums + bundle, every run. Nothing is consumed without
+  # them. Their fetch failure is a SOFT fallback stating the reason (gh's
+  # real error surfaces); the cached archive is ignored.
   echo "Fetching signed checksums for $tag from $repo"
-  if ! gh release download "$tag" --repo "$repo" \
+  if ! sums_log=$(gh release download "$tag" --repo "$repo" \
     --pattern "$sums" --pattern "${sums}.bundle" --dir "$sums_dir" \
     ${source_hash_file:+ --pattern "$source_hash_file"} \
-    --clobber > /dev/null 2>&1; then
-    verify_hard_fail "checksums.txt or its signature could not be fetched for $tag (release missing, network error, or auth failure). Nothing was used; build from source or fix the release"
+    --clobber 2>&1); then
+    fallback "checksums.txt or its signature could not be fetched for $tag (gh: $sums_log). The cached archive is ignored for this run; nothing was used"
+    return 0
   fi
 
-  # 2. Signature verified against the LIVE bundle - hard fail.
+  # 2. Signature verified against the LIVE bundle. An unverifiable signature
+  # (bundle missing, cosign unavailable, sig invalid) is a SOFT fallback
+  # with the reason; the cached archive is ignored.
   if ! verify_signature "$sums_dir/$sums" "$sums_dir/${sums}.bundle"; then
-    verify_hard_fail "$(basename "$sums") could not be verified for $tag; refusing to consume the prebuilt path (cached or fresh)"
+    fallback "$sums for $tag could not be verified; the cached archive is ignored for this run and nothing was consumed"
+    return 0
   fi
 
   # Edge/commit: bind the artifact to this exact action source (the signed
-  # checksums cover source-hash.txt).
+  # checksums cover source-hash.txt). A mismatch is a selector problem:
+  # soft fallback with the reason.
   if [[ -n "$source_hash_file" ]]; then
     if [[ -f "$sums_dir/$source_hash_file" ]]; then
       if ! verify_sha256 "$sums_dir/$source_hash_file" "$sums_dir/$sums"; then
-        verify_hard_fail "the fetched source-hash.txt does not match the signed checksums for $tag"
+        fallback "the fetched source-hash.txt does not match the signed checksums for $tag; the cached archive is ignored for this run"
+        return 0
       fi
     fi
     REEVE_SOURCE_HASH="${REEVE_SOURCE_HASH:-}" verify_source_hash "$sums_dir/$source_hash_file" || true
     if [[ "$(cat "$sums_dir/$source_hash_file" 2>/dev/null)" != "${REEVE_SOURCE_HASH:-}" ]]; then
-      fallback "release source hash does not match this action source"
+      fallback "release source hash does not match this action source; the cached archive is ignored for this run"
       return 0
     fi
   fi
 
-  # 3. The archive: cached or fresh, digest-checked against the verified
-  # checksums.
-  local have_cached=false
-  if [[ -n "$archive_dir" && -f "$archive_dir/archive.tar.gz" ]]; then
-    have_cached=true
-  fi
-
-  if [[ "$have_cached" == true ]]; then
-    # The cached archive holds the release asset's BYTES; the checksums
-    # entry is looked up by the resolved asset name, not the cache name.
-    expected=$(checksum_entry "$asset" "$sums_dir/$sums")
-    if [[ -z "$expected" ]]; then
-      verify_hard_fail "checksums.txt for $tag lists no entry for $asset (checksums are for a different artifact; cache key \"$cache_key\")"
-    fi
-    actual=$(sha256sum "$archive_dir/archive.tar.gz" | cut -d' ' -f1)
-    if [[ "$expected" != "$actual" ]]; then
-      verify_hard_fail "cached archive digest mismatch for cache key \"$cache_key\": expected $expected, got $actual. The cached archive does not match the SIGNED checksums of $tag; it was not used or re-downloaded. Clear the cache and investigate"
-    fi
-    echo "Using cached prebuilt archive for $tag (digest verified against the live signed checksums)"
-    if ! tar -xzf "$archive_dir/archive.tar.gz" -C "$workdir" reeve; then
-      verify_hard_fail "cached archive for $tag could not be extracted"
-    fi
-    ok=true
+  # 3. The archive for the resolved tag: cached or fresh. A digest mismatch
+  # against the verified signed checksums is the ONE tamper signal and
+  # hard-fails the run. Everything else falls back with the reason; the
+  # cached archive is never used unverified.
+  local source_archive="$workdir/$asset"
+  if [[ -f "$cached_file" ]]; then
+    source_archive="$cached_file"
+    echo "Using cached prebuilt archive for $tag (re-verified against the live signed checksums)"
   else
     echo "Downloading $asset from $repo"
-    if ! gh release download "$tag" --repo "$repo" \
-      --pattern "$asset" --dir "$workdir"; then
-      verify_hard_fail "release asset $asset could not be fetched for $tag (missing release/asset, network, or auth failure). Nothing was used"
-    fi
-    expected=$(checksum_entry "$asset" "$sums_dir/$sums")
-    if [[ -z "$expected" ]]; then
-      verify_hard_fail "checksums.txt for $tag lists no entry for $asset (the release does not match its artifact set)"
-    fi
-    actual=$(sha256sum "$workdir/$asset" | cut -d' ' -f1)
-    if [[ "$expected" != "$actual" ]]; then
-      verify_hard_fail "release archive digest mismatch for $asset: expected $expected, got $actual. The release does not match its SIGNED checksums; it was not extracted or cached"
-    fi
-    if ! tar -xzf "$workdir/$asset" -C "$workdir" reeve; then
-      verify_hard_fail "release asset $asset could not be extracted"
-    fi
-    ok=true
-    # Store the VERIFIED archive for the next run (cache key already binds
-    # the action source and artifact identity).
-    if [[ -n "$archive_dir" ]]; then
-      mkdir -p "$archive_dir"
-      cp "$workdir/$asset" "$archive_dir/archive.tar.gz"
+    if ! asset_log=$(gh release download "$tag" --repo "$repo" \
+      --pattern "$asset" --dir "$workdir" 2>&1); then
+      fallback "release asset $asset could not be fetched for $tag (gh: $asset_log). The cached archive for other tags is untouched; nothing was used"
+      return 0
     fi
   fi
-
-  if [[ "$ok" == true ]]; then
-    mkdir -p "$(dirname "$dest")"
-    install -m 0755 "$workdir/reeve" "$dest"
-    echo "Using prebuilt binary: $("$dest" --version)"
-    echo "fetched=true" >> "$out"
+  expected=$(checksum_entry "$asset" "$sums_dir/$sums")
+  if [[ -z "$expected" ]]; then
+    fallback "checksums.txt for $tag lists no entry for $asset (the release artifact set does not match); the cached archive is ignored for this run"
     return 0
   fi
-
-  fallback "prebuilt fetch failed"
+  actual=$(sha256sum "$source_archive" | cut -d' ' -f1)
+  if [[ "$expected" != "$actual" ]]; then
+    verify_hard_fail "digest mismatch for the $([ "$source_archive" == "$cached_file" ] && echo cached || echo "freshly downloaded") archive of $tag (cache key \"$cache_key\"): expected $expected, got $actual. The archive does not match the SIGNED checksums of $tag; it was not extracted. This is a tamper signal - clear the cache and investigate"
+  fi
+  if ! tar -xzf "$source_archive" -C "$workdir" reeve; then
+    if [[ "$source_archive" == "$cached_file" ]]; then
+      rm -f "$cached_file"
+    fi
+    fallback "the archive for $tag could not be extracted; nothing was executed; a broken cached archive is removed"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  install -m 0755 "$workdir/reeve" "$dest"
+  # Sanity-run the binary: a digest-verified binary that will not execute
+  # falls back to a source build with the reason (and a cached archive is
+  # dropped so the next run re-downloads).
+  if ! "$dest" --version > /dev/null 2>&1; then
+    rm -f "$dest"
+    if [[ "$source_archive" == "$cached_file" ]]; then
+      rm -f "$cached_file"
+    fi
+    fallback "the prebuilt binary for $tag does not execute (reeve --version failed); nothing ran"
+    return 0
+  fi
+  # A freshly downloaded archive that verified and executes is stored for
+  # the next run, under the resolved release tag. Source builds are never
+  # cached - only this verified-download path writes the cache.
+  if [[ "$source_archive" != "$cached_file" && -n "$archive_dir" ]]; then
+    mkdir -p "$archive_dir"
+    cp "$source_archive" "$cached_file"
+  fi
+  echo "Using prebuilt binary: $("$dest" --version)"
+  echo "fetched=true" >> "$out"
   return 0
 }
 
