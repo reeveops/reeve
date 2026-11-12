@@ -205,7 +205,7 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("force-unlock refused: locking.admin_override.allowed is empty, so no one may force-unlock %s/%s; add the actor to that list", parts[0], parts[1])
 		}
 		if !actorAllowed(actor, admin.Allowed) {
-			return fmt.Errorf("locks unlock: actor %q is not in locking.admin_override.allowed", actor)
+			return fmt.Errorf("force-unlock refused %s/%s: actor %q is not in locking.admin_override.allowed; add the actor to that list (shared.yaml locking.admin_override.allowed) and re-run", parts[0], parts[1], actor)
 		}
 		l, err := s.ForceUnlock(ctx, parts[0], parts[1], ttl)
 		if err != nil {

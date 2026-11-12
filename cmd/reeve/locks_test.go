@@ -268,7 +268,7 @@ func TestLocksUnlockAdminGateActorAllowlist(t *testing.T) {
 	setAdminOverride(t, root, "  admin_override:\n    allowed: [\"@alice\"]\n")
 
 	_, err := runReeve(t, "locks", "unlock", "proj/dev", "--actor", "mallory")
-	if err == nil || !strings.Contains(err.Error(), `actor "mallory" is not in locking.admin_override.allowed`) {
+	if err == nil || !strings.Contains(err.Error(), `force-unlock refused proj/dev: actor "mallory" is not in locking.admin_override.allowed; add the actor to that list (shared.yaml locking.admin_override.allowed) and re-run`) {
 		t.Fatalf("err = %v", err)
 	}
 
