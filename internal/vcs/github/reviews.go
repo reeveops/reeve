@@ -256,22 +256,14 @@ func (c *Client) ChecksGreen(ctx context.Context, sha string, opts vcs.ChecksGre
 		stOpt.Page = resp.NextPage
 	}
 
-	var failing []string
-	// Zero evidence is not passing evidence: no check runs and no statuses
-	// means nothing was observed on this commit. The old behavior read that
-	// empty result as green, so a silent CI outage, a misconfigured
-	// repository, or a repo with no checks at all passed the required-
-	// checks gate. Zero checks is a denial unless the operator opted out
-	// (repos where reeve is the ONLY check).
-	if len(checkRuns) == 0 && len(statuses) == 0 && !opts.AllowZeroChecks {
-		logger.Debug("zero checks observed", "sha", sha)
-		return false, []string{fmt.Sprintf("Required checks: no check runs found on %s. Zero checks is not treated as passing. Wait for CI, or set preconditions.allow_zero_checks if this repo has no other checks.", sha)}, nil
-	}
+	// Filter out this run and reeve's own prior check runs FIRST: they are
+	// not repository evidence. The zero-evidence decision below must count
+	// what is left AFTER the ignore filter - a repository whose ONLY
+	// check run is reeve's own (self) run has zero qualifying evidence, and
+	// the old pre-filter count read that as green.
+	qualifying := make([]*gh.CheckRun, 0, len(checkRuns))
 	for _, r := range checkRuns {
-		name, status, conclusion, url := r.GetName(), r.GetStatus(), r.GetConclusion(), r.GetDetailsURL()
-		logger.Debug("check_run inspected",
-			"name", name, "status", status, "conclusion", conclusion, "url", url)
-
+		name, url := r.GetName(), r.GetDetailsURL()
 		// Skip the current workflow run - it cannot be green while running.
 		if ignoreURLFragment != "" && strings.Contains(url, ignoreURLFragment) {
 			logger.Debug("check_run skipped: current run", "name", name)
@@ -285,6 +277,26 @@ func (c *Client) ChecksGreen(ctx context.Context, sha string, opts vcs.ChecksGre
 			logger.Debug("check_run skipped: self by name", "name", name)
 			continue
 		}
+		qualifying = append(qualifying, r)
+	}
+
+	var failing []string
+	// Zero evidence is not passing evidence: no qualifying check runs and no
+	// statuses means nothing was observed on this commit. The old behavior
+	// read that empty result as green, so a silent CI outage, a
+	// misconfigured repository, a repo with no checks at all - or one whose
+	// only check is reeve's own run - passed the required-checks gate.
+	// Zero checks is a denial unless the operator opted out (repos where
+	// reeve is the ONLY check).
+	if len(qualifying) == 0 && len(statuses) == 0 && !opts.AllowZeroChecks {
+		logger.Debug("zero qualifying checks observed", "sha", sha, "raw", len(checkRuns))
+		return false, []string{fmt.Sprintf("Required checks: no qualifying check runs found on %s. Zero checks is not treated as passing. Wait for CI, or set preconditions.allow_zero_checks if this repo has no other checks.", sha)}, nil
+	}
+	for _, r := range qualifying {
+		name, status, conclusion, url := r.GetName(), r.GetStatus(), r.GetConclusion(), r.GetDetailsURL()
+		logger.Debug("check_run inspected",
+			"name", name, "status", status, "conclusion", conclusion, "url", url)
+
 		// A check that hasn't concluded is pending, not passing. GitHub's
 		// own required-checks gate blocks on pending; skipping these let
 		// an apply pass while a failing-destined check was still running
