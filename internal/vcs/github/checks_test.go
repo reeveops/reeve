@@ -69,15 +69,67 @@ func TestChecksGreenPendingCommitStatusBlocks(t *testing.T) {
 
 func TestChecksGreenEmptyPendingStatusPasses(t *testing.T) {
 	// GitHub reports state=pending with an empty list when a commit has no
-	// statuses at all - that must NOT block.
+	// statuses at all - that must NOT block. Zero statuses AND zero check
+	// runs is now the ZERO-CHECKS CASE: not green unless the operator opts
+	// out (a repo where reeve is the only check).
 	srv := checksServer(t, noCheckRuns, `{"state": "pending", "statuses": []}`)
+	c := newFakeClient(t, srv)
+	green, failing, err := c.ChecksGreen(context.Background(), "abc1234", vcs.ChecksGreenOpts{AllowZeroChecks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !green {
+		t.Fatalf("opted-out zero checks must pass, got failing=%v", failing)
+	}
+
+	// Without the opt-out, zero checks is NOT treated as passing: a silent
+	// CI outage, a misconfigured repository, or a repo with no checks at
+	// all looked green - the strongest evidence available was nothing.
+	green, failing, err = c.ChecksGreen(context.Background(), "abc1234", vcs.ChecksGreenOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if green {
+		t.Fatal("zero checks must not be green by default")
+	}
+	const refusal = "Required checks: no qualifying check runs found on abc1234. Zero checks is not treated as passing. Wait for CI, or set preconditions.allow_zero_checks if this repo has no other checks."
+	if len(failing) != 1 || failing[0] != refusal {
+		t.Fatalf("zero-checks denial must carry the full refusal with the SHA and the opt-out key:\nwant: %s\ngot:  %v", refusal, failing)
+	}
+}
+
+// TestChecksGreenZeroCheckRunsDeniedByDefault pins the empty-repository
+// case on its own: an empty check-runs list with an empty status list is
+// the zero-checks case, and the refusal names the SHA, the rule, and the
+// opt-out key.
+func TestChecksGreenZeroCheckRunsDeniedByDefault(t *testing.T) {
+	srv := checksServer(t, noCheckRuns, `{"state": "clean", "statuses": []}`)
+	c := newFakeClient(t, srv)
+	green, failing, err := c.ChecksGreen(context.Background(), "abc1234", vcs.ChecksGreenOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if green {
+		t.Fatal("zero check runs must not be green by default")
+	}
+	if len(failing) != 1 || !strings.Contains(failing[0], "no qualifying check runs found on abc1234") ||
+		!strings.Contains(failing[0], "preconditions.allow_zero_checks") {
+		t.Fatalf("refusal must name the SHA and the opt-out key: %v", failing)
+	}
+}
+
+// TestCheckRunsWithStatusesNotZeroChecks: the legacy combined-status check
+// still counts as evidence - zero CHECK RUNS with statuses present takes
+// the status path, not the zero-checks refusal.
+func TestCheckRunsWithStatusesNotZeroChecks(t *testing.T) {
+	srv := checksServer(t, noCheckRuns, `{"state": "success", "statuses": [{"state": "success", "context": "lint"}]}`)
 	c := newFakeClient(t, srv)
 	green, failing, err := c.ChecksGreen(context.Background(), "abc1234", vcs.ChecksGreenOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !green {
-		t.Fatalf("no statuses at all must pass, got failing=%v", failing)
+		t.Fatalf("a passing legacy status is evidence; got failing=%v", failing)
 	}
 }
 
@@ -189,5 +241,55 @@ func TestChecksGreenAllGreenPasses(t *testing.T) {
 	}
 	if !green {
 		t.Fatalf("all green must pass, got failing=%v", failing)
+	}
+}
+
+// TestChecksGreenSelfRunOnlyIsZeroEvidence pins the filter-first evidence
+// count: a repository whose ONLY check run is reeve's own run (current or
+// prior) has zero qualifying evidence after the ignore filter - the old
+// pre-filter count saw one raw check run and read the commit as green.
+func TestChecksGreenSelfRunOnlyIsZeroEvidence(t *testing.T) {
+	srv := checksServer(t, `{
+		"total_count": 1,
+		"check_runs": [
+			{"name": "Reeve", "status": "completed", "conclusion": "success",
+			 "details_url": "https://github.com/o/r/actions/runs/123/job/456"}
+		]
+	}`, `{"state": "pending", "statuses": []}`)
+	c := newFakeClient(t, srv)
+
+	// The current run's own check (details URL carries the ignored run id).
+	opts := vcs.ChecksGreenOpts{IgnoreRunID: 123, IgnoreNames: []string{"Reeve"}}
+	green, failing, err := c.ChecksGreen(context.Background(), "abc1234", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if green {
+		t.Fatal("a self-run-only repository must not read as green")
+	}
+	const refusal = "Required checks: no qualifying check runs found on abc1234. Zero checks is not treated as passing. Wait for CI, or set preconditions.allow_zero_checks if this repo has no other checks."
+	if len(failing) != 1 || failing[0] != refusal {
+		t.Fatalf("refusal must name zero qualifying checks and the opt-out:\nwant: %s\ngot:  %v", refusal, failing)
+	}
+
+	// The named-self variant without the run-id fragment (a prior run of a
+	// reusable caller is ignored by name) is the same zero-evidence case.
+	green, failing, err = c.ChecksGreen(context.Background(), "abc1234",
+		vcs.ChecksGreenOpts{IgnoreNames: []string{"Reeve"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if green || len(failing) != 1 || failing[0] != refusal {
+		t.Fatalf("name-ignored self run must also be zero evidence: green=%v failing=%v", green, failing)
+	}
+
+	// With the opt-out the repository is green as configured.
+	green, failing, err = c.ChecksGreen(context.Background(), "abc1234",
+		vcs.ChecksGreenOpts{IgnoreRunID: 123, IgnoreNames: []string{"Reeve"}, AllowZeroChecks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !green {
+		t.Fatalf("opted-out self-run-only repository must pass: %v", failing)
 	}
 }

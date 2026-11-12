@@ -42,6 +42,9 @@ type ExplainInput struct {
 	CIRunID         int64
 	CIRunURL        string
 	SelfCheckNames  []string
+	// AllowZeroChecks overrides the preconditions allow_zero_checks opt-out
+	// from the CLI: zero observed checks pass the required-checks gate.
+	AllowZeroChecks bool
 	RepoRoot        string
 	RepoPath        string // RepoRoot relative to the VCS repository root.
 	Engine          Engine
@@ -144,13 +147,19 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 		return nil, fmt.Errorf("this PR maps to no stacks; pass an explicit project/stack to explain one anyway")
 	}
 
+	preCfg := toPreconditionsConfig(in.Shared)
+
 	// 2. Remaining PR-level facts, all plain reads. Explain is a diagnostic:
 	// a failed read of a gate input degrades that gate to "could not be
 	// evaluated" instead of killing the whole report - the commenter asking
 	// "why?" still gets an answer for everything that could be read.
 	gi, err := gatherGateInputs(ctx, in.VCS, in.Shared, in.CommentApproval,
 		in.PRNumber, pr, commitSHA, changed,
-		vcs.ChecksGreenOpts{IgnoreRunID: in.CIRunID, IgnoreNames: in.SelfCheckNames})
+		vcs.ChecksGreenOpts{
+			IgnoreRunID:     in.CIRunID,
+			IgnoreNames:     in.SelfCheckNames,
+			AllowZeroChecks: preCfg.AllowZeroChecks || in.AllowZeroChecks,
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +193,6 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 	}
 
 	freezeCfg := toFreezeConfig(in.Shared)
-	preCfg := toPreconditionsConfig(in.Shared)
 	hooksConfigured := len(HooksFromEngine(in.Config)) > 0
 	now := time.Now()
 	previewSnapshot, err := LoadPreviewSnapshot(ctx, in.Blob, in.PRNumber, commitSHA)
@@ -260,6 +268,7 @@ func Explain(ctx context.Context, in ExplainInput) (*ExplainOutput, error) {
 			UpToDate:           behind == 0,
 			CommitsBehind:      behind,
 			ChecksGreen:        checksGreen,
+			ChecksFailures:     gi.FailingChecks,
 			HasFreshPreview:    prev.Found,
 			PreviewAge:         prev.Age,
 			PreviewSucceeded:   prev.Succeeded,

@@ -67,4 +67,9 @@ type CommentApprovalConfig struct {
 type ChecksGreenOpts struct {
 	IgnoreRunID int64
 	IgnoreNames []string
+	// AllowZeroChecks treats a commit with no evidence at all - zero check
+	// runs and zero statuses - as passing. Repos where reeve is the only
+	// check opt in via preconditions.allow_zero_checks; the default is a
+	// denial: nothing observed is not passing evidence.
+	AllowZeroChecks bool
 }

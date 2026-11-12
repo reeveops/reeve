@@ -30,6 +30,7 @@ func newExplainCmd() *cobra.Command {
 	cmd.Flags().String("repo", "", "owner/repo (default: $GITHUB_REPOSITORY)")
 	cmd.Flags().String("token", "", "GitHub token (default: $GITHUB_TOKEN)")
 	cmd.Flags().String("root", "", "Repo root (default: cwd)")
+	cmd.Flags().Bool("allow-zero-checks", false, "Treat a commit with no check runs and no statuses as passing the required-checks gate (overrides preconditions.allow_zero_checks for this run)")
 	return cmd
 }
 
@@ -92,6 +93,7 @@ func runExplain(cmd *cobra.Command, _ []string) error {
 		CIRunID:         ciRunID,
 		CIRunURL:        runURL,
 		SelfCheckNames:  selfCheckNames(),
+		AllowZeroChecks: flagBool(cmd, "allow-zero-checks"),
 		RepoRoot:        root,
 		RepoPath:        repoPathForRoot(root),
 		Engine:          engine,

@@ -98,6 +98,11 @@ type ApprovalRuleYAML struct {
 type PreconditionsYAML struct {
 	RequireUpToDate      *bool `yaml:"require_up_to_date,omitempty"`
 	RequireChecksPassing *bool `yaml:"require_checks_passing,omitempty"`
+	// AllowZeroChecks treats a commit with no check runs AND no statuses as
+	// passing the required-checks gate. Default (unset/false) is a denial:
+	// zero observed checks is not passing evidence. Opt in for repositories
+	// where reeve is the only check.
+	AllowZeroChecks *bool `yaml:"allow_zero_checks,omitempty"`
 	// PreviewFreshness bounds how old the plan behind an apply may be, as a
 	// Go duration ("4h", "45m"). Omitted means DefaultPreviewFreshness;
 	// "0" disables the gate deliberately.
