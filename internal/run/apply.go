@@ -748,13 +748,24 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 				// can never be used (its gates will fail again), so remove
 				// the queue entry the lock attempt created.
 				_, derr := in.Locks.UnlockPR(ctx, s.Project, s.Name, in.PRNumber, runID, ttl, false)
+				dequeueNote := ""
 				if derr != nil {
 					// Fail loud, not silent: the queue entry is still there
-					// and the user must know it.
+					// and the user must know it. Store errors can quote
+					// configuration or credentials - redact what reaches
+					// the PR comment.
 					slog.Warn("lock queue removal failed", "stack", s.Ref(), "pr", in.PRNumber, "err", derr)
-					ss.Error = fmt.Sprintf("Could not remove this PR from the lock queue for %s (%v); re-run `/reeve apply` once the gates pass.", s.Ref(), derr)
+					dequeueNote = fmt.Sprintf("Could not remove this PR from the lock queue for %s (%s); re-run `/reeve apply` once the gates pass.",
+						s.Ref(), redactor.Redact(derr.Error()))
 				} else {
-					ss.Error = fmt.Sprintf("Removed from the lock queue for %s; re-run `/reeve apply` once the gates pass.", s.Ref())
+					dequeueNote = fmt.Sprintf("Removed from the lock queue for %s; re-run `/reeve apply` once the gates pass.", s.Ref())
+				}
+				// Append rather than overwrite: the blocked stack's gate
+				// reason is the primary message and must survive.
+				if ss.Error == "" {
+					ss.Error = dequeueNote
+				} else {
+					ss.Error += " " + dequeueNote
 				}
 			}
 			summaries = append(summaries, ss)
