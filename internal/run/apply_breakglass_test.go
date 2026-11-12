@@ -111,6 +111,9 @@ func (f *bgVCS) allComments() string {
 			b.WriteString(body + "\n")
 		}
 	}
+	for _, body := range f.posted {
+		b.WriteString(body + "\n")
+	}
 	return b.String()
 }
 

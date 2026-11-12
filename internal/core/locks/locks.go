@@ -45,6 +45,27 @@ type Holder struct {
 	// lock blobs without the field decode to false, which is correct:
 	// their holders were actively acquired.
 	Promoted bool `json:"promoted,omitempty"`
+	// HoldStarted marks that the run's APPLY phase began for this holder:
+	// the lease no longer bounds the hold and expiry never frees the lock
+	// or lets another PR acquire - the hold ends only when the apply
+	// releases it or an explicit unlock clears it. Old blobs decode to
+	// false: pre-decision locks keep their lease semantics.
+	HoldStarted bool `json:"hold_started,omitempty"`
+	// Outcome records why the lock is STILL held after its run ended:
+	// "failed" | "partial" | "interrupted". Empty while the run is live.
+	// A failed or interrupted apply leaves the lock held with its reason -
+	// released only by a successful apply or an explicit unlock - and
+	// everyone meeting the lock sees this reason.
+	Outcome string `json:"outcome,omitempty"`
+	// RunURL points at the CI run that produced the recorded outcome; it
+	// is the "where is the full detail" pointer every refusal renders
+	// alongside the audit record key.
+	RunURL string `json:"run_url,omitempty"`
+	// AuditKey names the write-once audit record carrying the run's full
+	// detail (its intent/completion entries).
+	AuditKey string `json:"audit_key,omitempty"`
+	// RecordedAt stamps when the outcome was recorded.
+	RecordedAt string `json:"recorded_at,omitempty"`
 }
 
 // QueueItem is a waiting applicant.
@@ -132,6 +153,10 @@ func TryAcquire(l Lock, applicant Holder, ttl time.Duration, now time.Time) (Loc
 	if l.Holder != nil && l.Holder.PR == applicant.PR {
 		if l.Holder.RunID != applicant.RunID {
 			if !l.Holder.Promoted {
+				// A started hold is never expiry-freeable, so this refusal
+				// lasts until the run releases or an explicit unlock -
+				// the message the caller renders says so with the holder's
+				// recorded reason.
 				return l, false, ErrHeldBySamePR
 			}
 			// Promoted dead reservation: adopt it as a fresh acquire.
@@ -245,8 +270,10 @@ func UnlockPR(l Lock, pr int, runID string, ttl time.Duration, now time.Time) Lo
 
 // Reap evicts an expired holder if present. Returns (lock, evicted). ttl
 // bounds the promoted holder's lease; <=0 falls back to defaultPromoteTTL.
+// A holder whose apply started (HoldStarted) is never evicted: the hold
+// ends only with the apply's own release or an explicit unlock.
 func Reap(l Lock, ttl time.Duration, now time.Time) (Lock, bool) {
-	if l.Holder == nil {
+	if l.Holder == nil || l.Holder.HoldStarted {
 		return l, false
 	}
 	if expired(l.Holder, now) {
@@ -297,8 +324,12 @@ func install(l Lock, applicant Holder, ttl time.Duration, now time.Time) Lock {
 	return l
 }
 
+// evictIfExpired clears an expired lease holder - EXCEPT one whose apply
+// has started (HoldStarted): a held lock never lapses on its own, whatever
+// the heartbeat does or how the lease aged. It is released only by the
+// apply's own successful completion or an explicit unlock.
 func evictIfExpired(l Lock, now time.Time, ttl time.Duration) Lock {
-	if l.Holder != nil && expired(l.Holder, now) {
+	if l.Holder != nil && expired(l.Holder, now) && !l.Holder.HoldStarted {
 		l.Holder = nil
 		l = promoteNext(l, now, promoteTTL(ttl))
 	}

@@ -373,3 +373,40 @@ func TestShortEtag(t *testing.T) {
 		t.Errorf("shortEtag(long) = %q", got)
 	}
 }
+
+// TestForceUnlockShowsHeldReason pins the operator surface: the force path
+// prints the holder's recorded hold reason (outcome, run URL, audit key)
+// and the validate-before-unlock instruction before clearing the lock.
+func TestForceUnlockShowsHeldReason(t *testing.T) {
+	root, s := lockRepo(t)
+	setAdminOverride(t, root, "  admin_override:\n    allowed: [mallory]\n")
+	acquire(t, s, "proj", "dev", 7)
+	if err := s.RecordOutcome(context.Background(), "proj", "dev",
+		corelocks.Holder{PR: 7, RunID: "r1"}, "failed",
+		"https://ci.example/run/7", "audit/2026/11/12/r1.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runReeve(t, "locks", "unlock", "proj/dev", "--force", "--actor", "mallory", "--reason", "state verified")
+	if err != nil {
+		t.Fatalf("unlock: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"overriding proj/dev holder PR #7",
+		`outcome "failed"`,
+		"https://ci.example/run/7",
+		"audit/2026/11/12/r1.json",
+		"validate the stack's real state",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("unlock output must surface the hold reason:\nwant: %s\ngot:  %s", want, out)
+		}
+	}
+	l, _, err := s.Get(context.Background(), "proj", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Holder != nil {
+		t.Fatalf("the override must still clear the holder: %+v", l.Holder)
+	}
+}

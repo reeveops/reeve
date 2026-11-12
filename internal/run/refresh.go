@@ -251,7 +251,13 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 				}
 				ss.Status = summary.StatusBlocked
 				ss.BlockedBy = holder
-				ss.Error = fmt.Sprintf("stack is locked by PR #%d; refresh rewrites state and must not race an apply", holder)
+				msg := fmt.Sprintf("stack is locked by PR #%d; refresh rewrites state and must not race an apply", holder)
+				if lock.Holder != nil {
+					if reason := lockBlockedReason(lock); reason != "" {
+						msg += " (" + reason + ")"
+					}
+				}
+				ss.Error = msg
 				ss.Gates = []summary.GateTrace{{Gate: "lock_acquirable", Outcome: "fail", Reason: ss.Error}}
 				anyBlocked = true
 				summaries = append(summaries, ss)

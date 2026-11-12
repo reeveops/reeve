@@ -3,10 +3,12 @@ package locks
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	corelocks "github.com/reeveops/reeve/internal/core/locks"
 )
@@ -366,4 +368,102 @@ func TestWalkersUseLockContentNotTheKey(t *testing.T) {
 		t.Fatalf("walker reported %q/%q, want the real names %q/%q",
 			all[0].Project, all[0].Stack, project, stack)
 	}
+}
+
+// TestStartedHoldNeverExpires pins the maintainer decision: once the hold
+// is started (MarkHeld), expiry frees nothing - a second PR is queued
+// behind the held lock even when the lease has long aged out, and a
+// heartbeat whose every refresh fails cannot free it either.
+func TestStartedHoldNeverExpires(t *testing.T) {
+	ctx := context.Background()
+	fs, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(fs)
+	const ttl = time.Hour
+
+	if _, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "r1", Actor: "alice"}, ttl); err != nil || !ok {
+		t.Fatalf("first acquire: ok=%v err=%v", ok, err)
+	}
+	if err := s.MarkHeld(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "r1"}); err != nil {
+		t.Fatalf("MarkHeld: %v", err)
+	}
+
+	// Time passes far past the lease.
+	base := time.Now()
+	s.Now = func() time.Time { return base.Add(48 * time.Hour) }
+
+	// Heartbeat refreshes that ALL fail (the CAS store refuses) must not
+	// free the lock either.
+	failingBlob := &failingCASStore{Store: fs}
+	failing := New(failingBlob)
+	failing.Now = s.Now
+	failing.MaxRetries = 1
+	if err := failing.RefreshLease(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "r1"}, ttl); err == nil {
+		t.Fatal("expected the refresh to fail against an unhealthy CAS store")
+	}
+	l, _, err := s.Get(ctx, "api", "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Holder == nil || !l.Holder.HoldStarted {
+		t.Fatalf("the hold must survive the failed refresh: %+v", l.Holder)
+	}
+
+	// A second PR cannot acquire: it queues behind the held lock.
+	if _, ok, err := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 2, RunID: "r2", Actor: "bob"}, ttl); err != nil || ok {
+		t.Fatalf("the second PR must queue behind the persistent hold, got ok=%v err=%v", ok, err)
+	}
+	l, _, _ = s.Get(ctx, "api", "prod")
+	if l.Holder == nil || l.Holder.PR != 1 || len(l.Queue) != 1 || l.Queue[0].PR != 2 {
+		t.Fatalf("holder and queue after the second attempt: holder=%+v queue=%+v", l.Holder, l.Queue)
+	}
+
+	// The reaper respects the hold too.
+	l, evicted, err := s.Reap(ctx, "api", "prod", ttl)
+	if err != nil || evicted {
+		t.Fatalf("the reaper must not free a started hold: evicted=%v err=%v", evicted, err)
+	}
+	if l.Holder == nil || l.Holder.PR != 1 {
+		t.Fatalf("the reaper must leave the held lock: %+v", l.Holder)
+	}
+
+	// Outcome recording also works on the stale lease store (the hold's
+	// reason is written with the run's terminal state).
+	if err := s.RecordOutcome(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "r1"}, "failed", "https://ci.example/run/1", "audit/2026/11/12/r1.json"); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	l, _, _ = s.Get(ctx, "api", "prod")
+	if l.Holder.Outcome != "failed" || l.Holder.RunURL == "" || l.Holder.AuditKey == "" {
+		t.Fatalf("the recorded outcome must persist: %+v", l.Holder)
+	}
+
+	// Same-PR different run is refused - adoption via expiry cannot happen
+	// on a started hold.
+	// Same-PR different run: refused with ErrHeldBySamePR - adoption via
+	// expiry can never happen on a started hold.
+	_, ok, rerr := s.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 1, RunID: "r1-retry", Actor: "alice"}, ttl)
+	if !errors.Is(rerr, corelocks.ErrHeldBySamePR) {
+		t.Fatalf("the retry must be refused with ErrHeldBySamePR on a started hold, got ok=%v err=%v", ok, rerr)
+	}
+	if ok {
+		l2, _, _ := s.Get(ctx, "api", "prod")
+		if l2.Holder.RunID == "r1-retry" {
+			t.Fatalf("a started hold must not be adopted after expiry: %+v", l2.Holder)
+		}
+	}
+	l, _, _ = s.Get(ctx, "api", "prod")
+	if l.Holder == nil || l.Holder.RunID != "r1" {
+		t.Fatalf("the refused adoption must keep the original hold: %+v", l.Holder)
+	}
+}
+
+// failingCASStore refuses every conditional write: a CAS outage mid-apply.
+type failingCASStore struct {
+	blob.Store
+}
+
+func (f *failingCASStore) PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch string) (*blob.Metadata, error) {
+	return nil, errors.New("conditional write unavailable: simulated CAS outage")
 }

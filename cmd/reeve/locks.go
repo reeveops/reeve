@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/factory"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
 	"github.com/reeveops/reeve/internal/config"
@@ -91,6 +92,10 @@ func locksList(cmd *cobra.Command, _ []string) error {
 		holder := "-"
 		if l.Holder != nil {
 			holder = fmt.Sprintf("PR #%d (expires %s)", l.Holder.PR, l.Holder.ExpiresAt)
+			if l.Holder.Outcome != "" {
+				holder += fmt.Sprintf("  outcome=%q  run=%s  audit=%s",
+					l.Holder.Outcome, l.Holder.RunURL, l.Holder.AuditKey)
+			}
 		}
 		fmt.Fprintf(w, "%s/%s  %s  holder=%s  queue=%d\n",
 			l.Project, l.Stack, st, holder, len(l.Queue))
@@ -120,6 +125,16 @@ func locksExplain(cmd *cobra.Command, args []string) error {
 		h := l.Holder
 		fmt.Fprintf(w, "holder: PR #%d  actor=%s  run=%s  acquired=%s  expires=%s\n",
 			h.PR, h.Actor, h.RunID, h.AcquiredAt, h.ExpiresAt)
+		if h.Outcome != "" {
+			fmt.Fprintf(w, "outcome: %q  recorded=%s\n", h.Outcome, h.RecordedAt)
+			if h.RunURL != "" {
+				fmt.Fprintf(w, "run: %s\n", h.RunURL)
+			}
+			if h.AuditKey != "" {
+				fmt.Fprintf(w, "audit: %s\n", h.AuditKey)
+			}
+			fmt.Fprintln(w, "the lock will not lapse on its own; the stack's real state must be validated (preview / inspect the run) before an explicit unlock clears it")
+		}
 	} else {
 		fmt.Fprintln(w, "holder: (free)")
 	}
@@ -198,6 +213,20 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 		parts := splitRef(args[0])
 		if parts == nil {
 			return fmt.Errorf("expected project/stack, got %q", args[0])
+		}
+		// The holder's recorded reason surfaces BEFORE the override so the
+		// operator sees what they are clearing (and what to validate).
+		current, _, gerr := s.Get(ctx, parts[0], parts[1])
+		if gerr != nil && !errors.Is(gerr, blob.ErrNotFound) {
+			return gerr
+		}
+		if current.Holder != nil {
+			h := current.Holder
+			fmt.Fprintf(w, "overriding %s/%s holder PR #%d", parts[0], parts[1], h.PR)
+			if h.Outcome != "" {
+				fmt.Fprintf(w, " (outcome %q, run %s, audit %s - validate the stack's real state before unlocking)", h.Outcome, h.RunURL, h.AuditKey)
+			}
+			fmt.Fprintln(w)
 		}
 		l, err := s.ForceUnlock(ctx, parts[0], parts[1], ttl)
 		if err != nil {

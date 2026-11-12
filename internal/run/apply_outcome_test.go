@@ -80,13 +80,29 @@ func TestApplyFailedStackSetsFailedOutput(t *testing.T) {
 		t.Fatalf("failure is not blocked: %+v", out)
 	}
 
-	// Lock must have been released after the failed stack.
+	// A failed apply leaves its lock HELD with the reason: a lock held by
+	// an apply never lapses on its own - released only by a successful
+	// apply or an explicit unlock.
 	l, _, err := in.Locks.Get(ctx, "api", "prod")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.Holder != nil {
-		t.Fatalf("lock must be released after engine failure: %+v", l.Holder)
+	if l.Holder == nil || !l.Holder.HoldStarted {
+		t.Fatalf("the failed stack's lock must stay held: %+v", l.Holder)
+	}
+	if l.Holder.Outcome != "failed" {
+		t.Fatalf("hold outcome = %q, want failed: %+v", l.Holder.Outcome, l.Holder)
+	}
+	if l.Holder.RunURL == "" || l.Holder.AuditKey == "" || l.Holder.RecordedAt == "" {
+		t.Fatalf("the hold must carry the run URL, the audit key, and a timestamp: %+v", l.Holder)
+	}
+	if !strings.Contains(l.Holder.AuditKey, "apply-7-abc1234def5678") {
+		t.Fatalf("audit key must name this run: %+v", l.Holder)
+	}
+
+	// The failure notice reaches the PR.
+	if !strings.Contains(fv.allComments(), "STILL HELD") {
+		t.Fatalf("the PR must carry the held-lock notice: %s", fv.allComments())
 	}
 
 	// Audit records the failed outcome.

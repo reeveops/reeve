@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/reeveops/reeve/internal/blob"
@@ -157,6 +158,60 @@ func (s *Store) RefreshLease(ctx context.Context, project, stack string, holder 
 	return err
 }
 
+// MarkHeld records that the run's APPLY phase began for holder: the lease
+// no longer bounds the hold (HoldStarted), so expiry and heartbeat failure
+// never free the lock or let another PR acquire. The hold ends only when
+// the apply releases it or an explicit unlock clears it.
+func (s *Store) MarkHeld(ctx context.Context, project, stack string, holder corelocks.Holder) error {
+	l, etag, err := s.Get(ctx, project, stack)
+	if err != nil {
+		return err
+	}
+	_, _, err = s.maintain(ctx, s.key(project, stack), lockSnapshot{lock: l, etag: etag}, func(cur corelocks.Lock) (corelocks.Lock, bool, error) {
+		if cur.Holder == nil || cur.Holder.PR != holder.PR || cur.Holder.RunID != holder.RunID {
+			return cur, false, fmt.Errorf("cannot mark hold for %s/%s: lock is not held by PR #%d run %q", project, stack, holder.PR, holder.RunID)
+		}
+		if cur.Holder.HoldStarted {
+			return cur, false, nil // already marked
+		}
+		next := *cur.Holder
+		next.HoldStarted = true
+		cur.Holder = &next
+		cur.UpdatedAt = s.Now().UTC().Format(time.RFC3339)
+		return cur, true, nil
+	})
+	return err
+}
+
+// RecordOutcome leaves the lock held by a run that ENDED without a clean
+// release - failed, partial, or interrupted - and records why: the holder
+// is unchanged (still PR #N with HoldStarted), plus the human-readable
+// outcome, the run URL, the audit record key, and the time. The hold ends
+// only with an explicit unlock.
+func (s *Store) RecordOutcome(ctx context.Context, project, stack string, holder corelocks.Holder, outcome, runURL, auditKey string) error {
+	l, etag, err := s.Get(ctx, project, stack)
+	if err != nil {
+		return fmt.Errorf("record %s for %s/%s: %w", outcome, project, stack, err)
+	}
+	_, _, err = s.maintain(ctx, s.key(project, stack), lockSnapshot{lock: l, etag: etag}, func(cur corelocks.Lock) (corelocks.Lock, bool, error) {
+		if cur.Holder == nil || cur.Holder.PR != holder.PR || cur.Holder.RunID != holder.RunID {
+			return cur, false, fmt.Errorf("cannot record %s for %s/%s: lock is no longer held by PR #%d run %q (already released or explicitly unlocked)", outcome, project, stack, holder.PR, holder.RunID)
+		}
+		if cur.Holder.Outcome == outcome && cur.Holder.AuditKey == auditKey {
+			return cur, false, nil // already recorded
+		}
+		next := *cur.Holder
+		next.Outcome = outcome
+		next.RunURL = runURL
+		next.AuditKey = auditKey
+		next.RecordedAt = s.Now().UTC().Format(time.RFC3339)
+		cur.Holder = &next
+		cur.UpdatedAt = s.Now().UTC().Format(time.RFC3339)
+		return cur, true, nil
+	})
+	return err
+}
+
 // StartHeartbeat spawns a goroutine that refreshes holder's lease every
 // ttl/3 for as long as the work (an engine apply) runs, so an apply longer
 // than locking.ttl is never evicted by the reaper mid-flight.
@@ -186,6 +241,7 @@ func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holde
 	exited := make(chan struct{})
 	var once sync.Once
 	lostOnce := sync.Once{}
+	var lastOK atomic.Pointer[time.Time]
 	go func() {
 		defer close(exited)
 		t := time.NewTicker(interval)
@@ -200,6 +256,8 @@ func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holde
 				err := s.RefreshLease(ctx, project, stack, holder, ttl)
 				switch {
 				case err == nil:
+					now := time.Now().UTC()
+					lastOK.Store(&now)
 					// lease extended
 				case ctx.Err() != nil:
 					// The work ended while the refresh was in flight;
@@ -221,8 +279,15 @@ func (s *Store) StartHeartbeat(ctx context.Context, project, stack string, holde
 						})
 						return
 					}
-					slog.Warn("lock heartbeat refresh failed - CAS store may be unhealthy",
-						"project", project, "stack", stack, "pr", holder.PR, "run_id", holder.RunID, "err", err)
+					if last := lastOK.Load(); last != nil {
+						slog.Warn("lock heartbeat refresh failed - CAS store may be unhealthy; the hold persists regardless",
+							"project", project, "stack", stack, "pr", holder.PR,
+							"run_id", holder.RunID, "last_successful_refresh", last.UTC().Format(time.RFC3339), "err", err)
+					} else {
+						slog.Warn("lock heartbeat refresh failed - CAS store may be unhealthy; the hold persists regardless (no successful refresh yet)",
+							"project", project, "stack", stack, "pr", holder.PR,
+							"run_id", holder.RunID, "err", err)
+					}
 				}
 			}
 		}

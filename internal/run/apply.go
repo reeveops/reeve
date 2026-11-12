@@ -601,7 +601,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 				}
 			}
 			ss.Status = summary.StatusBlocked
-			ss.Error = fmt.Sprintf("another run of PR #%d (%s) currently holds the lock for this stack; wait for it to finish or for its lease to expire at %s", in.PRNumber, holderRun, expiry)
+			ss.Error = fmt.Sprintf("another run of PR #%d (%s) currently holds the lock for this stack. A lock held by an apply never lapses on its own: it is released by that run or an explicit unlock (%s)", in.PRNumber, holderRun, expiry)
 			anyBlocked = true
 			slog.Info("lock held by concurrent run of same PR",
 				"stack", s.Ref(), "pr", in.PRNumber, "holder_run", holderRun, "this_run", runID)
@@ -618,8 +618,10 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			continue
 		}
 		lockBlockedBy := 0
+		lockReason := ""
 		if !acquired && lock.Holder != nil {
 			lockBlockedBy = lock.Holder.PR
+			lockReason = lockBlockedReason(lock)
 		}
 
 		// Resolve rules + approvals for this stack. TeamMembers is the
@@ -676,6 +678,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			ApprovalsSatisfied: approvalsRes.Satisfied,
 			LockAcquirable:     acquired,
 			LockBlockedByPR:    lockBlockedBy,
+			LockHoldReason:     lockReason,
 			InFreeze:           inFreeze,
 			FreezeName:         freezeName,
 
@@ -805,6 +808,17 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 
 		stackCtx, endStack := in.OTEL.StartStackSpan(ctx, s.Project, s.Name, s.Env, "apply")
 		stackStart := time.Now()
+		// The hold becomes persistent here: once the apply has started, the
+		// lock never lapses on its own - expiry and heartbeat failure free
+		// nothing - and it is released only by this run's successful
+		// completion or an explicit unlock. MarkHeld is best-effort: if the
+		// store refuses (CAS outage), the lease path still applies, which is
+		// exactly the pre-decision recovery window.
+		runHolder := corelocks.Holder{PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor}
+		if herr := in.Locks.MarkHeld(ctx, s.Project, s.Name, runHolder); herr != nil {
+			slog.Warn("could not mark the apply hold persistent; the lease path still applies",
+				"stack", s.Ref(), "pr", in.PRNumber, "run_id", runID, "err", herr)
+		}
 		// Lease heartbeat: an apply longer than locking.ttl must not have
 		// its LIVE holder reaped mid-flight (two applies would then run
 		// concurrently). Refreshes every ttl/3 until the engine returns.
@@ -865,7 +879,46 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			ss.Error = redactor.Redact(aerr.Error())
 			stackOutcome = "error"
 			endStack(stackOutcome, time.Since(stackStart).Seconds())
-			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "engine apply failed")
+
+			// The hold persists: a lock held by an apply never lapses on
+			// its own - released only by this run's success (which this
+			// was not) or an explicit unlock. Record why: outcome, run
+			// URL, audit record key, time - everyone who meets this lock
+			// sees them until it is released.
+			outcome := "failed"
+			if countPassed(summaries) > 0 {
+				outcome = "partial"
+			}
+			if errors.Is(aerr, ctx.Err()) || errors.Is(aerr, context.Canceled) {
+				outcome = "interrupted"
+			}
+			key := auditKeyForRun(start, runID)
+			hold := lockHoldDetail(s.Ref(), in.PRNumber, runID, outcome, in.CIRunURL, key)
+			if in.Locks != nil {
+				// The run context may be cancelled (interrupted applies);
+				// the outcome record rides a short detached deadline like
+				// the terminal writes, so an interrupted run still records
+				// why its lock stays.
+				rctx, rcancel := terminalContext(ctx)
+				rerr := in.Locks.RecordOutcome(rctx, s.Project, s.Name, runHolder, outcome, in.CIRunURL, key)
+				rcancel()
+				if rerr != nil {
+					slog.Error("could not record the hold outcome; the lock state keeps its lease semantics",
+						"stack", s.Ref(), "pr", in.PRNumber, "outcome", outcome, "err", rerr)
+				}
+			}
+			// Error level: an apply failed mid-flight and its lock stays.
+			slog.Error("apply failed mid-flight; the lock stays held with the reason",
+				"stack", s.Ref(), "pr", in.PRNumber, "run_id", runID,
+				"outcome", outcome, "run_url", in.CIRunURL, "audit_key", key,
+				"err", redactor.Redact(aerr.Error()))
+			// Tell the PR: the commenter sees the failure and the held-lock
+			// fact next to it, not only in the CI log.
+			if in.VCS != nil && in.PRNumber > 0 {
+				if cerr := in.VCS.PostComment(ctx, in.PRNumber, redactor.Redact(hold)); cerr != nil {
+					slog.Warn("could not post the held-lock notice", "stack", s.Ref(), "pr", in.PRNumber, "err", cerr)
+				}
+			}
 			summaries = append(summaries, ss)
 			PostAnnotation(ctx, in.Annotations, annotations.EventApplyFailed,
 				s.Project, s.Name, s.Env, "failed", ss.Error, in.PRNumber, in.CommitSHA)
@@ -1130,6 +1183,68 @@ func terminalContext(ctx context.Context) (context.Context, context.CancelFunc) 
 // it. ttl bounds the lease of any holder promoted from the queue. A
 // cancelled run context is swapped for a short detached one so the release
 // still lands during the CI kill grace window.
+// countPassed reports how many stack summaries already carried a successful
+// apply (planned or no-op) - the partial/failed discriminator for the hold
+// outcome.
+func countPassed(ss []summary.StackSummary) int {
+	n := 0
+	for _, s := range ss {
+		if s.Status == summary.StatusPlanned || s.Status == summary.StatusNoOp {
+			n++
+		}
+	}
+	return n
+}
+
+// auditKeyForRun mirrors internal/audit's key layout: the write-once entry
+// keyed by the run's start date and run id. This is the pointer rendered
+// next to a held-lock reason.
+func auditKeyForRun(started time.Time, runID string) string {
+	utc := started.UTC()
+	return fmt.Sprintf("audit/%04d/%02d/%02d/%s.json", utc.Year(), int(utc.Month()), utc.Day(), runID)
+}
+
+// lockHoldDetail renders the machine-checked facts of a held lock: who
+// holds it, why it is still held, and where the full detail is. Everything
+// reaching this text is redacted at render time by the callers.
+func lockHoldDetail(stack string, pr int, runID, outcome, runURL, auditKey string) string {
+	detail := fmt.Sprintf(
+		"⚠️ The lock for %s is STILL HELD by PR #%d (run `%s`, outcome `%s`).\n\nA lock held by an apply never lapses on its own: it is released only by that run's successful completion or an explicit unlock. The stack's real state must be validated (run `/reeve preview` or inspect the run) before the lock is cleared.",
+		stack, pr, runID, outcome)
+	if runURL != "" {
+		detail += fmt.Sprintf("\n- Run: %s", runURL)
+	}
+	if auditKey != "" {
+		detail += fmt.Sprintf("\n- Audit record: `%s`", auditKey)
+	}
+	detail += "\n\nThe apply failed; the resources may be partially applied. `/reeve unlock --force` (or the admin CLI unlock) clears the hold after the state is verified."
+	return detail
+}
+
+// lockBlockedReason renders what another PR sees when its lock gate finds
+// a held lock: holder, outcome, and the pointers.
+func lockBlockedReason(l corelocks.Lock) string {
+	if l.Holder == nil {
+		return ""
+	}
+	reason := fmt.Sprintf("held by PR #%d", l.Holder.PR)
+	if l.Holder.Outcome != "" {
+		reason += fmt.Sprintf(" (outcome %q", l.Holder.Outcome)
+		if l.Holder.RecordedAt != "" {
+			reason += fmt.Sprintf(", recorded %s", l.Holder.RecordedAt)
+		}
+		reason += ")"
+	}
+	if l.Holder.RunURL != "" {
+		reason += fmt.Sprintf("; run %s", l.Holder.RunURL)
+	}
+	if l.Holder.AuditKey != "" {
+		reason += fmt.Sprintf("; audit record `%s`", l.Holder.AuditKey)
+	}
+	reason += " - the stack's real state must be validated before the lock is cleared"
+	return reason
+}
+
 func releaseLockOrLog(ctx context.Context, store *blocks.Store, project, stack string, pr int, runID string, ttl time.Duration, reason string) {
 	if store == nil {
 		return

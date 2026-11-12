@@ -48,3 +48,17 @@ stack fails with `Refresh aborted on ...`).
   the caller wrote over live state.
 - Actor attribution for a release ("released by @actor") is not observable
   from lock state alone; the message states the observed lock state instead.
+
+## Maintainer decision (2026-11-12): a started hold never lapses
+
+The lease was the crash-recovery path for applies; the maintainer decided
+differently: **a lock held by an apply never lapses on its own.** Once the
+apply starts, the hold persists - expiry and heartbeat failure free nothing -
+and the hold ends only when the apply releases it or an explicit unlock
+clears it. A failed, partial, or interrupted apply leaves the lock held
+recording the reason (holder PR, outcome `failed`/`partial`/`interrupted`,
+time, run URL, audit record key), every surface meeting the lock shows it
+(other PRs' gate refusals, `reeve locks`, the force-unlock output), a failed
+apply logs at error level and comments on the PR, and the force-unlock
+override is recorded in the audit entry. Lease-expiry adoption no longer
+applies to started holds; blocked PRs queue behind a held lock.
