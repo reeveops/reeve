@@ -864,11 +864,18 @@ func TestBinaryFetchRejectsMissingSignatureVerifier(t *testing.T) {
 		t.Fatal(err)
 	}
 	// #nosec G204 -- bash sources the repository-owned helper with fixed test arguments.
-	cmd := exec.Command("bash", "-c", `source "$1"; if verify_signature "$2" "$3"; then exit 9; fi`,
+	cmd := exec.Command("bash", "-c", `source "$1"; if verify_signature "$2" "$3" 're' 'release.yml@refs/tags/v0.9.0' 'version v0.9.0'; then exit 9; fi`,
 		"test", script, sums, filepath.Join(t.TempDir(), "missing.bundle"))
 	cmd.Env = []string{"PATH=/nonexistent"}
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("missing verifier must be a handled verification failure: %v\n%s", err, output)
+	}
+	// The refusal names the artifact, the required identity, and the next step.
+	for _, want := range []string{"version v0.9.0", "release.yml@refs/tags/v0.9.0"} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("the verification refusal must name the identity rule (%q):\n%s", want, output)
+		}
 	}
 }
 

@@ -212,6 +212,17 @@ The documented candidate `d31c814640689c2f2e1b0d02d2bc11a80a94faab` includes the
 Cache identity includes the source repository/hash, variant, platform, and cache schema; cache publication precedes workload execution.
 Unavailable or unverifiable downloads fall back to a source build, which still requires a functioning toolchain and dependency access.
 
+The cosign signature of the `checksums.txt` must come from the workflow that produced the artifact:
+
+| Ref | Required signing identity |
+| --- | --- |
+| `vX.Y.Z` or a semantic prerelease tag | `release.yml@refs/tags/<the requested version>` |
+| `master` / `next` / a full commit SHA | `edge-build.yml@refs/heads/master` |
+
+A signature from any other workflow or ref is refused: the job log states the requested version, the identity required, the identity found, and the fallback. The prebuilt binary is never used in that case; the action builds reeve from source for that run.
+
+Breaking: releases up to v0.8.0 inclusive were signed from `refs/heads/master`, so they no longer verify against the per-version-tag identity rule. There is no exception for them; consumers of those versions fall back to a source build (or pin a post-v0.8.0 release).
+
 The shared workflow uses the composite action from its own exact commit.
 Its self-reference syntax requires GitHub.com and runner 2.336.0 or newer; use the composite action on GHES until that platform supports self references.
 
