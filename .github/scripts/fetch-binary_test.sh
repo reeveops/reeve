@@ -125,6 +125,8 @@ run_fetch() {
   mkdir -p "$case_dir"
   : > "$case_dir/gh.calls"
   : > "$case_dir/cosign.calls"
+  # The verification redesign hard-fails on tampering signals; the exit
+  # code is captured (run_fetch_code) rather than aborting the suite.
   env \
     PATH="$fake_bin:$PATH" \
     REEVE_REF="$ref" \
@@ -140,18 +142,63 @@ run_fetch() {
     GH_FAKE_API_EMPTY="${GH_FAKE_API_EMPTY:-false}" \
     GH_FAKE_DOWNLOAD_FAIL="${GH_FAKE_DOWNLOAD_FAIL:-false}" \
     COSIGN_FAKE_FAIL="${COSIGN_FAKE_FAIL:-false}" \
+    REEVE_ARCHIVE_DIR="${REEVE_ARCHIVE_DIR:-}" \
+    REEVE_CACHE_KEY="${REEVE_CACHE_KEY:-}" \
     bash "$FETCH_SCRIPT" > "$case_dir/log" 2>&1
+  printf '%s\n' "$?" > "$case_dir/code"
   printf '%s\n' "$case_dir"
 }
 
 good_fixture="$test_root/fixtures/good"
 make_fixture "$good_fixture" "$source_hash"
 
+sums_digest=$(cd "$good_fixture" && sha256sum reeve_linux_amd64.tar.gz | cut -d' ' -f1)
+
+# The cold hit downloads, verifies, and stores the archive for the next run.
+good_cached_dir="$test_root/cached-good"
+mkdir -p "$good_cached_dir"
+REEVE_ARCHIVE_DIR="$good_cached_dir"
 cold_dir=$(run_fetch cold-hit "$commit_ref" "$good_fixture")
+unset REEVE_ARCHIVE_DIR
 assert_eq "$(cat "$cold_dir/output")" fetched=true
 [[ -x "$cold_dir/reeve" ]] || fail "cold hit did not install an executable"
 assert_contains "$(cat "$cold_dir/log")" "Using prebuilt binary: reeve fixture"
 assert_contains "$(cat "$cold_dir/cosign.calls")" "verify-blob"
+# The verified archive is now the cached artifact.
+[[ -f "$good_cached_dir/archive.tar.gz" ]] || fail "cold hit did not store the verified archive"
+
+# Cache hit: the SIGNED checksums are re-fetched and verified every run,
+# the cached archive is digest-checked against them, and the asset is NOT
+# re-downloaded.
+REEVE_ARCHIVE_DIR="$good_cached_dir"
+cached_dir=$(run_fetch cache-hit "$commit_ref" "$good_fixture")
+unset REEVE_ARCHIVE_DIR REEVE_CACHE_KEY
+assert_eq "$(cat "$cached_dir/output")" fetched=true
+[[ -x "$cached_dir/reeve" ]] || fail "cache hit did not install an executable"
+if grep -q -- "--pattern \$asset-name-marker" "$cached_dir/gh.calls" 2>/dev/null; then :; fi
+if grep -q "release download fake-release --repo reeveops/reeve --pattern reeve_linux_amd64.tar.gz" "$cached_dir/gh.calls"; then
+  fail "cache hit must not re-download the release asset"
+fi
+assert_contains "$(cat "$cached_dir/log")" "Using cached prebuilt archive"
+
+# A tampered cached archive is refused: hard fail naming both digests and
+# the cache key. The LIVE signed checksums expose the tampering.
+tampered_cached_dir="$test_root/cached-bad"
+mkdir -p "$tampered_cached_dir"
+cp "$good_fixture/reeve_linux_amd64.tar.gz" "$tampered_cached_dir/archive.tar.gz"
+printf 'tamper' >> "$tampered_cached_dir/archive.tar.gz"
+REEVE_ARCHIVE_DIR="$tampered_cached_dir"
+REEVE_CACHE_KEY="reeve-asset-v1-test-key"
+tampered_dir=$(run_fetch tampered-cache "$commit_ref" "$good_fixture")
+unset REEVE_ARCHIVE_DIR REEVE_CACHE_KEY
+if [[ "$(cat "$tampered_dir/code")" -eq 0 ]]; then
+  fail "a tampered cached archive must fail the fetch"
+fi
+assert_eq "$(cat "$tampered_dir/output")" fetched=false
+[[ ! -e "$tampered_dir/reeve" ]] || fail "tampered cache installed a binary"
+assert_contains "$(cat "$tampered_dir/log")" "cached archive digest mismatch"
+assert_contains "$(cat "$tampered_dir/log")" "reeve-asset-v1-test-key"
+assert_contains "$(cat "$tampered_dir/log")" "expected $sums_digest"
 
 GH_FAKE_API_EMPTY=true
 missing_dir=$(run_fetch missing-release "$commit_ref" "$good_fixture")
@@ -160,20 +207,30 @@ assert_eq "$(cat "$missing_dir/output")" fetched=false
 [[ ! -e "$missing_dir/reeve" ]] || fail "missing release installed a binary"
 assert_contains "$(cat "$missing_dir/log")" "no retained prerelease matches commit"
 
+# A fresh download digest mismatch is a hard failure with both digests.
 bad_checksum_fixture="$test_root/fixtures/bad-checksum"
 cp -R "$good_fixture" "$bad_checksum_fixture"
 printf 'corrupt\n' >> "$bad_checksum_fixture/reeve_linux_amd64.tar.gz"
 bad_checksum_dir=$(run_fetch bad-checksum "$commit_ref" "$bad_checksum_fixture")
+if [[ "$(cat "$bad_checksum_dir/code")" -eq 0 ]]; then
+  fail "a digest mismatch on a fresh download must fail the fetch"
+fi
 assert_eq "$(cat "$bad_checksum_dir/output")" fetched=false
 [[ ! -e "$bad_checksum_dir/reeve" ]] || fail "bad checksum installed a binary"
-assert_contains "$(cat "$bad_checksum_dir/log")" "checksum mismatch"
+assert_contains "$(cat "$bad_checksum_dir/log")" "release archive digest mismatch"
+assert_contains "$(cat "$bad_checksum_dir/log")" "expected $sums_digest"
 
+# A signature that cannot be verified is a hard failure with the reason.
 COSIGN_FAKE_FAIL=true
 bad_signature_dir=$(run_fetch bad-signature "$commit_ref" "$good_fixture")
 unset COSIGN_FAKE_FAIL
+if [[ "$(cat "$tampered_dir/code")" -eq 0 ]]; then
+  fail "an unverifiable signature must fail the fetch"
+fi
 assert_eq "$(cat "$bad_signature_dir/output")" fetched=false
 [[ ! -e "$bad_signature_dir/reeve" ]] || fail "bad signature installed a binary"
 assert_contains "$(cat "$bad_signature_dir/log")" "signature verification FAILED"
+assert_contains "$(cat "$bad_signature_dir/log")" "refusing to consume the prebuilt path"
 
 wrong_source_fixture="$test_root/fixtures/wrong-source"
 make_fixture "$wrong_source_fixture" "$other_hash"
@@ -204,13 +261,15 @@ classify_step=$(step_block "Classify prebuilt binary eligibility")
 cosign_step=$(step_block "Install cosign for binary verification")
 setup_step=$(step_block "Set up Go (from reeve's go.mod)")
 build_step=$(step_block "Build reeve")
-assert_contains "$fetch_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
-assert_contains "$classify_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
+# The verify-then-extract design: classification, cosign install, and fetch
+# run on cache hits TOO - the cached archive is re-verified against the LIVE
+# signed checksums every run. Only the source-build steps carry the
+# fetched != 'true' fallback gate.
+assert_contains "$classify_step" "steps.reeve-dispatch.outputs.run == 'true'"
 assert_contains "$cosign_step" "steps.reeve-binary.outputs.eligible == 'true'"
 assert_contains "$fetch_step" "steps.reeve-binary.outputs.eligible == 'true'"
-assert_contains "$setup_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
 assert_contains "$setup_step" "steps.reeve-fetch.outputs.fetched != 'true'"
-assert_contains "$build_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
 assert_contains "$build_step" "steps.reeve-fetch.outputs.fetched != 'true'"
+assert_contains "$fetch_step" "REEVE_ARCHIVE_DIR: \${{ runner.temp }}/reeve-asset"
 
 echo "fetch-binary tests passed"
