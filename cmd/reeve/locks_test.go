@@ -365,6 +365,73 @@ func TestSplitRef(t *testing.T) {
 	}
 }
 
+// TestForceUnlockWritesFailedCompletionOnUnlockError pins the audit
+// close-out: when the force path's mutation attempt errors AFTER the intent
+// record exists, a "failed" completion record is written - the audit trail
+// must never end on an open intent. The reachable error here is a lock
+// object whose content does not match its key, which the earlier pre-read
+// (a raw decode, no key validation) accepts but UnlockPR refuses.
+func TestForceUnlockWritesFailedCompletionOnUnlockError(t *testing.T) {
+	root, s := lockRepo(t)
+	setAdminOverride(t, root, "  admin_override:\n    allowed: [mallory]\n")
+	acquire(t, s, "proj", "dev", 7)
+
+	// Corrupt the lock object: content that does not match its key.
+	lockPath := filepath.Join(root, ".reeve-state", "locks", "proj", "dev.json")
+	bad := `{"project":"other","stack":"x","holder":null,"queue":[],"updated_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(lockPath, []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runReeve(t, "locks", "unlock", "proj/dev", "--pr", "7", "--force",
+		"--actor", "mallory", "--reason", "audit close-out")
+	if err == nil || !strings.Contains(err.Error(), "lock content does not match key") {
+		t.Fatalf("expected the mismatched-content refusal, got %v", err)
+	}
+
+	// The intent record must be closed out with a failed completion.
+	fs, err := filesystem.New(filepath.Join(root, ".reeve-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := fs.List(context.Background(), "audit/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var intents, failures int
+	for _, k := range keys {
+		data, _, err := filesystem.ReadBytes(context.Background(), fs, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var e audit.Entry
+		if err := json.Unmarshal(data, &e); err != nil {
+			t.Fatalf("decode audit entry %s: %v", k, err)
+		}
+		if e.Op != "force_unlock" || e.LockOverride == nil {
+			continue
+		}
+		switch e.Outcome {
+		case "force_unlock_intent":
+			intents++
+			if !strings.Contains(e.LockOverride.Reason, "audit close-out") {
+				t.Fatalf("intent reason = %q", e.LockOverride.Reason)
+			}
+		case "failed":
+			failures++
+			if len(e.Stacks) != 1 || e.Stacks[0].Status != "force_unlock_failed" {
+				t.Fatalf("failed completion stacks = %+v", e.Stacks)
+			}
+			if !strings.Contains(e.Stacks[0].Error, "lock content does not match key") {
+				t.Fatalf("failed completion must carry the refusal: %+v", e.Stacks[0])
+			}
+		}
+	}
+	if intents != 1 || failures != 1 {
+		t.Fatalf("audit entries: intents=%d failed-completions=%d, want 1 and 1", intents, failures)
+	}
+}
+
 func TestShortEtag(t *testing.T) {
 	if got := shortEtag("short"); got != "short" {
 		t.Errorf("shortEtag(short) = %q", got)
@@ -393,6 +460,10 @@ func TestForceUnlockWritesAuditRecord(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, s := lockRepo(t)
+			// The admin allowlist is set explicitly so this test holds both
+			// before and after admin-override-empty-denies merges: an empty
+			// list denies everyone once that lands.
+			setAdminOverride(t, root, "  admin_override:\n    allowed: [mallory]\n")
 			acquire(t, s, "proj", "dev", tc.wantPR)
 			enqueue(t, s, "proj", "dev", 8)
 

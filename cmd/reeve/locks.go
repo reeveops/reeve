@@ -309,6 +309,13 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 	}
 	l, err := s.UnlockPR(ctx, parts[0], parts[1], pr, "", ttl, force)
 	if err != nil {
+		if force {
+			// The intent record exists (written before the mutation
+			// attempt); it must be closed out. Nothing was unlocked.
+			writeUnlockCompletion(ctx, aw, actor, repoHint(cmd), unlockID, override,
+				[]audit.Stack{{Ref: parts[0] + "/" + parts[1], Status: "force_unlock_failed",
+					Error: run.BuildRedactor(cfg.Shared).Redact(err.Error())}}, "failed")
+		}
 		if errors.Is(err, blocks.ErrHolderActive) {
 			return fmt.Errorf("PR #%d is in the middle of an apply on %s/%s; if you are sure you want to unlock, re-run with --force", pr, parts[0], parts[1])
 		}
