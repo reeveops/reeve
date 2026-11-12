@@ -103,45 +103,86 @@ verify_sha256() {
   fi
 }
 
-# verify_signature <checksums-file> <bundle-file>
+# verify_signature <checksums-file> <bundle-file> <id-re> <required-id> <what>
 # Verifies the cosign keyless bundle over the checksums file. The checksum
 # already chains every artifact to this file, so signing it signs the set.
 # A valid bundle and cosign are mandatory. Any failure falls back to a source
 # build, so an unverified binary never reaches the action cache.
+#
+# The identity is scoped per artifact kind - the signing run must be the one
+# that actually produced the artifact:
+#   version tag (stable/rc): release.yml@refs/tags/<requested version>
+#   per-commit master/edge:  edge-build.yml@refs/heads/master
+# A signature from any other workflow or ref (e.g. v0.8.0 and earlier, signed
+# from master) is refused and names what was required and found.
 verify_signature() {
-  local sums="$1" bundle="$2"
+  local sums="$1" bundle="$2" id_re="$3" required_id="$4" what="$5"
   if ! command -v cosign > /dev/null 2>&1; then
-    echo "cosign is not installed; cannot verify release signature" >&2
+    echo "signature verification FAILED for ${what}: no verifier available" >&2
+    echo "  rule: the signing certificate must identify ${required_id}" >&2
+    echo "  found: nothing - cosign is not installed" >&2
+    echo "  next step: the prebuilt binary is NOT used; this run builds reeve from source" >&2
     return 1
   fi
   if [[ ! -f "$bundle" ]]; then
-    echo "release published no signature bundle" >&2
+    echo "signature verification FAILED for ${what}: the release published no signature bundle" >&2
+    echo "  rule: the signing certificate must identify ${required_id}" >&2
+    echo "  found: nothing - no bundle to check" >&2
+    echo "  next step: the prebuilt binary is NOT used; this run builds reeve from source" >&2
     return 1
   fi
-  # Keyless identity: any workflow in the source repo, GitHub's OIDC issuer.
-  local repo="${REEVE_REPO:-}" id_re
-  if [[ -n "$repo" ]]; then
-    id_re="^https://github.com/${repo}/\.github/workflows/.+@refs/(heads|tags)/.+$"
-  else
-    id_re="^https://github.com/.+/\.github/workflows/.+@refs/(heads|tags)/.+$"
-  fi
-  if cosign verify-blob \
+  # GitHub's OIDC issuer everywhere, including GHES installs of reeve-proper;
+  # the repo part is derived from the source repository.
+  if ! cosign_out=$(cosign verify-blob \
     --bundle "$bundle" \
     --certificate-identity-regexp "$id_re" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    "$sums" > /dev/null 2>&1; then
-    echo "signature verified (cosign keyless)"
-    return 0
+    "$sums" 2>&1); then
+    echo "signature verification FAILED for ${what} ($sums)" >&2
+    echo "  rule: the signing certificate must identify ${required_id}" >&2
+    echo "  found (cosign):" >&2
+    printf '  %s\n' "$cosign_out" >&2
+    echo "  next step: the prebuilt binary is NOT used; this run builds reeve from source. Releases signed by a different workflow or ref than the required identity (v0.8.0 and earlier were signed from refs/heads/master) never verify." >&2
+    return 1
   fi
-  echo "signature verification FAILED for $(basename "$sums")" >&2
-  return 1
+  echo "signature verified (cosign keyless)"
+  return 0
+}
+
+# re_quote escapes regular-expression metacharacters so a literal repo, tag
+# or version can anchor an identity regexp.
+re_quote() {
+  printf '%s' "$1" | sed 's/[][\.*^$()+?{|}]/\\&/g'
+}
+
+# required_identity <kind> <ref> <repo> <id-re-var> <id-desc-var> <what-var>
+# Sets the per-kind signing identity: regexp, human description, and the
+# artifact label the refusal renders.
+required_identity() {
+  local kind="$1" ref="$2" repo="$3" repo_re
+  repo_re=$(re_quote "${repo:-.+}")
+  case "$kind" in
+    version)
+      printf -v "$4" '%s' "^https://github\.com/${repo_re}/\.github/workflows/release\.yml@refs/tags/$(re_quote "$ref")$"
+      printf -v "$5" '%s' "release.yml@refs/tags/${ref}"
+      printf -v "$6" '%s' "version ${ref}"
+      ;;
+    edge | commit)
+      printf -v "$4" '%s' "^https://github\.com/${repo_re}/\.github/workflows/edge-build\.yml@refs/heads/master$"
+      printf -v "$5" '%s' "edge-build.yml@refs/heads/master"
+      printf -v "$6" '%s' "per-commit master build ${ref}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 fetch_main() {
   local out="${GITHUB_OUTPUT:-/dev/stdout}"
   local ref="${REEVE_REF:-}" repo="${REEVE_REPO:-}"
   local dest="${REEVE_DEST:?REEVE_DEST is required}"
-  local arch kind workdir asset sums source_hash_file tag ok=false
+  local arch kind workdir asset sums source_hash_file tag ok=false reason=''
 
   fallback() {
     echo "$1 - falling back to source build"
@@ -173,6 +214,12 @@ fetch_main() {
     fallback "ref '$ref' is not a release tag, edge branch, or full commit SHA"
     return 0
   fi
+
+  # The signing identity is scoped to the artifact kind: a version tag must
+  # be signed by a run on its own tag, a per-commit build by the edge
+  # workflow on master. Everything downstream verifies against exactly that.
+  local id_re id_desc what
+  required_identity "$kind" "$ref" "$repo" id_re id_desc what
 
   if [[ "$kind" != "version" && ! "${REEVE_SOURCE_HASH:-}" =~ ^[0-9a-f]{64}$ ]]; then
     fallback "canonical action source hash is unavailable or invalid"
@@ -243,15 +290,20 @@ fetch_main() {
   if [[ "$ok" == true ]]; then
     if ! verify_sha256 "$workdir/$asset" "$workdir/$sums"; then
       ok=false
-    elif ! verify_signature "$workdir/$sums" "$workdir/${sums}.bundle"; then
+      reason="the downloaded archive does not match its checksums entry"
+    elif ! verify_signature "$workdir/$sums" "$workdir/${sums}.bundle" "$id_re" "$id_desc" "$what"; then
       ok=false
+      reason="the checksums signature does not come from ${id_desc}"
     elif [[ "$kind" != "version" ]] && ! verify_sha256 "$workdir/$source_hash_file" "$workdir/$sums"; then
       ok=false
+      reason="the fetched source-hash.txt does not match the signed checksums"
     elif [[ "$kind" != "version" ]] && ! verify_source_hash "$workdir/$source_hash_file"; then
       ok=false
+      reason="the release source hash does not match this action source"
     elif ! tar -xzf "$workdir/$asset" -C "$workdir" reeve; then
       echo "could not extract reeve from $asset" >&2
       ok=false
+      reason="the archive could not be extracted"
     fi
   fi
 
@@ -269,7 +321,7 @@ fetch_main() {
     return 0
   fi
 
-  fallback "prebuilt fetch failed"
+  fallback "prebuilt fetch failed: ${reason:-see the log above}"
   return 0
 }
 
