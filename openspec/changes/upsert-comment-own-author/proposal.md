@@ -26,3 +26,14 @@ or created.
 
 - No config change.
 - One duplicate comment appears if the token identity changes between runs.
+
+**Follow-ups (review):** the author is resolved through `/user` ONLY - the
+old `github-actions[bot]` guess is gone: it was wrong for GitHub App
+installation tokens (whose bot is `<slug>[bot]`, not
+`github-actions[bot]`), and a wrong author makes every upsert post a
+duplicate comment forever. When the identity cannot be resolved, the write
+is refused with a typed error naming the fix, logged loudly. The explicit
+escape hatch: `comments.author` in shared yaml and the `--comment-author`
+CLI flag (every repo command), declaring the login the token writes as and
+bypassing `/user` resolution entirely. No new keys were needed for the
+match-author rule itself.

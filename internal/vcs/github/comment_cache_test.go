@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -399,5 +400,64 @@ func TestDeleteCommentsReusesAndUpdatesSnapshot(t *testing.T) {
 	}
 	if lists != 1 || deletes != 1 || creates != 1 {
 		t.Fatalf("list requests = %d, deletes = %d, creates = %d; want 1, 1, 1", lists, deletes, creates)
+	}
+}
+
+// TestUpsertCommentRespectsAuthorOverride pins the explicit setting: the
+// declared comment author bypasses /user resolution - and a wrong /user is
+// never guessed. When /user fails with no override, the write is refused.
+func TestUpsertCommentRespectsAuthorOverride(t *testing.T) {
+	// (a) /user fails, override set → the override wins and the write
+	// proceeds.
+	var lists, edits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"message":"boom"}`)
+	})
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, _ *http.Request) {
+		lists++
+		fmt.Fprint(w, `[{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:auth -->"}]`)
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
+		edits++
+		fmt.Fprint(w, `{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:auth --> updated"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newFakeClient(t, srv)
+	c.SetCommentAuthor("reeve-bot")
+
+	if err := c.UpsertComment(context.Background(), 12, "<!-- marker:auth --> updated", "<!-- marker:auth -->"); err != nil {
+		t.Fatal(err)
+	}
+	if edits != 1 {
+		t.Fatalf("edits = %d, want 1", edits)
+	}
+
+	// (b) /user fails, NO override → the write is refused with the fix in
+	// the refusal; no comment is edited or created.
+	t.Setenv("GITHUB_ACTIONS", "")
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"message":"boom"}`)
+	})
+	mux2.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"id":1,"user":{"login":"reeve-bot"},"body":"<!-- marker:auth -->"}]`)
+	})
+	srv2 := httptest.NewServer(mux2)
+	defer srv2.Close()
+	c2 := newFakeClient(t, srv2)
+	err := c2.UpsertComment(context.Background(), 12, "<!-- marker:auth --> updated", "<!-- marker:auth -->")
+	var cae *CommentAuthorError
+	if !errors.As(err, &cae) {
+		t.Fatalf("the refusal must be the typed CommentAuthorError, got %v", err)
+	}
+	if !strings.Contains(cae.Error(), "set comments.author or --comment-author") {
+		t.Fatalf("the refusal must name the setting: %v", cae)
+	}
+	if edits != 1 || lists < 1 {
+		t.Fatalf("the successful path must still edit exactly one comment")
 	}
 }
