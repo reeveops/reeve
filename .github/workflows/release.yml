@@ -27,7 +27,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The repository's own gates run in a job with minimal permissions:
+  # contents read is all it needs. It runs BEFORE the release job exists and
+  # the release job needs it, so a release never starts (never mints a tap
+  # token, never touches id-token signing) on a red check.
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # mise run check: fmt + vet + lint + vulnerability + security scan +
+      # race tests, against the same pinned toolchain versions the local
+      # task uses.
+      - name: Set up mise
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+
+      - name: Run release checks
+        run: mise run check
+
   release:
+    needs: check
     runs-on: ubuntu-latest
     steps:
       # workflow_dispatch is the intentional hand-off to a release. Tag
@@ -61,16 +84,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-
-      # The release runs the repository's own gates first: mise run check
-      # (fmt + vet + lint + vulnerability + security scan + race tests)
-      # against the same toolchain versions the local task uses. A release
-      # without green checks must not exist.
-      - name: Set up mise
-        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
-
-      - name: Run release checks
-        run: mise run check
 
       # Tag-push releases use the pushed tag as-is. Dispatch releases compute
       # the next version from the latest stable tag and push the new tag with

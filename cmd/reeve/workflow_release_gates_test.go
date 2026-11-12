@@ -31,24 +31,48 @@ func TestReleaseGatesMasterDispatchOnly(t *testing.T) {
 }
 
 // TestReleaseRunsRepositoryChecks pins the release-evidence gate: the
-// release job runs `mise run check` (the repo's own fmt/vet/lint/security/
-// test gates) BEFORE minting a tag, and the mise action is commit-pinned
-// like every other external action.
+// repository's check suite runs in a dedicated minimal-permission job that
+// the release job needs, so a release never starts (never mints a tap
+// token, never touches id-token signing) on a red check. The mise action is
+// commit-pinned like every other external action.
 func TestReleaseRunsRepositoryChecks(t *testing.T) {
 	data := readRepoFile(t, ".github", "workflows", "release.yml")
 
-	checkIdx := strings.Index(data, "Run release checks")
-	if checkIdx < 0 {
-		t.Fatal("release.yml must run the repository's check suite before releasing")
+	// The check job exists, runs the repo's suite, and holds only
+	// contents: read.
+	checkJob := strings.Index(data, "  check:")
+	if checkJob < 0 {
+		t.Fatal("release.yml must carry a dedicated check job")
 	}
-	if !strings.Contains(data, "run: mise run check") {
-		t.Fatal("the release check step must run the repository's own check suite")
+	releaseJob := strings.Index(data, "  release:")
+	if releaseJob < 0 || checkJob > releaseJob {
+		t.Fatalf("the check job (%d) must precede the release job (%d)", checkJob, releaseJob)
 	}
+	checkBlock := data[checkJob:releaseJob]
+	for _, want := range []string{
+		"run: mise run check",
+		"permissions:",
+		"contents: read",
+		"uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b",
+	} {
+		if !strings.Contains(checkBlock, want) {
+			t.Fatalf("check job block missing %q:\n%s", want, checkBlock)
+		}
+	}
+	// The check job must not carry signing or write permissions.
+	for _, banned := range []string{"id-token: write", "packages: write", "actions: write", "Mint tap token"} {
+		if strings.Contains(checkBlock, banned) {
+			t.Fatalf("minimal-permission check job must not contain %q:\n%s", banned, checkBlock)
+		}
+	}
+	// The release job must wait for the check job.
+	if !strings.Contains(data[releaseJob:], "needs: check") {
+		t.Fatal("the release job must declare needs: check")
+	}
+	// The check suite must run before the release tag is minted: the check
+	// job precedes the release job entirely.
 	tagIdx := strings.Index(data, "Resolve release tag")
-	if tagIdx < 0 || checkIdx > tagIdx {
-		t.Fatalf("checks (%d) must run before the release tag is minted (%d)", checkIdx, tagIdx)
-	}
-	if !strings.Contains(data, "uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b") {
-		t.Fatal("the mise action must be pinned to its full commit SHA")
+	if tagIdx < 0 || checkJob > tagIdx {
+		t.Fatalf("checks (%d) must run before the release tag is minted (%d)", checkJob, tagIdx)
 	}
 }
