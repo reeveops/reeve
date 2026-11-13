@@ -40,6 +40,8 @@ trap 'rm -rf "$test_root"' EXIT
 source_hash=$(printf 'a%.0s' {1..64})
 other_hash=$(printf 'b%.0s' {1..64})
 commit_ref=0123456789abcdef0123456789abcdef01234567
+artifact_commit=$commit_ref
+edge_commit=fedcba9876543210fedcba9876543210fedcba98
 
 REEVE_REF=feature/test REEVE_REPO=reeveops/reeve REEVE_SOURCE_HASH=$source_hash REEVE_OS=Linux REEVE_ARCH=X64 \
   prebuilt_eligible && fail "feature ref was prebuilt eligible"
@@ -98,8 +100,11 @@ fi
 EOF
 chmod +x "$fake_bin/gh" "$fake_bin/cosign"
 
+# make_fixture names the edge asset after the FULL commit SHA it belongs
+# to (reeve_<sha>_linux_<arch>.tar.gz), matching the edge-build workflow's
+# immutable per-commit artifact names.
 make_fixture() {
-  local dir="$1" artifact_hash="$2"
+  local dir="$1" artifact_hash="$2" artifact_sha="$3"
   mkdir -p "$dir/payload"
   cat > "$dir/payload/reeve" <<'EOF'
 #!/usr/bin/env bash
@@ -110,11 +115,11 @@ fi
 exit 1
 EOF
   chmod +x "$dir/payload/reeve"
-  tar -C "$dir/payload" -czf "$dir/reeve_linux_amd64.tar.gz" reeve
+  tar -C "$dir/payload" -czf "$dir/reeve_${artifact_sha}_linux_amd64.tar.gz" reeve
   printf '%s\n' "$artifact_hash" > "$dir/source-hash.txt"
   (
     cd "$dir"
-    sha256sum reeve_linux_amd64.tar.gz source-hash.txt > checksums.txt
+    sha256sum reeve_${artifact_sha}_linux_amd64.tar.gz source-hash.txt > checksums.txt
   )
   : > "$dir/checksums.txt.bundle"
 }
@@ -145,13 +150,66 @@ run_fetch() {
 }
 
 good_fixture="$test_root/fixtures/good"
-make_fixture "$good_fixture" "$source_hash"
+make_fixture "$good_fixture" "$source_hash" "$artifact_commit"
 
 cold_dir=$(run_fetch cold-hit "$commit_ref" "$good_fixture")
 assert_eq "$(cat "$cold_dir/output")" fetched=true
 [[ -x "$cold_dir/reeve" ]] || fail "cold hit did not install an executable"
 assert_contains "$(cat "$cold_dir/log")" "Using prebuilt binary: reeve fixture"
 assert_contains "$(cat "$cold_dir/cosign.calls")" "verify-blob"
+# The commit-kind resolver must request the FULL-SHA asset name.
+assert_contains "$(grep -o 'reeve_[0-9a-f]\{40\}_linux_amd64.tar.gz' "$cold_dir/gh.calls" | head -1)" "reeve_${commit_ref}_linux_amd64.tar.gz"
+
+# Edge kind: the caller pins a branch; the resolver selects the release
+# matching the action source and must resolve the asset carrying the
+# release's FULL commit SHA (tag <branch>-<sha>, asset reeve_<sha>_...).
+edge_fixture="$test_root/fixtures/edge"
+make_fixture "$edge_fixture" "$source_hash" "$edge_commit"
+mkdir -p "$test_root/edge-bin"
+edge_gh_fake="$test_root/edge-bin/gh"
+cat > "$edge_gh_fake" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$GH_FAKE_CALL_LOG"
+if [[ "${1:-}" == "api" ]]; then
+  printf '%s\n' master-${GH_FAKE_EDGE_COMMIT}
+  exit 0
+fi
+if [[ "${1:-}" == "release" && "${2:-}" == "download" ]]; then
+  output_dir=""
+  while (( $# > 0 )); do
+    if [[ "$1" == "--dir" ]]; then output_dir="$2"; break; fi
+    shift
+  done
+  mkdir -p "$output_dir"
+  cp -R "$GH_FAKE_FIXTURE"/* "$output_dir/"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$edge_gh_fake"
+edge_dir="$test_root/cases/edge-hit"
+mkdir -p "$edge_dir"
+: > "$edge_dir/gh.calls"
+: > "$edge_dir/cosign.calls"
+env \
+  PATH="$test_root/edge-bin:$fake_bin:$PATH" \
+  REEVE_REF=master \
+  REEVE_REPO=reeveops/reeve \
+  REEVE_SOURCE_HASH="$source_hash" \
+  REEVE_OS=Linux \
+  REEVE_ARCH=X64 \
+  REEVE_DEST="$edge_dir/reeve" \
+  GITHUB_OUTPUT="$edge_dir/output" \
+  GH_FAKE_FIXTURE="$edge_fixture" \
+  GH_FAKE_CALL_LOG="$edge_dir/gh.calls" \
+  COSIGN_FAKE_CALL_LOG="$edge_dir/cosign.calls" \
+  GH_FAKE_EDGE_COMMIT="$edge_commit" \
+  bash "$FETCH_SCRIPT" > "$edge_dir/log" 2>&1
+assert_eq "$(cat "$edge_dir/output")" fetched=true
+[[ -x "$edge_dir/reeve" ]] || fail "edge hit did not install an executable"
+assert_contains "$(cat "$edge_dir/log")" "prerelease is master-$edge_commit"
+assert_contains "$(cat "$edge_dir/gh.calls")" "reeve_${edge_commit}_linux_amd64.tar.gz"
 
 GH_FAKE_API_EMPTY=true
 missing_dir=$(run_fetch missing-release "$commit_ref" "$good_fixture")
@@ -162,7 +220,7 @@ assert_contains "$(cat "$missing_dir/log")" "no retained prerelease matches comm
 
 bad_checksum_fixture="$test_root/fixtures/bad-checksum"
 cp -R "$good_fixture" "$bad_checksum_fixture"
-printf 'corrupt\n' >> "$bad_checksum_fixture/reeve_linux_amd64.tar.gz"
+printf 'corrupt\n' >> "$bad_checksum_fixture/reeve_${artifact_commit}_linux_amd64.tar.gz"
 bad_checksum_dir=$(run_fetch bad-checksum "$commit_ref" "$bad_checksum_fixture")
 assert_eq "$(cat "$bad_checksum_dir/output")" fetched=false
 [[ ! -e "$bad_checksum_dir/reeve" ]] || fail "bad checksum installed a binary"
@@ -176,7 +234,7 @@ assert_eq "$(cat "$bad_signature_dir/output")" fetched=false
 assert_contains "$(cat "$bad_signature_dir/log")" "signature verification FAILED"
 
 wrong_source_fixture="$test_root/fixtures/wrong-source"
-make_fixture "$wrong_source_fixture" "$other_hash"
+make_fixture "$wrong_source_fixture" "$other_hash" "$artifact_commit"
 wrong_source_dir=$(run_fetch wrong-source "$commit_ref" "$wrong_source_fixture")
 assert_eq "$(cat "$wrong_source_dir/output")" fetched=false
 [[ ! -e "$wrong_source_dir/reeve" ]] || fail "wrong source installed a binary"
