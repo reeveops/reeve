@@ -31,10 +31,11 @@ jobs:
       - name: go test (race)
         run: go test -race ./...
 
-      - name: Test action binary resolver
+      - name: Test action scripts
         run: |
           bash .github/scripts/fetch-binary_test.sh
           bash .github/scripts/action-cache_test.sh
+          bash .github/scripts/edge-publish_test.sh
 
       # The reeve_minimal build excludes the interactive `reeve init` wizard
       # (charmbracelet/huh + its TUI tree). Nothing else compiles it, so

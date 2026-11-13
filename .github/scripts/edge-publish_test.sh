@@ -31,6 +31,7 @@ run_publish() {
     GH_FAKE_VIEW_FAIL="${GH_FAKE_VIEW_FAIL:-false}" \
     GH_FAKE_UPLOAD_FAIL="${GH_FAKE_UPLOAD_FAIL:-false}" \
     GH_FAKE_DELETE_FAIL="${GH_FAKE_DELETE_FAIL:-false}" \
+    GH_FAKE_UPLOAD2_FAIL="${GH_FAKE_UPLOAD2_FAIL:-false}" \
     bash "$PUBLISH_SCRIPT" "$tag" "$commit_sha" "$dist" > "$case_dir/log" 2>&1
   printf '%s\n' "$?" > "$case_dir/code"
   printf '%s\n' "$case_dir"
@@ -74,8 +75,16 @@ if [[ "${1:-}" == "release" && "${2:-}" == "delete-asset" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "release" && "${2:-}" == "upload" ]]; then
+  # Each invocation is a fresh process; the call ordinal comes from the
+  # call log (this call's own line is already appended at the top, so the
+  # count IS the ordinal).
+  upload_n=$(grep -c "release upload" "$GH_FAKE_CALL_LOG" || true)
   if [[ "${GH_FAKE_UPLOAD_FAIL:-false}" == "true" ]]; then
     echo "gh: simulated upload failure (HTTP 502)" >&2
+    exit 1
+  fi
+  if [[ "${GH_FAKE_UPLOAD2_FAIL:-false}" == "true" && "$upload_n" -eq 2 ]]; then
+    echo "gh: simulated bundle upload failure (HTTP 503)" >&2
     exit 1
   fi
   exit 0
@@ -87,16 +96,34 @@ chmod +x "$fake_bin/gh"
 # ---- Policy keyed on checksums.txt.bundle: the last asset a consumer
 # needs before it can verify anything.
 
-assert_bundle_last() {
-  local line
-  line=$(grep "release upload" "$1" | head -1)
-  [[ -n "$line" ]] || fail "expected an upload call"
-  if [[ "$line" != *"$dist/checksums.txt.bundle" ]]; then
-    fail "the bundle must be uploaded last: $line"
+# assert_two_upload_calls <call-log>: gh uploads several files in
+# PARALLEL (internal errgroup, concurrency 5), so the two-call shape is the
+# ONLY order guarantee: the first call carries exactly the four non-bundle
+# assets; the second call carries the bundle ALONE.
+assert_two_upload_calls() {
+  local log="$1" first second count
+  first=$(grep "release upload" "$log" | sed -n 1p)
+  second=$(grep "release upload" "$log" | sed -n 2p)
+  count=$(grep -c "release upload" "$log" || true)
+  if [[ $count -ne 2 ]]; then
+    fail "expected exactly two upload calls (four assets, then the bundle alone), got $count: $(cat "$log")"
   fi
-  local head="${line%$dist/checksums.txt.bundle*}"
-  if [[ "$head" == *"$dist/checksums.txt.bundle"* ]]; then
-    fail "the bundle appears more than once in the upload: $line"
+  for f in "$assets_amd64" "$assets_arm64" source-hash.txt checksums.txt; do
+    if [[ "$first" != *"$dist/$f"* ]]; then
+      fail "the first upload call must carry the four non-bundle assets, missing $f: $first"
+    fi
+  done
+  if [[ "$first" == *"$dist/checksums.txt.bundle"* ]]; then
+    fail "the bundle must NOT ride the first upload call: $first"
+  fi
+  if [[ "$second" != *"$dist/checksums.txt.bundle" ]]; then
+    fail "the second upload call must end in the bundle: $second"
+  fi
+  # "checksums.txt" is a prefix of "checksums.txt.bundle", so membership
+  # matching lies here; count the dist paths on the second line instead -
+  # exactly one arg means the bundle is alone.
+  if [[ $(grep -o "$dist/" <<<"$second" | wc -l) -ne 1 ]]; then
+    fail "the second upload call must carry ONLY the bundle: $second"
   fi
 }
 
@@ -137,7 +164,7 @@ assert_contains "$calls" "release upload $tag"
 for f in "$assets_amd64" "$assets_arm64" source-hash.txt checksums.txt checksums.txt.bundle; do
   assert_contains "$calls" "dist/$f"
 done
-assert_bundle_last "$d2/gh.calls"
+assert_two_upload_calls "$d2/gh.calls"
 
 # Row 2b: bundle absent and nothing present (truly fresh) -> no deletes,
 # full upload, bundle last.
@@ -152,7 +179,7 @@ fi
 for f in "$assets_amd64" "$assets_arm64" source-hash.txt checksums.txt checksums.txt.bundle; do
   assert_contains "$(cat "$d2b/gh.calls")" "dist/$f"
 done
-assert_bundle_last "$d2b/gh.calls"
+assert_two_upload_calls "$d2b/gh.calls"
 
 # Row 3: bundle PRESENT but another asset missing -> inconsistent,
 # possibly already consumed: fail naming the missing assets; upload
@@ -179,10 +206,31 @@ unset GH_FAKE_ASSETS GH_FAKE_UPLOAD_FAIL
 if [[ "$(cat "$d6/code")" -eq 0 ]]; then
   fail "a failed upload must fail the step"
 fi
-assert_contains "$(cat "$d6/log")" "uploading the replacement assets to release $tag failed"
-assert_contains "$(cat "$d6/log")" "left as-is"
-assert_contains "$(cat "$d6/log")" "bundle is uploaded last"
-assert_bundle_last "$d6/gh.calls"
+assert_contains "$(cat "$d6/log")" "uploading the four non-bundle assets to release $tag failed"
+assert_contains "$(cat "$d6/log")" "bundle-absent and replaceable"
+if [[ "$(grep -c "release upload" "$d6/gh.calls")" -ne 1 ]]; then
+  fail "when the first upload call fails there must be no second call: $(cat "$d6/gh.calls")"
+fi
+if grep -q "dist/checksums.txt.bundle" <(grep "release upload" "$d6/gh.calls"); then
+  fail "the bundle must never upload in the first call"
+fi
+
+# Row 4b: only the BUNDLE upload fails (the four non-bundle assets land).
+# The failure names the bundle and the replaceable state; two upload calls
+# happened, the first successful.
+GH_FAKE_ASSETS="$assets_amd64"
+GH_FAKE_UPLOAD2_FAIL=true
+d8=$(run_publish bundle-upload-failure)
+unset GH_FAKE_ASSETS GH_FAKE_UPLOAD2_FAIL
+if [[ "$(cat "$d8/code")" -eq 0 ]]; then
+  fail "a failed bundle upload must fail the step"
+fi
+assert_contains "$(cat "$d8/log")" "uploading checksums.txt.bundle - the last asset a consumer needs before it can verify anything - to release $tag failed"
+assert_contains "$(cat "$d8/log")" "gh: simulated bundle upload failure (HTTP 503)"
+assert_contains "$(cat "$d8/log")" "bundle-absent and replaceable"
+assert_two_upload_calls "$d8/gh.calls"
+first=$(grep "release upload" "$d8/gh.calls" | sed -n 1p)
+assert_contains "$first" "dist/$assets_amd64"
 
 # Row 5: the listing itself failing -> fail with the reason; no skip, no
 # replacement, no upload.

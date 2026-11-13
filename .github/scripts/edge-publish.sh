@@ -10,9 +10,12 @@
 #      signed artifacts with differently-signed bytes).
 #   2. checksums.txt.bundle ABSENT (whatever else is there) -> no consumer
 #      can have verified this release: delete every present asset and
-#      upload the current run's complete set, naming what was replaced. The
-#      bundle uploads LAST, so a run that dies midway always leaves the
-#      "bundle absent" state, which this policy replaces on the next run.
+#      upload the current run's complete set, naming what was replaced.
+#      The upload runs in TWO calls - the four non-bundle assets, then the
+#      bundle alone LAST (gh uploads several files in parallel, so argument
+#      order guarantees nothing) - so a run that dies midway always leaves
+#      the "bundle absent" state, which this policy replaces on the next
+#      run. Each call's failure message says the same.
 #   3. bundle present but another asset missing -> the release is
 #      inconsistent and may already have been consumed: FAIL with the
 #      reason naming the missing assets. Do not upload, do not delete -
@@ -20,8 +23,9 @@
 #      the consumer's check exists to catch.
 #   4. the listing itself fails -> exit 1 with the reason: without the
 #      listing we cannot tell complete from partial from inconsistent.
-#   5. an upload or delete failure -> exit 1 with the reason; the release
-#      is left as-is, in the replaceable ("bundle absent") state.
+#   5. an upload or delete failure -> exit 1 with the reason. A first-call
+#      (four assets) failure or a bundle-upload failure both leave the
+#      release in the replaceable ("bundle absent") state.
 #
 # Usage: edge-publish.sh <tag> <commit> <dist-dir>   (releases in
 # GITHUB_REPOSITORY; artifacts named dist/<asset>).
@@ -93,18 +97,26 @@ edge_publish_main() {
     done
   fi
 
-  # Upload order: every non-bundle asset first, the bundle LAST - a run
-  # that dies midway always leaves the "bundle absent" state, which is the
-  # one this policy replaces on the next run.
+  # Upload in TWO calls. `gh release upload` with several files uploads
+  # them in PARALLEL (its internal errgroup concurrency is 5), so argument
+  # order guarantees nothing about completion order. The four non-bundle
+  # assets upload first; the bundle is its own SECOND call, only after the
+  # first succeeded - a run that dies at any point never publishes the
+  # bundle on top of stale or half-replaced assets, so the release always
+  # stays in one of the states this policy handles (complete or
+  # bundle-absent), never inconsistent.
   local files=()
   for a in "${expected[0]}" "${expected[1]}" "${expected[2]}" "${expected[3]}"; do
     files+=("$dist/$a")
   done
-  files+=("$dist/$bundle")
 
   local upload_log
   if ! upload_log=$(gh release upload "$tag" --repo "$repo" "${files[@]}" 2>&1); then
-    echo "::error::uploading the replacement assets to release ${tag} failed (gh: ${upload_log}). The release is left as-is: the bundle is uploaded last, so the release remains in the replaceable (bundle-absent) state and the next run of this commit retries the replacement" >&2
+    echo "::error::uploading the four non-bundle assets to release ${tag} failed (gh: ${upload_log}). The release is left bundle-absent and replaceable: no consumer can have verified it, and the next run of this commit deletes the stale assets and retries the complete upload" >&2
+    exit 1
+  fi
+  if ! upload_log=$(gh release upload "$tag" --repo "$repo" "$dist/$bundle" 2>&1); then
+    echo "::error::uploading checksums.txt.bundle - the last asset a consumer needs before it can verify anything - to release ${tag} failed (gh: ${upload_log}). The release is left bundle-absent and replaceable: the four assets from this run are published but nothing can be verified against them yet, and the next run of this commit retries the replacement" >&2
     exit 1
   fi
 }

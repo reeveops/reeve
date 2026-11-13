@@ -24,6 +24,16 @@ on:
     branches: [master, next]
   workflow_dispatch:
 
+# A push and a manual dispatch of the SAME commit are the same build: run
+# concurrently they would both resolve the same release and could delete
+# each other's assets mid-upload. Serialize them on branch+commit and never
+# cancel - a cancelled mid-upload run is one of the inconsistent states the
+# publish script refuses to touch. Different commits do not contend: their
+# group keys differ.
+concurrency:
+  group: edge-build-${{ github.ref_name }}-${{ github.sha }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   id-token: write # sigstore keyless signing
