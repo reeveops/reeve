@@ -545,4 +545,36 @@ func TestRunDiedHoldRenderedInEverySurface(t *testing.T) {
 	if strings.Contains(err.Error(), "most likely died") {
 		t.Fatalf("a live apply must not be worded as a run-died hold: %v", err)
 	}
+
+	// 7. A LIVE started hold (no outcome) reads "in progress" on every
+	// surface - the run-died wording is reserved for an expired lease -
+	// and locks explain does not print an empty outcome line.
+	_, err = runReeve(t, "locks", "unlock", "proj/dev", "--pr", "9", "--force", "--actor", "mallory", "--reason", "clear")
+	if err != nil {
+		t.Fatalf("clear PR 9: %v\n%s", err, out)
+	}
+	acquire(t, s, "proj", "dev", 10)
+	if err := s.MarkHeld(context.Background(), "proj", "dev", corelocks.Holder{PR: 10, RunID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"locks", "list"},
+		{"locks", "explain", "proj/dev"},
+	} {
+		out, err = runReeve(t, args...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		for _, want := range []string{"apply is in progress", "lease expires"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("a live started hold must read in progress (%v):\nwant: %s\ngot:\n%s", args, want, out)
+			}
+		}
+		if strings.Contains(out, "most likely died") {
+			t.Fatalf("a live lease must not be worded as a run death (%v):\n%s", args, out)
+		}
+		if strings.Contains(out, `outcome: ""`) {
+			t.Fatalf("locks explain must not print an empty outcome line (%v):\n%s", args, out)
+		}
+	}
 }

@@ -364,11 +364,15 @@ func TestSamePRRetryRefusalShowsReasonAndCommand(t *testing.T) {
 		`recorded outcome "failed"`,
 		"https://ci.example/run/7",
 		"audit/2026/",
-		"/reeve unlock api/prod --pr 18 --force",
+		"/reeve unlock api/prod --force",
 	} {
 		if !strings.Contains(ss.Error, want) {
 			t.Fatalf("the same-PR refusal must name the reason and the clearing command:\nwant: %s\ngot:  %s", want, ss.Error)
 		}
+	}
+	// The PR-comment hint must be the comment-parser form: no --pr flag.
+	if strings.Contains(ss.Error, "--pr") {
+		t.Fatalf("the PR-comment hint must not carry the CLI-only --pr flag: %s", ss.Error)
 	}
 }
 
@@ -414,5 +418,42 @@ func TestHoldBlockedMessageShowsRunDied(t *testing.T) {
 	comments := fv.allComments()
 	if !strings.Contains(comments, "most likely died") {
 		t.Fatalf("the blocked message must say the run most likely died:\n%s", comments)
+	}
+}
+
+// TestHoldStatusLiveVsExpired pins the hold-state wording: an expired
+// started hold with no outcome says the run most likely died; a LIVE
+// started hold with no outcome says the apply is in progress (and when the
+// lease expires) - and never guesses a death while the lease lives. A hold
+// with a recorded outcome keeps its outcome text either way.
+func TestHoldStatusLiveVsExpired(t *testing.T) {
+	now := time.Now()
+	live := &corelocks.Holder{PR: 7, RunID: "r1", HoldStarted: true,
+		ExpiresAt: now.Add(time.Hour).UTC().Format(time.RFC3339)}
+	got := live.HoldStatus(now)
+	for _, want := range []string{"hold started", "lease expires", "apply is in progress"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("a live started hold must read in progress (with the lease expiry):\nwant: %s\ngot:  %s", want, got)
+		}
+	}
+	if strings.Contains(got, "most likely died") {
+		t.Fatalf("a live lease must not be worded as a run death: %s", got)
+	}
+
+	expired := &corelocks.Holder{PR: 7, RunID: "r1", HoldStarted: true,
+		ExpiresAt: now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)}
+	got = expired.HoldStatus(now)
+	for _, want := range []string{"lease expired", "no outcome recorded", "most likely died", "validate the stack's real state before unlocking"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("an expired started hold must read as a run death:\nwant: %s\ngot:  %s", want, got)
+		}
+	}
+
+	recorded := &corelocks.Holder{PR: 7, RunID: "r1", HoldStarted: true,
+		ExpiresAt: now.Add(-2 * time.Hour).UTC().Format(time.RFC3339),
+		Outcome:   "failed", RecordedAt: "2026-11-12T00:00:00Z"}
+	got = recorded.HoldStatus(now)
+	if !strings.Contains(got, `recorded outcome "failed"`) || strings.Contains(got, "most likely died") {
+		t.Fatalf("a recorded outcome must own the wording: %s", got)
 	}
 }

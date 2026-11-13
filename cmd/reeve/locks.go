@@ -127,12 +127,14 @@ func locksExplain(cmd *cobra.Command, args []string) error {
 		h := l.Holder
 		fmt.Fprintf(w, "holder: PR #%d  actor=%s  run=%s  acquired=%s  expires=%s\n",
 			h.PR, h.Actor, h.RunID, h.AcquiredAt, h.ExpiresAt)
-		fmt.Fprintf(w, "outcome: %q  recorded=%s\n", h.Outcome, h.RecordedAt)
-		if h.RunURL != "" {
-			fmt.Fprintf(w, "run: %s\n", h.RunURL)
-		}
-		if h.AuditKey != "" {
-			fmt.Fprintf(w, "audit: %s\n", h.AuditKey)
+		if h.Outcome != "" {
+			fmt.Fprintf(w, "outcome: %q  recorded=%s\n", h.Outcome, h.RecordedAt)
+			if h.RunURL != "" {
+				fmt.Fprintf(w, "run: %s\n", h.RunURL)
+			}
+			if h.AuditKey != "" {
+				fmt.Fprintf(w, "audit: %s\n", h.AuditKey)
+			}
 		}
 		if status := h.HoldStatus(time.Now()); status != "" {
 			fmt.Fprintf(w, "hold: %s\n", status)

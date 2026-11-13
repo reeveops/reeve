@@ -608,8 +608,8 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			// reason, and the exact command that clears it once the stack's
 			// real state is validated.
 			ss.Error = fmt.Sprintf(
-				"another run of PR #%d (%s) holds the lock for %s and the hold is not released by itself: %s. Validate the stack's real state (run `/reeve preview` or inspect the run), then clear the hold explicitly: `/reeve unlock %s --pr %d --force`.",
-				in.PRNumber, holderRun, s.Ref(), reason, s.Ref(), in.PRNumber)
+				"another run of PR #%d (%s) holds the lock for %s and the hold is not released by itself: %s. Validate the stack's real state (run `/reeve preview` or inspect the run), then clear the hold explicitly: `/reeve unlock %s --force`.",
+				in.PRNumber, holderRun, s.Ref(), reason, s.Ref())
 			anyBlocked = true
 			slog.Info("lock held by concurrent run of same PR",
 				"stack", s.Ref(), "pr", in.PRNumber, "holder_run", holderRun, "this_run", runID)
@@ -1268,7 +1268,7 @@ func lockHoldDetail(stack string, pr int, runID, outcome, runURL, auditKey strin
 	if auditKey != "" {
 		detail += fmt.Sprintf("\n- Audit record: `%s`", auditKey)
 	}
-	detail += "\n\nThe apply failed; the resources may be partially applied. `/reeve unlock --force` (or the admin CLI unlock) clears the hold after the state is verified."
+	detail += fmt.Sprintf("\n\nThe apply failed; the resources may be partially applied. `/reeve unlock %s --force` clears the hold after the state has been verified.", stack)
 	return detail
 }
 

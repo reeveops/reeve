@@ -23,14 +23,17 @@ the hold fails, the apply MUST refuse before any engine call - the stack
 errors with the reason, the acquired lock is released, and nothing is
 applied.
 
-A runner killed between hold start and outcome recording leaves a hold with
-NO recorded outcome. Every surface showing the holder MUST render that state
-explicitly: hold started, lease expired at T, no outcome recorded, the run
-most likely died (runner killed), and that the stack's real state MUST be
-validated before unlocking - covering `reeve locks` list and explain, the
-other PR's blocked message, the refresh blocked message, the admin
-force-unlock output, and the PR-scoped unlock path with and without
-`--force`.
+A hold with a started hold and NO recorded outcome renders by lease state:
+while the lease is LIVE the surfaces say the apply is in progress and when
+the lease expires; once the lease has EXPIRED they say hold started, lease
+expired at T, no outcome recorded, the run most likely died (runner killed),
+and that the stack's real state MUST be validated before unlocking. The
+runner-killed wording covers `reeve locks` list and explain, the other PR's
+blocked message, the refresh blocked message, the admin force-unlock output,
+and the PR-scoped unlock path with and without `--force`. PR comments name
+the clearing command in the comment-parser form (`/reeve unlock
+<project/stack> --force`); the `--pr` form is the CLI surface only, and
+`reeve locks explain` prints the outcome line only when an outcome exists.
 
 When the apply FAILS, runs PARTIALLY, or is INTERRUPTED, the lock stays held
 and MUST record the reason: the holder PR, the recorded outcome
@@ -98,6 +101,14 @@ hold once the state is validated.
   force-unlock output, the PR-scoped unlock path with and without `--force`
 - **THEN** each renders: hold started, lease expired, no outcome recorded,
   the run most likely died, validate the stack before unlocking
+
+#### Scenario: A live started hold reads in progress
+
+- **GIVEN** a hold that started with no recorded outcome and a live lease
+- **WHEN** the lock is displayed on any surface
+- **THEN** it reads: hold started, lease expires T, no outcome recorded,
+  the apply is in progress
+- **AND** no surface words it as a run death
 
 #### Scenario: A same-PR retry refusal carries the reason and the command
 

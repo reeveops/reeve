@@ -80,13 +80,15 @@ func (h *Holder) HoldStatus(now time.Time) string {
 		return ""
 	}
 	status := ""
+	leaseExpired := false
 	if h.HoldStarted {
 		status = "hold started"
 		if exp, err := time.Parse(time.RFC3339, h.ExpiresAt); err == nil {
 			if exp.Before(now) {
+				leaseExpired = true
 				status += ", lease expired at " + h.ExpiresAt
 			} else {
-				status += ", lease expires " + h.ExpiresAt
+				status += fmt.Sprintf(", lease expires %s", h.ExpiresAt)
 			}
 		}
 	}
@@ -102,8 +104,14 @@ func (h *Holder) HoldStatus(now time.Time) string {
 		if h.AuditKey != "" {
 			status += "; audit record `" + h.AuditKey + "`"
 		}
-	case h.HoldStarted:
+	case h.HoldStarted && leaseExpired:
+		// Started, lease gone, nothing recorded: nothing was released and
+		// nothing failed cleanly, so the runner most likely died.
 		status += ", no outcome recorded - the run most likely died (runner killed); validate the stack's real state before unlocking"
+	case h.HoldStarted:
+		// Started and still inside its lease: the apply is (most likely)
+		// in progress. No guess about death while the lease lives.
+		status += ", no outcome recorded - the apply is in progress"
 	}
 	return status
 }
