@@ -108,21 +108,13 @@ jobs:
           # Never overwrite. Builds are not reproducible (the build date is
           # embedded), so re-uploading would replace signed artifacts with
           # differently-signed bytes and invalidate checksums consumers may
-          # already have verified. A rerun of an already-published commit
-          # stops here with a visible note; a failed partial upload (release
-          # exists but assets missing) completes it.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets | map(.name) | index("reeve_'"${COMMIT}"'_linux_amd64.tar.gz") != null' \
-            > /dev/null 2>&1; then
-            echo "edge release $TAG already carries its artifacts; not overwriting"
-            exit 0
-          fi
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
-            "dist/reeve_${COMMIT}_linux_amd64.tar.gz" \
-            "dist/reeve_${COMMIT}_linux_arm64.tar.gz" \
-            dist/source-hash.txt \
-            dist/checksums.txt \
-            dist/checksums.txt.bundle
+          # already have verified. The publish decision is captured jq
+          # output, never gh's exit code (gh exits 0 whenever the release
+          # exists - see .github/scripts/edge-publish.sh):
+          #   complete release -> skip with a visible note;
+          #   partial release  -> upload only the missing assets;
+          #   failed listing   -> fail with the reason.
+          "$GITHUB_WORKSPACE/.github/scripts/edge-publish.sh" "$TAG" "$GITHUB_SHA" dist
 
       # Keep the newest N per-push prereleases for this branch and delete the
       # rest (release + its git tag). Keep-latest-N rather than keep-only-1
