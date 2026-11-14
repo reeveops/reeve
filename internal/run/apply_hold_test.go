@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -84,7 +85,7 @@ func TestHeldLockNeverFreeAndRefusalCarriesReason(t *testing.T) {
 		"held by PR #18 (hold started",
 		"recorded outcome \"failed\"",
 		"https://ci.example/run/7",
-		"audit/2026/",
+		auditDatePrefix(t, holdHolder(t, in1, ctx).RecordedAt),
 		"the stack's real state must be validated",
 	} {
 		if !strings.Contains(lockGate, want) {
@@ -152,7 +153,7 @@ func TestPartialFailureRecordedAndCommented(t *testing.T) {
 
 	// The PR notice names the failed stack, the hold, and the pointers.
 	notice := fv.allComments()
-	for _, want := range []string{"STILL HELD", "worker/prod", "https://ci.example/run/9", "audit/2026/"} {
+	for _, want := range []string{"STILL HELD", "worker/prod", "https://ci.example/run/9", auditDatePrefix(t, l.Holder.RecordedAt)} {
 		if !strings.Contains(notice, want) {
 			t.Fatalf("the held-lock notice must carry the failure and pointers:\nwant: %s\nnotice:\n%s", want, notice)
 		}
@@ -189,7 +190,7 @@ func TestFailedApplyLogsHoldAtErrorLevel(t *testing.T) {
 		"api/prod",
 		"outcome=failed",
 		"https://ci.example/run/11",
-		"audit/2026/",
+		auditDatePrefix(t, holdHolder(t, in, ctx).RecordedAt),
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("the error-level hold log must carry:\nwant: %s\ngot:\n%s", want, joined)
@@ -363,7 +364,7 @@ func TestSamePRRetryRefusalShowsReasonAndCommand(t *testing.T) {
 		"another run of PR #18",
 		`recorded outcome "failed"`,
 		"https://ci.example/run/7",
-		"audit/2026/",
+		auditDatePrefix(t, holdHolder(t, in1, ctx).RecordedAt),
 		"/reeve unlock api/prod --force",
 	} {
 		if !strings.Contains(ss.Error, want) {
@@ -392,13 +393,8 @@ func TestHoldBlockedMessageShowsRunDied(t *testing.T) {
 	if err := s.MarkHeld(ctx, "api", "prod", corelocks.Holder{PR: 18, RunID: "apply-1"}); err != nil {
 		t.Fatal(err)
 	}
-	// The lease is already in the past and no outcome was recorded: the
-	// runner most likely died.
-	l, _, err := s.Get(ctx, "api", "prod")
-	if err != nil {
-		t.Fatal(err)
-	}
-	l.Holder.ExpiresAt = time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	// The lease is already in the past (the holder acquired with a negative
+	// TTL) and no outcome was recorded: the runner most likely died.
 	fv := &bgVCS{changed: []string{"projects/api/main.ts"}, headSHA: bgSHA}
 	in := plainApplyInput(t, &bgEngine{enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"}}}, fv, blobStore)
 	in.PRNumber = 19
@@ -426,6 +422,32 @@ func TestHoldBlockedMessageShowsRunDied(t *testing.T) {
 // started hold with no outcome says the apply is in progress (and when the
 // lease expires) - and never guesses a death while the lease lives. A hold
 // with a recorded outcome keeps its outcome text either way.
+// auditDatePrefix derives the audit key's date prefix exactly the way the
+// run does - from the holder's record time (the run start, the same instant
+// auditKeyForRun used) - so these assertions stay correct across date and
+// year rollovers instead of hard-coding the author's calendar.
+func auditDatePrefix(t *testing.T, recordedAt string) string {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339, recordedAt)
+	if err != nil {
+		t.Fatalf("recorded_at %q: %v", recordedAt, err)
+	}
+	return fmt.Sprintf("audit/%04d/%02d/%02d/", ts.Year(), int(ts.Month()), ts.Day())
+}
+
+// holdHolder fetches a stack's holder, asserting one exists.
+func holdHolder(t *testing.T, in ApplyInput, ctx context.Context) *corelocks.Holder {
+	t.Helper()
+	l, _, err := in.Locks.Get(ctx, "api", "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Holder == nil {
+		t.Fatal("the failed stack's hold must exist")
+	}
+	return l.Holder
+}
+
 func TestHoldStatusLiveVsExpired(t *testing.T) {
 	now := time.Now()
 	live := &corelocks.Holder{PR: 7, RunID: "r1", HoldStarted: true,
