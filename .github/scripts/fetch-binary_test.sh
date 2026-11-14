@@ -295,12 +295,19 @@ tar -C "$noexec_fixture/payload2" -czf "$noexec_fixture/reeve_linux_amd64.tar.gz
 )
 noexec_cached="$test_root/cached-noexec"
 mkdir -p "$noexec_cached"
+# The run IS pointed at the cache dir: the assertion below (nothing stored)
+# is then load-bearing instead of vacuous.
+REEVE_ARCHIVE_DIR="$noexec_cached"
 noexec_dir=$(run_fetch noexec-binary "$commit_ref" "$noexec_fixture")
+unset REEVE_ARCHIVE_DIR
 assert_eq "$(cat "$noexec_dir/output")" fetched=false
 [[ "$(cat "$noexec_dir/code")" -eq 0 ]] || fail "a non-executable verified binary must be a soft fallback"
 assert_contains "$(cat "$noexec_dir/log")" "does not execute (reeve --version failed)"
 [[ ! -e "$noexec_dir/reeve" ]] || fail "a non-executable binary was installed"
-[[ -z "$(ls -A "$noexec_cached" 2>/dev/null)" ]] || fail "a non-executable binary must not be cached"
+if [[ "$(cat "$noexec_dir/output")" == fetched=true ]]; then
+  fail "the verified-but-non-executable download must not complete as fetched"
+fi
+[[ -z "$(ls -A "$noexec_cached" 2>/dev/null)" ]] || fail "a non-executable binary must not be cached: $(ls -A "$noexec_cached")"
 
 wrong_source_fixture="$test_root/fixtures/wrong-source"
 make_fixture "$wrong_source_fixture" "$other_hash"
