@@ -554,9 +554,13 @@ func TestLoadPreviewSnapshotAcceptsClockSkew(t *testing.T) {
 // TestPreviewSkewBoundary pins the limit itself: a stamp exactly AT
 // maxPreviewClockSkew counts as inside (the gate is strictly greater-than),
 // one second inside is kept, and one second past it is skipped - refusing
-// with the typed FuturePreviewError when nothing valid remains.
+// with the typed FuturePreviewError when nothing valid remains. The base
+// clock is TRUNCATED to the second: manifest stamps are written at
+// one-second RFC3339 resolution, so an untruncated base (sub-second
+// precision) would make the at-limit case land inside the limit and pass
+// under either comparison, proving nothing.
 func TestPreviewSkewBoundary(t *testing.T) {
-	base := time.Now().UTC()
+	base := time.Now().UTC().Truncate(time.Second)
 	limit := maxPreviewClockSkew
 	for _, c := range []struct {
 		name   string
