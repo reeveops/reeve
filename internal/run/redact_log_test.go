@@ -194,3 +194,65 @@ func (e *refreshSideChannelEngine) Refresh(ctx context.Context, s discovery.Stac
 	e.refreshed = append(e.refreshed, s.Ref())
 	return e.logSideChannelEngine.Refresh(ctx, s, iac.RefreshOpts{})
 }
+
+// applySideChannelEngine adds an engine Apply that logs the side-channel
+// values, so the apply path proves the same sink guarantee.
+type applySideChannelEngine struct {
+	bgEngine
+	secret, plain string
+	logged        bool
+}
+
+func (e *applySideChannelEngine) Apply(ctx context.Context, s discovery.Stack, _ iac.ApplyOpts) (iac.ApplyResult, error) {
+	slog.Info("apply side channel", "cred", e.secret, "plain", e.plain)
+	e.logged = true
+	return iac.ApplyResult{Counts: summary.Counts{Add: 1}}, nil
+}
+
+// TestApplyLogsMaskedRegisteredSecret is the apply counterpart of the
+// preview test: the resolved credential value is registered into the apply
+// run's invocation redactor - which is the process log redactor - so the
+// engine's own log line masks it. An unregistered value survives.
+func TestApplyLogsMaskedRegisteredSecret(t *testing.T) {
+	secret := "ap-nopattern-secret-42"
+	plain := "plain-apply-value"
+	captured := captureSlog(t)
+
+	provider := &secretCredentialProvider{envValue: secret}
+	registry := auth.NewRegistry()
+	if err := registry.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	blobStore, ferr := filesystem.New(t.TempDir())
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	engine := &applySideChannelEngine{bgEngine: bgEngine{enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"}}}}
+	engine.secret = secret
+	engine.plain = plain
+	fv := &bgVCS{changed: []string{"projects/api/main.ts"}, headSHA: bgSHA}
+	in := plainApplyInput(t, engine, fv, blobStore)
+	in.AuthConfig = &schemas.Auth{
+		Providers: map[string]schemas.ProviderYAML{"shared": {Type: "test"}},
+		Bindings:  []schemas.BindingYAML{{Match: schemas.BindingMatch{Stack: "*/*"}, Providers: []string{"shared"}}},
+	}
+	in.AuthRegistry = registry
+
+	out, err := Apply(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !engine.logged || len(out.Stacks) != 1 || out.Stacks[0].Status != summary.StatusPlanned {
+		t.Fatalf("the side channel must have logged and the apply must succeed: %+v", out.Stacks)
+	}
+	joined := strings.Join(*captured, "\n")
+	if strings.Contains(joined, secret) {
+		t.Fatalf("a registered credential value must be masked in the apply log sink:\n%s", joined)
+	}
+	if !strings.Contains(joined, "[redacted]") {
+		t.Fatalf("expected the masking marker:\n%s", joined)
+	}
+	if !strings.Contains(joined, plain) {
+		t.Fatalf("an unregistered value must still be visible (masking is registration-driven):\n%s", joined)
+	}
+}
