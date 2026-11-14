@@ -32,6 +32,53 @@ skip() {
   exit 0
 }
 
+# refuse fails the dispatch: the command never runs downstream.
+#
+# Unknown comment arguments used to be silently ignored, so a typo like
+# --dry-rnu turned a dry run into a writing command. Every verb now accepts
+# an exact argument set; the first token outside it refuses the command,
+# naming the argument and everything the verb accepts. Failing this script
+# makes the job red - the refusal is in the job log, in the place the
+# commenter is looking - and the refusal is ALSO posted as a reply on the
+# PR when the posting context is available, because the commenter watches
+# the PR, not the job log.
+#
+# The PR reply is best effort: a posting failure never changes the refusal
+# outcome (the job stays red either way); it only loses the convenience
+# reply. The token is never echoed or logged.
+refuse() {
+  refuse_reason "$1" "unknown argument \`$2\`. Accepted: $3."
+}
+
+refuse_reason() {
+  local reason="/reeve $1 refused: $2 Nothing ran."
+  printf '%s\n' "$reason" >&2
+  post_refusal_reply "$reason"
+  exit 1
+}
+
+# post_refusal_reply posts the refusal text as a PR comment reply when the
+# posting context is available (token, PR number). Failures warn and return;
+# the caller is refusing the command regardless.
+post_refusal_reply() {
+  local body="$1"
+  if [[ -z "${REEVE_REFUSAL_TOKEN:-}" || -z "${GITHUB_REPOSITORY:-}" || -z "${GITHUB_EVENT_PATH:-}" ]]; then
+    return 0
+  fi
+  local number
+  number=$(jq -r '.issue.number // .pull_request.number // empty' < "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+  if [[ -z "$number" ]]; then
+    return 0
+  fi
+  if ! curl -sf -X POST \
+    -H "Authorization: Bearer $REEVE_REFUSAL_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/issues/$number/comments" \
+    -d "$(jq -n --arg b "$body" '{body:$b}')" > /dev/null 2>&1; then
+    printf 'warning: could not post the refusal reply on PR #%s\n' "$number" >&2
+  fi
+}
+
 authorized_association() {
   local association
   association=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
@@ -142,24 +189,44 @@ case "${GITHUB_EVENT_NAME:-}" in
         command="apply"
         append_arg "--trigger-source"
         append_arg "comment"
-        if [[ " $rest " == *" --force "* || " $rest " == *" force "* ]]; then
-          append_arg "--force"
-        fi
-        if [[ " $rest " == *" --refresh "* ]]; then
-          append_arg "--refresh"
-        fi
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
+          case "$tok" in
+            --force|force)
+              append_arg "--force"
+              ;;
+            --refresh)
+              append_arg "--refresh"
+              ;;
+            *)
+              refuse "${verb}" "$tok" "--force, force, --refresh"
+              ;;
+          esac
+        done
         ;;
       refresh)
         command="refresh"
-        if [[ " $rest " == *" --dry-run "* || " $rest " == *" dry-run "* ]]; then
-          append_arg "--dry-run"
-        fi
-        if [[ " $rest " == *" --all "* || " $rest " == *" all "* ]]; then
-          append_arg "--all"
-        fi
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
+          case "$tok" in
+            --dry-run|dry-run)
+              append_arg "--dry-run"
+              ;;
+            --all|all)
+              append_arg "--all"
+              ;;
+            *)
+              refuse "${verb}" "$tok" "--dry-run, dry-run, --all, all"
+              ;;
+          esac
+        done
         ;;
       ready)
         command="ready"
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
+          refuse "${verb}" "$tok" "(no arguments)"
+        done
         ;;
       approve)
         command="approved"
@@ -171,31 +238,57 @@ case "${GITHUB_EVENT_NAME:-}" in
         ;;
       preview|plan)
         command="preview"
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
+          refuse "${verb}" "$tok" "(no arguments)"
+        done
         append_arg "--plan-requested"
         ;;
       unlock)
         command="unlock"
-        read -r first _ <<< "$rest"
-        if [[ -n "${first:-}" && "$first" != -* && "$first" == */* ]]; then
-          unlock_ref="$first"
-        fi
-        if [[ " $rest " == *" --force "* || " $rest " == *" force "* ]]; then
-          append_arg "--force"
-        fi
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
+          case "$tok" in
+            --force|force)
+              append_arg "--force"
+              ;;
+            -*)
+              refuse "${verb}" "$tok" "--force, force, <project/stack> (at most one)"
+              ;;
+            */*)
+              if [[ -n "$unlock_ref" ]]; then
+                refuse "${verb}" "$tok" "--force, force, <project/stack> (at most one)"
+              fi
+              unlock_ref="$tok"
+              ;;
+            *)
+              # A slash-less positional is ambiguous (stack? project?):
+              # silently ignoring it unlocked every stack for the PR
+              # instead of the one the commenter meant.
+              refuse "${verb}" "$tok" "--force, force, <project/stack> (at most one)"
+              ;;
+          esac
+        done
         ;;
       explain)
         command="run explain"
         read -r first second _ <<< "$rest"
         if [[ -n "${second:-}" ]]; then
-          skip "explain takes at most one project/stack selector, got: $rest - skipping."
+          refuse "${verb}" "$second" "<project/stack> (at most one)"
         fi
         if [[ -n "${first:-}" && "$first" != -* ]]; then
           append_arg "--stack"
           append_arg "$first"
+        elif [[ -n "${first:-}" ]]; then
+          refuse "${verb}" "$first" "<project/stack> (at most one)"
         fi
         ;;
       help)
         command="pr-help"
+        read -ra arg_tokens <<< "${rest:-}"
+        for tok in ${arg_tokens[@]+"${arg_tokens[@]}"}; do
+          refuse "${verb}" "$tok" "(no arguments)"
+        done
         ;;
       *)
         skip "Unknown reeve command '${verb:-}', skipping."

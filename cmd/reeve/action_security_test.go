@@ -489,11 +489,6 @@ func TestActionClassifier(t *testing.T) {
 			wantArgs:    []string{"--break-glass"},
 		},
 		{
-			name:      "malformed explain",
-			eventName: "issue_comment",
-			eventJSON: `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve explain one two","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`,
-		},
-		{
 			name:        "merged pull request",
 			eventName:   "pull_request",
 			eventJSON:   `{"action":"closed","pull_request":{"number":42,"merged":true}}`,
@@ -857,6 +852,118 @@ func mustJSON(t *testing.T, value any) string {
 	return string(data)
 }
 
+// classifyActionEventExpectRefusal runs the classifier the same way
+// classifyActionEvent does, but expects the script to refuse the dispatch:
+// a non-zero exit with the refusal on stderr. An unknown comment argument
+// used to be silently ignored, so a typo like --dry-rnu turned a dry run
+// into a writing command. The job must go red and say so.
+func classifyActionEventExpectRefusal(t *testing.T, eventName, eventJSON, command, runOnApproval string) string {
+	t.Helper()
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	outputPath := filepath.Join(dir, "output")
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runOnApproval == "" {
+		runOnApproval = "false"
+	}
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script and fixtures travel through environment variables.
+	cmd := exec.Command(script)
+	for key, value := range map[string]string{
+		"GITHUB_OUTPUT":              outputPath,
+		"GITHUB_EVENT_NAME":          eventName,
+		"GITHUB_EVENT_PATH":          eventPath,
+		"REEVE_INPUT_COMMAND":        command,
+		"REEVE_RUN_ON_APPROVAL":      runOnApproval,
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("unknown argument must refuse the dispatch (exit non-zero), but the classifier exited 0 with output:\n%s", output)
+	}
+	// The refusal must leave NOTHING behind: no run=true in GITHUB_OUTPUT -
+	// nothing downstream may dispatch off a refused command. The file may
+	// not exist at all: a refused run never writes the dispatch.
+	if out, rerr := os.ReadFile(outputPath); rerr != nil && !os.IsNotExist(rerr) {
+		t.Fatalf("read the classifier output file: %v", rerr)
+	} else if rerr == nil && strings.Contains(string(out), "run=true") {
+		t.Fatalf("a refused command must leave no run=true in GITHUB_OUTPUT: %s", out)
+	}
+	return string(output)
+}
+
+// TestClassifierRefusesUnknownCommentArgs asserts both halves of the failure
+// rule for the strict comment parser: the dispatch is refused (non-zero
+// exit, nothing downstream) AND the refusal names the verb, the failing
+// argument, and the set the verb accepts.
+func TestClassifierRefusesUnknownCommentArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		verb     string
+		arg      string
+		accepted string
+	}{
+		{"typo flag on refresh", "/reeve refresh --dry-rnu", "refresh", "--dry-rnu", "--dry-run, dry-run, --all, all"},
+		{"value-form dry-run on refresh", "/reeve refresh --dry-run=true", "refresh", "--dry-run=true", "--dry-run, dry-run, --all, all"},
+		{"unknown flag on apply", "/reeve apply --typo", "apply", "--typo", "--force, force, --refresh"},
+		{"typo flag on unlock", "/reeve unlock project/prod --froce", "unlock", "--froce", "--force, force, <project/stack> (at most one)"},
+		{"slash-less positional on unlock", "/reeve unlock prod", "unlock", "prod", "--force, force, <project/stack> (at most one)"},
+		{"flag on preview", "/reeve preview --force", "preview", "--force", "(no arguments)"},
+		{"flag on explain", "/reeve explain --all", "explain", "--all", "<project/stack> (at most one)"},
+		{"flag on ready", "/reeve ready --dry-run", "ready", "--dry-run", "(no arguments)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			eventJSON := `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"` + c.body + `","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+			out := classifyActionEventExpectRefusal(t, "issue_comment", eventJSON, "", "false")
+			want := fmt.Sprintf("/reeve %s refused: unknown argument `%s`. Accepted: %s.", c.verb, c.arg, c.accepted)
+			if !strings.Contains(out, want) {
+				t.Fatalf("refusal output must name verb, argument, and accepted set:\nwant: %s\ngot:  %s", want, out)
+			}
+		})
+	}
+}
+
+// TestClassifierStillAcceptsKnownVerbArgs guards against over-refusing:
+// every documented argument form still dispatches.
+func TestClassifierStillAcceptsKnownVerbArgs(t *testing.T) {
+	cases := []struct {
+		name         string
+		body         string
+		wantCommand  string
+		wantContains []string
+	}{
+		{"apply with force and refresh", "/reeve apply --force --refresh", "apply", []string{"--force", "--refresh"}},
+		{"apply bare force alias", "/reeve apply force", "apply", []string{"--force"}},
+		{"refresh with dry-run and all", "/reeve refresh --dry-run --all", "refresh", []string{"--dry-run", "--all"}},
+		{"refresh bare aliases", "/reeve refresh dry-run all", "refresh", []string{"--dry-run", "--all"}},
+		{"unlock with ref and force", "/reeve unlock project/prod --force", "unlock", []string{"--force"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			eventJSON := `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"` + c.body + `","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+			dispatch := classifyActionEvent(t, "issue_comment", eventJSON, "", "false")
+			if !dispatch.Run || dispatch.Command != c.wantCommand {
+				t.Fatalf("dispatch = run=%v command=%q, want run=true command=%q", dispatch.Run, dispatch.Command, c.wantCommand)
+			}
+			got := strings.Join(dispatch.Args, " ")
+			for _, want := range c.wantContains {
+				if !strings.Contains(" "+got+" ", " "+want+" ") {
+					t.Fatalf("args %q must contain %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestBinaryFetchRejectsMissingSignatureVerifier(t *testing.T) {
 	script := repoPath(t, ".github", "scripts", "fetch-binary.sh")
 	sums := filepath.Join(t.TempDir(), "checksums.txt")
@@ -1011,4 +1118,134 @@ func repoPath(t *testing.T, parts ...string) string {
 	t.Helper()
 	root := filepath.Join("..", "..")
 	return filepath.Join(append([]string{root}, parts...)...)
+}
+
+// TestClassifierRefusalIsPostedAsPRReply pins the reviewer-visible half of
+// the refusal: a refused comment command fails the job AND posts the
+// refusal (command received, rule, accepted forms) as a reply on the PR.
+// The posting is best effort; the refused job stays red either way.
+func TestClassifierRefusalIsPostedAsPRReply(t *testing.T) {
+	dir := t.TempDir()
+	curlLog := filepath.Join(dir, "curl.calls")
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	curlScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CURL_LOG\"\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte(curlScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	eventPath := filepath.Join(dir, "event.json")
+	event := `{"action":"created","issue":{"number":7,"pull_request":{}},"comment":{"body":"/reeve preview --force","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+	if err := os.WriteFile(eventPath, []byte(event), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(dir, "output")
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script; PATH is prefixed with a fake-curl dir and fixtures travel through environment variables.
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"CURL_LOG="+curlLog,
+		"REEVE_REFUSAL_TOKEN=fake-token",
+		"GITHUB_REPOSITORY=o/r",
+		"GITHUB_API_URL=https://api.example.invalid",
+		"GITHUB_EVENT_NAME=issue_comment",
+		"GITHUB_EVENT_PATH="+eventPath,
+		"GITHUB_OUTPUT="+outputPath,
+		"REEVE_ALLOWED_ASSOCIATIONS=OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES=/reeve",
+		"REEVE_RUN_ON_APPROVAL=false",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the refused command must fail the job, got exit 0:\n%s", output)
+	}
+	const refusal = "/reeve preview refused: unknown argument `--force`. Accepted: (no arguments). Nothing ran."
+	if !strings.Contains(string(output), refusal) {
+		t.Fatalf("job log must carry the refusal:\nwant: %s\ngot:  %s", refusal, output)
+	}
+
+	// Nothing downstream may dispatch off a refused command: no run=true
+	// in GITHUB_OUTPUT. The file may not exist at all: a refused run never
+	// writes the dispatch.
+	if out, rerr := os.ReadFile(outputPath); rerr != nil && !os.IsNotExist(rerr) {
+		t.Fatalf("read the classifier output file: %v", rerr)
+	} else if rerr == nil && strings.Contains(string(out), "run=true") {
+		t.Fatalf("a refused run must leave no run=true in GITHUB_OUTPUT: %s", out)
+	}
+	calls, err := os.ReadFile(curlLog)
+	if err != nil {
+		t.Fatalf("the refusal must have been posted to the PR: %v", err)
+	}
+	if !strings.Contains(string(calls), "repos/o/r/issues/7/comments") {
+		t.Fatalf("the PR reply must target the refused PR's issue comments:\n%s", calls)
+	}
+	if !strings.Contains(string(calls), "api.example.invalid") {
+		t.Fatalf("the reply must use the ambient API URL:\n%s", calls)
+	}
+	// The comment body travels as the -d payload argument; the refusal text
+	// must appear verbatim there.
+	if !strings.Contains(string(calls), refusal) {
+		t.Fatalf("the PR reply body must carry the refusal verbatim:\nwant: %s\ngot:  %s", refusal, calls)
+	}
+}
+
+// TestClassifierRefusalPostingIsBestEffort pins that a posting failure
+// never softens the refusal: the job still fails and the reason still
+// reaches the job log.
+func TestClassifierRefusalPostingIsBestEffort(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	curlScript := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte(curlScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join(dir, "event.json")
+	event := `{"action":"created","issue":{"number":7,"pull_request":{}},"comment":{"body":"/reeve preview --force","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+	if err := os.WriteFile(eventPath, []byte(event), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(dir, "output")
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script and the fixture travels through environment variables.
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"REEVE_REFUSAL_TOKEN=fake-token",
+		"GITHUB_REPOSITORY=o/r",
+		"GITHUB_EVENT_NAME=issue_comment",
+		"GITHUB_EVENT_PATH="+eventPath,
+		"GITHUB_OUTPUT="+outputPath,
+		"REEVE_ALLOWED_ASSOCIATIONS=OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES=/reeve",
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("the refused command must still fail the job when the reply cannot be posted")
+	}
+	if !strings.Contains(string(output), "/reeve preview refused: unknown argument `--force`") {
+		t.Fatalf("the refusal must still reach the job log:\n%s", output)
+	}
+	if !strings.Contains(string(output), "warning: could not post the refusal reply on PR #7") {
+		t.Fatalf("the posting failure must be stated:\n%s", output)
+	}
+}
+
+// TestClassifierRefusesExplainExtraSelector: `explain a b` is a refusal
+// (red job, posted reply), not a quiet skip - a malformed command must
+// never dispatch as something else.
+func TestClassifierRefusesExplainExtraSelector(t *testing.T) {
+	event := `{"action":"created","issue":{"pull_request":{}},"comment":{"body":"/reeve explain one two","author_association":"OWNER","user":{"type":"User","login":"operator"}}}`
+	out := classifyActionEventExpectRefusal(t, "issue_comment", event, "", "false")
+	const want = "/reeve explain refused: unknown argument `two`. Accepted: <project/stack> (at most one). Nothing ran."
+	if !strings.Contains(out, want) {
+		t.Fatalf("the extra selector must be refused with the accepted form:\nwant: %s\ngot:  %s", want, out)
+	}
 }
