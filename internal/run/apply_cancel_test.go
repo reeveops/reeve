@@ -25,12 +25,13 @@ func (b *blockingEngine) Apply(ctx context.Context, s discovery.Stack, opts iac.
 	return iac.ApplyResult{}, ctx.Err()
 }
 
-// TestApplyCancelledMidRunReleasesLocksAndFails simulates a SIGTERM during
-// an engine apply: the blocked subprocess returns the context error, the
-// stack lock is released on a detached grace context (not left pinned for
-// the ttl), the not-yet-started stack is recorded as failed, and the output
-// demands a nonzero exit.
-func TestApplyCancelledMidRunReleasesLocksAndFails(t *testing.T) {
+// TestApplyCancelledMidRunRecordsHoldsAndFails simulates a SIGTERM during
+// an engine apply: the interrupted stack's apply returns the context error
+// and its lock STAYS HELD recording why (outcome `interrupted`, run URL,
+// audit key) - a lock held by an apply never lapses on its own - while the
+// not-yet-started stack (its apply never began) is recorded as failed and
+// its lock is released; the output demands a nonzero exit.
+func TestApplyCancelledMidRunRecordsHoldsAndFails(t *testing.T) {
 	engine := &blockingEngine{
 		bgEngine: bgEngine{enum: []discovery.Stack{
 			{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"},
@@ -87,15 +88,33 @@ func TestApplyCancelledMidRunReleasesLocksAndFails(t *testing.T) {
 		t.Fatalf("never-started stack must say cancelled-before: %+v", s)
 	}
 
-	// Both locks must be free: api/prod released on the detached grace
-	// context after the engine returned; worker/prod never acquired.
-	for _, ref := range [][2]string{{"api", "prod"}, {"worker", "prod"}} {
-		l, _, gerr := in.Locks.Get(context.Background(), ref[0], ref[1])
-		if gerr != nil {
-			t.Fatal(gerr)
-		}
-		if l.Holder != nil {
-			t.Fatalf("lock %s/%s must not be left held after cancellation: %+v", ref[0], ref[1], l.Holder)
-		}
+	// worker/prod's apply never began: its lock (never persistently held)
+	// is released.
+	worker, _, gerr := in.Locks.Get(context.Background(), "worker", "prod")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if worker.Holder != nil {
+		t.Fatalf("the never-started stack's lock must be free: %+v", worker.Holder)
+	}
+
+	// api/prod's apply was INTERRUPTED: its lock stays held with the reason.
+	api, _, gerr := in.Locks.Get(context.Background(), "api", "prod")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if api.Holder == nil || !api.Holder.HoldStarted {
+		t.Fatalf("the interrupted stack's lock must stay held: %+v", api.Holder)
+	}
+	if api.Holder.Outcome != "interrupted" {
+		t.Fatalf("hold outcome = %q, want interrupted: %+v", api.Holder.Outcome, api.Holder)
+	}
+	if api.Holder.AuditKey == "" || api.Holder.RecordedAt == "" {
+		t.Fatalf("the interrupted hold must carry the audit key and timestamp: %+v", api.Holder)
+	}
+
+	// The interrupted failure notice reaches the PR.
+	if !strings.Contains(fv.allComments(), "STILL HELD") {
+		t.Fatalf("the PR must carry the held-lock notice: %s", fv.allComments())
 	}
 }
