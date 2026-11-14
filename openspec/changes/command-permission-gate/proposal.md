@@ -16,12 +16,15 @@ permission.
   minimum repository permission needed to dispatch `reeve` commands and to
   have a `pr_comment` approval counted.
 - Dispatch validates the actor's real repository role through the GitHub
-  API the action already authenticates with (`role_name`: `admin`,
-  `maintain`, `write`, `triage`, `read`, `none`), and denies anything below
-  the required level (`write`, `maintain`, `admin` accepted as
-  `required-permission`). Levels below `write` are inputs the mapping still
-  reports (`read`, `none`) but always denies; they are rejected as
-  `required-permission` values at action-input validation.
+  API the action already authenticates with: the level is read from the
+  response's `user.permissions` flags (`admin` → `admin`, `maintain` →
+  `maintain`, `push` → `write`; triage/pull-only is below the bar), and
+  denies anything below the required level (`write`, `maintain`, `admin`
+  accepted as `required-permission`). `role_name` is recorded in traces
+  and audit records as the assigned role, never used as the level. The API
+  also reports the levels below `write` (`read`, `none`); those always
+  deny, and `required-permission` itself rejects them at action-input
+  validation.
 - `allowed-associations` stays: association remains the cheap prefilter and
   the coarse deny-list (`NONE` is denied by default). An actor whose
   association passes the allowlist but whose real permission is below

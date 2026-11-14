@@ -18,10 +18,9 @@ one request with the fields that matter, per GitHub's REST documentation:
   flags → below the bar.
 - `role_name` - the name of the assigned role, including custom repository
   roles. No longer a level source; recorded verbatim in traces and audit
-  records. (The previous design keyed the mapping on `role_name`, which
-  refused every custom-role holder; the boolean hash is the field the docs
-  document as carrying the level, so the mapping moved to it and no
-  operator-side role-mapping table is needed.)
+  records. (The boolean hash is the level field - an earlier draft of this
+  design read the level from `role_name`, which refused every custom-role
+  holder for having a name the mapping did not recognize.)
 - `permission` - the LEGACY base string: `admin`, `write`, `read`, `none`,
   with GitHub documenting that maintain is mapped to write here and triage
   to read. NOT used for the level.
