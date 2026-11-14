@@ -25,3 +25,12 @@ Local operations and scheduled drift continue to load the checked-out repository
 An internal PR may still propose control-setting changes, but those changes take effect only after merge.
 Workload declarations needed to preview newly added stacks remain head-owned.
 The documented head-resolved break-glass self-authorization ("self-add flagged, not forbidden") is intentionally retired by this change: it is the same `reject_self_authorization` hole this proposal closes, and no new keys are introduced - `reject_self_authorization` keeps working with a strictly enforceable meaning.
+
+**Round-6 spec corrections (review follow-up 6):** the approvals delta's
+REMOVED header now matches the base spec's actual heading — a plain
+subheading, `### Head-resolved; self-add flagged, not forbidden (with opt-in
+lockdown)` — instead of inventing a `### Requirement:` title, so the removal
+folds in on archive. The trailing prose (the audit-signal and
+`reject_self_authorization` continuation) moved from below the last scenario
+into the requirement body, where delta prose belongs. The decision itself is
+unchanged and remains under review.

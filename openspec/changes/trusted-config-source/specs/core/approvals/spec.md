@@ -2,11 +2,13 @@
 
 ## REMOVED Requirements
 
-### Requirement: Break-glass authorization is head-resolved and self-add is flagged, not forbidden
+### Head-resolved; self-add flagged, not forbidden (with opt-in lockdown)
 
 The head-resolved model is retired: resolving the authorization surface from
 the PR HEAD let a PR grant itself emergency override authority - the
-`reject_self_authorization` hole this proposal closes.
+`reject_self_authorization` hole this proposal closes. (The base spec states
+this as a plain subheading, not a `Requirement:` heading, so the removal
+matches it verbatim and folds in on archive.)
 
 ## ADDED Requirements
 
@@ -18,7 +20,13 @@ CODEOWNERS content the `codeowners` source consults - and never from PR HEAD.
 A PR that adds an actor to `break_glass.authorized` or grants itself
 CODEOWNERS ownership of a changed path MUST NOT authorize its own emergency
 override: the addition takes effect only after merge. No new configuration
-keys are introduced by this change.
+keys are introduced by this change. The `authorizing-config-modified` audit
+signal stays: the modification is inert for the current run, and the audit
+record still names every touched path. `break_glass.reject_self_authorization`
+stays accepted and keeps enforceable meaning: when set, a PR that modifies
+any authorizing file is denied break-glass outright, before any source
+evaluation, with the touched paths in the trace. Source-union matching,
+narrowest-first recording, and denial traces are unchanged.
 
 #### Scenario: A PR grants itself break-glass authority
 
@@ -60,11 +68,3 @@ keys are introduced by this change.
 - **THEN** the audit record flags `authorizing-config-modified` with the
   touched paths
 - **AND** the modification is inert for the current run
-
-The `authorizing-config-modified` audit signal stays: the modification is
-inert for the current run, and the audit record still names every touched
-path. `break_glass.reject_self_authorization` stays accepted and keeps
-enforceable meaning: when set, a PR that modifies any authorizing file is
-denied break-glass outright, before any source evaluation, with the touched
-paths in the trace. Source-union matching, narrowest-first recording, and
-denial traces are unchanged.
