@@ -15,6 +15,32 @@ import (
 	"github.com/reeveops/reeve/internal/core/summary"
 )
 
+// maxPreviewClockSkew bounds how far ahead of the local clock a manifest's
+// created_at may be and still count as created in the past. A stamp beyond
+// this skew is skipped at selection - it never counts as fresh, no matter
+// how new its timestamp sorts: a future-dated manifest computes a NEGATIVE
+// age, which would hold the freshness gate at green indefinitely.
+const maxPreviewClockSkew = 2 * time.Minute
+
+// FuturePreviewError reports that every candidate manifest for the commit
+// is dated ahead of the clock beyond the allowed skew. The apply fails
+// closed; the named manifest is the newest skipped one. Re-run
+// `/reeve preview` to publish a current manifest - the next lookup selects
+// it because only FUTURE-dated manifests are skipped.
+type FuturePreviewError struct {
+	// Key is the object key of the newest skipped manifest.
+	Key string
+	// CreatedAt is its stored stamp, and Clock is the local time it was
+	// compared against.
+	CreatedAt string
+	Clock     time.Time
+}
+
+func (e *FuturePreviewError) Error() string {
+	return fmt.Sprintf("preview %q rejected: created_at %q is in the future (clock is %s); the manifest cannot count as fresh. Re-run /reeve preview to publish a current preview.",
+		e.Key, e.CreatedAt, e.Clock.Format(time.RFC3339))
+}
+
 var errInvalidPreviewManifest = errors.New("invalid preview manifest")
 
 // PreviewStatus is what apply needs to know about a prior preview for a
@@ -44,10 +70,16 @@ type PreviewSnapshot struct {
 // LoadPreviewSnapshot scans the PR's manifests once and indexes the newest
 // preview for the requested commit.
 func LoadPreviewSnapshot(ctx context.Context, store blob.Store, prNumber int, commitSHA string) (PreviewSnapshot, error) {
+	return loadPreviewSnapshot(ctx, store, prNumber, commitSHA, time.Now)
+}
+
+// loadPreviewSnapshot is LoadPreviewSnapshot with the clock injected so
+// tests exercise skew without a mutable package variable.
+func loadPreviewSnapshot(ctx context.Context, store blob.Store, prNumber int, commitSHA string, now func() time.Time) (PreviewSnapshot, error) {
 	if store == nil || prNumber == 0 {
 		return PreviewSnapshot{}, nil
 	}
-	best, err := newestPreviewManifest(ctx, store, prNumber, commitSHA)
+	best, err := newestPreviewManifest(ctx, store, prNumber, commitSHA, now)
 	if err != nil {
 		return PreviewSnapshot{}, err
 	}
@@ -57,11 +89,14 @@ func LoadPreviewSnapshot(ctx context.Context, store blob.Store, prNumber int, co
 	}
 	slog.Debug("preview lookup: best manifest", "run_id", best.RunID, "created_at", best.CreatedAt, "stack_count", len(best.Stacks))
 
+	// Future-dated manifests never reach this function: selection skips
+	// them (newestPreviewManifest) and fails with FuturePreviewError when
+	// nothing valid remains, so a future stamp can never count as fresh.
 	createdAt, err := time.Parse(time.RFC3339, best.CreatedAt)
 	if err != nil {
 		return PreviewSnapshot{}, fmt.Errorf("preview manifest %q has invalid created_at %q: %w", best.RunID, best.CreatedAt, err)
 	}
-	age := time.Since(createdAt)
+	age := now().Sub(createdAt)
 	snapshot := PreviewSnapshot{
 		statuses:     make(map[string]PreviewStatus, len(best.Stacks)),
 		stackCount:   len(best.Stacks),
@@ -159,7 +194,7 @@ func PreviewedStackRefs(ctx context.Context, store blob.Store, prNumber int, com
 // newestPreviewManifest returns the most recent preview manifest for the
 // (PR, commit SHA) pair, or nil. An unreadable object fails the lookup because
 // it may be the authoritative candidate for this commit.
-func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, commitSHA string) (*manifest, error) {
+func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, commitSHA string, now func() time.Time) (*manifest, error) {
 	prefix := fmt.Sprintf("runs/pr-%d/", prNumber)
 	keys, err := store.List(ctx, prefix)
 	if err != nil {
@@ -167,6 +202,11 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 	}
 	var best *manifest
 	var bestCreatedAt time.Time
+	var skippedFuture []struct {
+		key       string
+		createdAt string
+		clock     time.Time
+	}
 	for _, k := range keys {
 		runID, identityBound, candidate := previewManifestCandidate(k, prefix, commitSHA)
 		if !candidate {
@@ -204,12 +244,39 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 		if parseErr != nil {
 			return nil, fmt.Errorf("preview manifest %q has invalid created_at %q: %w", k, m.CreatedAt, parseErr)
 		}
+		// A future-dated manifest never counts as fresh and never wins
+		// selection: skip it with the object key and its stamp in the
+		// warning. Selection then falls to the newest VALID manifest, so a
+		// fresh /reeve preview clears the refusal.
+		if ahead := createdAt.Sub(now()); ahead > maxPreviewClockSkew {
+			slog.Warn("preview manifest dated in the future; skipped",
+				"key", k, "created_at", m.CreatedAt, "clock", now().Format(time.RFC3339))
+			skippedFuture = append(skippedFuture, struct {
+				key       string
+				createdAt string
+				clock     time.Time
+			}{k, m.CreatedAt, now()})
+			continue
+		}
 		if best == nil || createdAt.After(bestCreatedAt) ||
 			(createdAt.Equal(bestCreatedAt) && newerPreviewRunID(m.RunID, best.RunID, commitSHA)) {
 			c := m
 			best = &c
 			bestCreatedAt = createdAt
 		}
+	}
+	// Nothing valid remained but future-dated manifests were present: fail
+	// closed with the typed refusal naming the newest skipped manifest.
+	// Once a current preview exists, the next lookup selects it - the skip
+	// is what breaks the "re-run never clears it" loop.
+	if best == nil && len(skippedFuture) > 0 {
+		newest := skippedFuture[0]
+		for _, sk := range skippedFuture[1:] {
+			if sk.createdAt > newest.createdAt {
+				newest = sk
+			}
+		}
+		return nil, &FuturePreviewError{Key: newest.key, CreatedAt: newest.createdAt, Clock: newest.clock}
 	}
 	return best, nil
 }

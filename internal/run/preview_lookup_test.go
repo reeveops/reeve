@@ -157,7 +157,7 @@ func TestPlanSucceededAgreesWithNewestManifest(t *testing.T) {
 		{Project: "api", Stack: "prod", Status: summary.StatusError, Error: "engine crashed"},
 	})
 
-	best, err := newestPreviewManifest(ctx, store, 42, sha)
+	best, err := newestPreviewManifest(ctx, store, 42, sha, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestNewestPreviewManifestOrdersRunIdentityNumerically(t *testing.T) {
 					{Project: "api", Stack: "prod", Status: summary.StatusPlanned},
 				})
 			}
-			best, err := newestPreviewManifest(t.Context(), store, 42, sha)
+			best, err := newestPreviewManifest(t.Context(), store, 42, sha, time.Now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -473,5 +473,127 @@ func TestPreviewSnapshotPreservesFailedPreview(t *testing.T) {
 	status := snapshot.StackStatus("api/prod")
 	if !status.Found || status.Succeeded || snapshot.Succeeded() {
 		t.Fatalf("failed preview status = %+v, snapshot success = %t", status, snapshot.Succeeded())
+	}
+}
+
+// TestFutureManifestIsSkippedAndRefused pins the clock-skew gate: a
+// manifest dated ahead of the clock beyond the skew never counts as fresh
+// and never wins selection - the newest VALID manifest is selected. When
+// nothing valid remains the lookup fails with a typed FuturePreviewError
+// naming the newest skipped manifest.
+func TestFutureManifestIsSkippedAndRefused(t *testing.T) {
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	base := time.Now().UTC().Add(-time.Minute)
+	future := base.Add(time.Hour)
+	putManifest(t, store, 5, "preview-1", sha, future.Format(time.RFC3339),
+		[]summary.StackSummary{{Project: "api", Stack: "prod", Status: summary.StatusPlanned}})
+
+	_, err = loadPreviewSnapshot(context.Background(), store, 5, sha, func() time.Time { return base })
+	var fpe *FuturePreviewError
+	if !errors.As(err, &fpe) {
+		t.Fatalf("a 1h-future manifest must be refused with a typed error, got %v", err)
+	}
+	if !strings.Contains(fpe.Key, "pr-5/") || fpe.CreatedAt != future.Format(time.RFC3339) {
+		t.Fatalf("the refusal must name the object key and stamp: %+v", fpe)
+	}
+	for _, want := range []string{"is in the future", "cannot count as fresh", "/reeve preview"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal must name the run, the stamp, the clock, and the fix:\nwant: %s\nerr:  %v", want, err)
+		}
+	}
+
+	// The future manifest is skipped, not selected: once a CURRENT preview
+	// exists, the lookup clears the refusal and selects the fresh manifest.
+	// This is the loop the old refusal could never close: the future stamp
+	// always sorted newest, so re-running preview never unblocked apply.
+	freshStamp := base.Add(time.Second)
+	putManifest(t, store, 5, "preview-2", sha, freshStamp.Format(time.RFC3339),
+		[]summary.StackSummary{{Project: "api", Stack: "prod", Status: summary.StatusPlanned}})
+	snapshot, err := loadPreviewSnapshot(context.Background(), store, 5, sha, func() time.Time { return base.Add(2 * time.Second) })
+	if err != nil {
+		t.Fatalf("a fresh preview must clear the refusal: %v", err)
+	}
+	st := snapshot.StackStatus("api/prod")
+	if !st.Found || !st.Succeeded || st.RunID == "" || strings.Contains(st.RunID, "preview-1") {
+		t.Fatalf("the selected manifest must be the fresh one, got %+v", st)
+	}
+	// Its age is computed from the fresh stamp, never negative from the
+	// future one (a future stamp would hold freshness at green forever).
+	if st.Age < 0 || st.Age > time.Minute {
+		t.Fatalf("age must derive from the fresh manifest: %v", st.Age)
+	}
+}
+
+// TestLoadPreviewSnapshotAcceptsClockSkew is the companion: a stamp within
+// the small allowed skew (a +30s clock offset) passes and the manifest is
+// indexed normally.
+func TestLoadPreviewSnapshotAcceptsClockSkew(t *testing.T) {
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	base := time.Now().UTC().Add(-time.Minute)
+	putManifest(t, store, 6, "preview-2", sha, base.Add(30*time.Second).Format(time.RFC3339),
+		[]summary.StackSummary{{Project: "api", Stack: "prod", Status: summary.StatusPlanned}})
+
+	snapshot, err := loadPreviewSnapshot(context.Background(), store, 6, sha, func() time.Time { return base })
+	if err != nil {
+		t.Fatalf("a 30s-future stamp is within skew and must pass: %v", err)
+	}
+	st := snapshot.StackStatus("api/prod")
+	if !st.Found || !st.Succeeded {
+		t.Fatalf("manifest must be indexed: %+v", st)
+	}
+}
+
+// TestPreviewSkewBoundary pins the limit itself: a stamp exactly AT
+// maxPreviewClockSkew counts as inside (the gate is strictly greater-than),
+// one second inside is kept, and one second past it is skipped - refusing
+// with the typed FuturePreviewError when nothing valid remains. The base
+// clock is TRUNCATED to the second: manifest stamps are written at
+// one-second RFC3339 resolution, so an untruncated base (sub-second
+// precision) would make the at-limit case land inside the limit and pass
+// under either comparison, proving nothing.
+func TestPreviewSkewBoundary(t *testing.T) {
+	base := time.Now().UTC().Truncate(time.Second)
+	limit := maxPreviewClockSkew
+	for _, c := range []struct {
+		name   string
+		offset time.Duration
+		kept   bool
+	}{
+		{"just inside the limit", limit - time.Second, true},
+		{"exactly at the limit", limit, true},
+		{"just outside the limit", limit + time.Second, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store, err := filesystem.New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			sha := "dddddddddddddddddddddddddddddddddddddddd"
+			putManifest(t, store, 9, "preview-1", sha, base.Add(c.offset).Format(time.RFC3339),
+				[]summary.StackSummary{{Project: "api", Stack: "prod", Status: summary.StatusPlanned}})
+
+			_, err = loadPreviewSnapshot(context.Background(), store, 9, sha, func() time.Time { return base })
+			if c.kept {
+				if err != nil {
+					t.Fatalf("a stamp %s past the clock is within skew and must be kept: %v", c.offset, err)
+				}
+				return
+			}
+			var fpe *FuturePreviewError
+			if !errors.As(err, &fpe) {
+				t.Fatalf("a stamp %s past the clock is beyond the skew and must be skipped with the typed refusal, got %v", c.offset, err)
+			}
+			if !strings.Contains(err.Error(), "Re-run /reeve preview") {
+				t.Fatalf("the refusal must carry the next step: %v", err)
+			}
+		})
 	}
 }

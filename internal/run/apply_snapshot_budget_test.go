@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
@@ -59,13 +60,17 @@ func TestApplyReadsLargePreviewHistoryOnce(t *testing.T) {
 	in := plainApplyInput(t, engine, vcsClient, store)
 	in.Config = &schemas.Engine{Engine: schemas.EngineBody{Type: "pulumi", Stacks: decls}}
 
-	// plainApplyInput writes one candidate. Add 98 manifests for other commits
-	// and one newer candidate for a total history of 100 objects.
+	// plainApplyInput writes one candidate (api/prod, created now). Add 98
+	// manifests for other commits and one newer candidate for a total
+	// history of 100 objects. The newest candidate dates "now": it was
+	// written after the fixture's manifest, so it wins created_at ordering
+	// (same second or later), stays inside the 4h freshness window, and
+	// does not trip the future-stamp gate - the old 2099 stamp did.
 	for i := 0; i < 98; i++ {
 		putManifest(t, store, in.PRNumber, fmt.Sprintf("historical-%03d", i), fmt.Sprintf("other-%03d", i),
 			"2026-01-01T00:00:00Z", preview[:1])
 	}
-	putManifest(t, store, in.PRNumber, "preview-latest", bgSHA, "2099-01-01T00:00:00Z", preview)
+	putManifest(t, store, in.PRNumber, "preview-latest", bgSHA, time.Now().UTC().Format(time.RFC3339), preview)
 	store.lists = map[string]int{}
 	store.gets = map[string]int{}
 
