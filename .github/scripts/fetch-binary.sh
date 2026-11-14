@@ -85,9 +85,14 @@ map_arch() {
   esac
 }
 
-# verify_sha256 <file> <checksums-file>
-# Checks <file> against its (basename-keyed) line in a sha256sum-format
-# checksums file. Returns non-zero on a missing entry or a mismatch.
+# checksum_entry <file> <sums-file>: prints the recorded digest for file's
+# basename, or "" when the checksums file lists no entry for it.
+checksum_entry() {
+  local base
+  base=$(basename "$1")
+  awk -v f="$base" '$2 == f || $2 == "*" f {print $1; exit}' "$2"
+}
+
 verify_sha256() {
   local file="$1" sums="$2" base expected actual
   base=$(basename "$file")
@@ -137,15 +142,42 @@ verify_signature() {
   return 1
 }
 
+# fetch_main resolves and verifies the prebuilt binary.
+#
+# Verification is MANDATORY and against the LIVE signed checksums:
+#   1. checksums.txt and its cosign bundle are fetched fresh each run and
+#      the signature verified - a failure here fails the run (exit 1, the
+#      reason on stderr); nothing unverified is consumed.
+#   2. the archive - cached from an earlier run or downloaded fresh - MUST
+#      digest-match the verified checksums. A mismatch fails the run with
+#      the expected digest, the actual digest, and the cache key. No silent
+#      fresh re-download, no unverified use.
+#   3. a fresh download that verifies is stored into the cache dir
+#      (REEVE_ARCHIVE_DIR) for the next run.
+# A verified artifact that is simply not for this action source (source-hash
+# mismatch) still falls back to a source build with the reason: nothing was
+# consumed, and the wrong-artifact case is a selector problem, not a
+# tampering signal.
 fetch_main() {
   local out="${GITHUB_OUTPUT:-/dev/stdout}"
   local ref="${REEVE_REF:-}" repo="${REEVE_REPO:-}"
   local dest="${REEVE_DEST:?REEVE_DEST is required}"
-  local arch kind workdir asset sums source_hash_file tag ok=false
+  local archive_dir="${REEVE_ARCHIVE_DIR:-}"
+  local cache_key="${REEVE_CACHE_KEY:-}"
+  local arch kind workdir asset sums sums_dir source_hash_file tag expected actual
 
   fallback() {
     echo "$1 - falling back to source build"
     echo "fetched=false" >> "$out"
+  }
+
+  # The ONE hard failure: a digest mismatch against the verified signed
+  # checksums - a tamper signal. Nothing was or will be consumed, and the
+  # reason lands on stderr before the run fails.
+  verify_hard_fail() {
+    echo "prebuilt verification failed: $1" >&2
+    echo "fetched=false" >> "$out"
+    exit 1
   }
 
   # Never hardcode the repo: forks and local runs (empty contexts) degrade
@@ -190,86 +222,132 @@ fetch_main() {
     version)
       asset="reeve_${ref#v}_linux_${arch}.tar.gz"
       sums="checksums.txt"
-      echo "Pinned release $ref: downloading $asset from $repo"
-      if gh release download "$ref" --repo "$repo" \
-        --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" --dir "$workdir"; then
-        ok=true
-      else
-        echo "download failed (missing release/asset, or network error)" >&2
-      fi
+      tag="$ref"
       ;;
     edge)
       asset="reeve_linux_${arch}.tar.gz"
       sums="checksums.txt"
       source_hash_file="source-hash.txt"
-      # Resolve the release for the source tree GitHub already checked out.
-      # A branch may advance during a run, so "newest" alone is not enough.
       tag=$(gh api "repos/${repo}/releases?per_page=100" \
         --jq "[.[] | select(.prerelease and (.tag_name | startswith(\"${ref}-\")) and ((.body // \"\") | contains(\"reeve-source-hash: ${REEVE_SOURCE_HASH}\")))] | sort_by(.created_at) | reverse | .[0].tag_name" 2> /dev/null || true)
       if [[ -z "$tag" || "$tag" == "null" ]]; then
-        echo "no ${ref}-* prerelease matches this action source (edge build may still be running)" >&2
-      else
-        echo "Edge ref '$ref': source-matched prerelease is $tag; downloading $asset from $repo"
-        if gh release download "$tag" --repo "$repo" \
-          --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" \
-          --pattern "$source_hash_file" --dir "$workdir"; then
-          ok=true
-        else
-          echo "download failed for $tag (missing asset or network error)" >&2
-        fi
+        fallback "no ${ref}-* prerelease matches this action source (edge build may still be running)"
+        return 0
       fi
+      asset="reeve_linux_${arch}.tar.gz"
       ;;
     commit)
-      asset="reeve_linux_${arch}.tar.gz"
       sums="checksums.txt"
       source_hash_file="source-hash.txt"
       tag=$(gh api "repos/${repo}/releases?per_page=100" \
         --jq "[.[] | select(.prerelease and .target_commitish == \"${ref}\" and ((.body // \"\") | contains(\"reeve-source-hash: ${REEVE_SOURCE_HASH}\")))] | sort_by(.created_at) | reverse | .[0].tag_name" 2> /dev/null || true)
       if [[ -z "$tag" || "$tag" == "null" ]]; then
-        echo "no retained prerelease matches commit $ref and this action source" >&2
-      else
-        echo "Commit ref '${ref:0:12}': prerelease is $tag; downloading $asset from $repo"
-        if gh release download "$tag" --repo "$repo" \
-          --pattern "$asset" --pattern "$sums" --pattern "${sums}.bundle" \
-          --pattern "$source_hash_file" --dir "$workdir"; then
-          ok=true
-        else
-          echo "download failed for $tag (missing asset or network error)" >&2
-        fi
+        fallback "no retained prerelease matches commit $ref and this action source"
+        return 0
       fi
+      asset="reeve_linux_${arch}.tar.gz"
       ;;
   esac
 
-  if [[ "$ok" == true ]]; then
-    if ! verify_sha256 "$workdir/$asset" "$workdir/$sums"; then
-      ok=false
-    elif ! verify_signature "$workdir/$sums" "$workdir/${sums}.bundle"; then
-      ok=false
-    elif [[ "$kind" != "version" ]] && ! verify_sha256 "$workdir/$source_hash_file" "$workdir/$sums"; then
-      ok=false
-    elif [[ "$kind" != "version" ]] && ! verify_source_hash "$workdir/$source_hash_file"; then
-      ok=false
-    elif ! tar -xzf "$workdir/$asset" -C "$workdir" reeve; then
-      echo "could not extract reeve from $asset" >&2
-      ok=false
-    fi
-  fi
+  sums_dir="$workdir"
+  local expected actual sums_log asset_log cached_file
+  # The cache stores one archive per RESOLVED release tag: an archive cached
+  # for a different tag (edge resolves a new prerelease for the same source
+  # hash) is a cache MISS, never a mismatch. Only a mismatch for the same
+  # tag is the hard tamper failure.
+  cached_file="$archive_dir/$(printf '%s' "$tag" | sed 's|[^A-Za-z0-9._-]|_|g').tar.gz"
 
-  if [[ "$ok" == true ]]; then
-    mkdir -p "$(dirname "$dest")"
-    install -m 0755 "$workdir/reeve" "$dest"
-    # Sanity-run the binary; a broken download must not poison the cache.
-    if ! "$dest" --version > /dev/null 2>&1; then
-      rm -f "$dest"
-      fallback "downloaded binary failed to execute"
-      return 0
-    fi
-    echo "Using prebuilt binary: $("$dest" --version)"
-    echo "fetched=true" >> "$out"
+  # 1. LIVE checksums + bundle, every run. Nothing is consumed without
+  # them. Their fetch failure is a SOFT fallback stating the reason (gh's
+  # real error surfaces); the cached archive is ignored.
+  echo "Fetching signed checksums for $tag from $repo"
+  if ! sums_log=$(gh release download "$tag" --repo "$repo" \
+    --pattern "$sums" --pattern "${sums}.bundle" --dir "$sums_dir" \
+    ${source_hash_file:+ --pattern "$source_hash_file"} \
+    --clobber 2>&1); then
+    fallback "checksums.txt or its signature could not be fetched for $tag (gh: $sums_log). The cached archive is ignored for this run; nothing was used"
     return 0
   fi
 
-  fallback "prebuilt fetch failed"
+  # 2. Signature verified against the LIVE bundle. An unverifiable signature
+  # (bundle missing, cosign unavailable, sig invalid) is a SOFT fallback
+  # with the reason; the cached archive is ignored.
+  if ! verify_signature "$sums_dir/$sums" "$sums_dir/${sums}.bundle"; then
+    fallback "$sums for $tag could not be verified; the cached archive is ignored for this run and nothing was consumed"
+    return 0
+  fi
+
+  # Edge/commit: bind the artifact to this exact action source (the signed
+  # checksums cover source-hash.txt). A mismatch is a selector problem:
+  # soft fallback with the reason.
+  if [[ -n "$source_hash_file" ]]; then
+    if [[ -f "$sums_dir/$source_hash_file" ]]; then
+      if ! verify_sha256 "$sums_dir/$source_hash_file" "$sums_dir/$sums"; then
+        fallback "the fetched source-hash.txt does not match the signed checksums for $tag; the cached archive is ignored for this run"
+        return 0
+      fi
+    fi
+    REEVE_SOURCE_HASH="${REEVE_SOURCE_HASH:-}" verify_source_hash "$sums_dir/$source_hash_file" || true
+    if [[ "$(cat "$sums_dir/$source_hash_file" 2>/dev/null)" != "${REEVE_SOURCE_HASH:-}" ]]; then
+      fallback "release source hash does not match this action source; the cached archive is ignored for this run"
+      return 0
+    fi
+  fi
+
+  # 3. The archive for the resolved tag: cached or fresh. A digest mismatch
+  # against the verified signed checksums is the ONE tamper signal and
+  # hard-fails the run. Everything else falls back with the reason; the
+  # cached archive is never used unverified.
+  local source_archive="$workdir/$asset"
+  if [[ -f "$cached_file" ]]; then
+    source_archive="$cached_file"
+    echo "Using cached prebuilt archive for $tag (re-verified against the live signed checksums)"
+  else
+    echo "Downloading $asset from $repo"
+    if ! asset_log=$(gh release download "$tag" --repo "$repo" \
+      --pattern "$asset" --dir "$workdir" 2>&1); then
+      fallback "release asset $asset could not be fetched for $tag (gh: $asset_log). The cached archive for other tags is untouched; nothing was used"
+      return 0
+    fi
+  fi
+  expected=$(checksum_entry "$asset" "$sums_dir/$sums")
+  if [[ -z "$expected" ]]; then
+    fallback "checksums.txt for $tag lists no entry for $asset (the release artifact set does not match); the cached archive is ignored for this run"
+    return 0
+  fi
+  actual=$(sha256sum "$source_archive" | cut -d' ' -f1)
+  if [[ "$expected" != "$actual" ]]; then
+    verify_hard_fail "digest mismatch for the $([ "$source_archive" == "$cached_file" ] && echo cached || echo "freshly downloaded") archive of $tag (cache key \"$cache_key\"): expected $expected, got $actual. The archive does not match the SIGNED checksums of $tag; it was not extracted. This is a tamper signal - clear the cache and investigate"
+  fi
+  if ! tar -xzf "$source_archive" -C "$workdir" reeve; then
+    if [[ "$source_archive" == "$cached_file" ]]; then
+      rm -f "$cached_file"
+    fi
+    fallback "the archive for $tag could not be extracted; nothing was executed; a broken cached archive is removed"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  install -m 0755 "$workdir/reeve" "$dest"
+  # Sanity-run the binary: a digest-verified binary that will not execute
+  # falls back to a source build with the reason (and a cached archive is
+  # dropped so the next run re-downloads).
+  if ! "$dest" --version > /dev/null 2>&1; then
+    rm -f "$dest"
+    if [[ "$source_archive" == "$cached_file" ]]; then
+      rm -f "$cached_file"
+    fi
+    fallback "the prebuilt binary for $tag does not execute (reeve --version failed); nothing ran"
+    return 0
+  fi
+  # A freshly downloaded archive that verified and executes is stored for
+  # the next run, under the resolved release tag. Source builds are never
+  # cached - only this verified-download path writes the cache.
+  if [[ "$source_archive" != "$cached_file" && -n "$archive_dir" ]]; then
+    mkdir -p "$archive_dir"
+    cp "$source_archive" "$cached_file"
+  fi
+  echo "Using prebuilt binary: $("$dest" --version)"
+  echo "fetched=true" >> "$out"
   return 0
 }
 

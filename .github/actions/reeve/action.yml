@@ -163,23 +163,32 @@ runs:
         echo "root=$action_root" >> "$GITHUB_OUTPUT"
         echo "hash=$("$action_root/.github/scripts/source-hash.sh" "$action_root")" >> "$GITHUB_OUTPUT"
 
-    - name: Restore reeve binary cache
+    # The cache holds the VERIFIED download archive, never an extracted
+    # binary: every run re-verifies the archive against the LIVE signed
+    # checksums before anything is extracted, so a poisoned cache entry
+    # cannot carry a matching sidecar - a forgery would have to match the
+    # release's real signature.
+    - name: Restore reeve asset cache
       id: reeve-cache
       if: steps.reeve-dispatch.outputs.run == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
-        path: ${{ runner.temp }}/reeve-bin/reeve
-        key: reeve-bin-v2-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
+        path: ${{ runner.temp }}/reeve-asset
+        key: reeve-asset-v1-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}
 
-    # On a cache miss, try a prebuilt binary before reaching for the Go
-    # toolchain (see the NOTE at the top for the ref semantics). The script
-    # never fails the job: any problem (missing asset, checksum mismatch,
-    # network, unsupported arch) logs why and reports fetched=false, which
-    # re-enables the source-build steps below. A separate save step publishes
-    # the verified result before any workload-controlled code runs.
+    # On every run, resolve a prebuilt binary before reaching for the Go
+    # toolchain (see the NOTE at the top for the ref semantics). This runs on
+    # cache hits too: the cached archive is re-verified against the LIVE
+    # signed checksums each time before anything is extracted. Selector
+    # problems (missing release, unsupported ref, wrong action source) log a
+    # reason and report fetched=false, which re-enables the source-build
+    # steps below. Verification failures - checksums or signature that
+    # cannot be fetched or verified, a digest mismatch on the cached or
+    # fresh archive - FAIL the run: nothing unverified is consumed (see
+    # fetch-binary.sh).
     - name: Classify prebuilt binary eligibility
       id: reeve-binary
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
+      if: steps.reeve-dispatch.outputs.run == 'true'
       shell: bash
       env:
         ACTION_PATH: ${{ steps.reeve-hash.outputs.root }}
@@ -193,13 +202,13 @@ runs:
         "$ACTION_PATH/.github/scripts/fetch-binary.sh" classify
 
     - name: Install cosign for binary verification
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-binary.outputs.eligible == 'true'
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-binary.outputs.eligible == 'true'
       continue-on-error: true
       uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
     - name: Fetch prebuilt binary
       id: reeve-fetch
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-binary.outputs.eligible == 'true'
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-binary.outputs.eligible == 'true'
       shell: bash
       env:
         ACTION_PATH: ${{ steps.reeve-hash.outputs.root }}
@@ -209,6 +218,8 @@ runs:
         REEVE_OS: ${{ runner.os }}
         REEVE_ARCH: ${{ runner.arch }}
         REEVE_DEST: ${{ runner.temp }}/reeve-bin/reeve
+        REEVE_ARCHIVE_DIR: ${{ runner.temp }}/reeve-asset
+        REEVE_CACHE_KEY: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
@@ -218,7 +229,7 @@ runs:
     # action source lives under RUNNER_WORKSPACE/_actions, so stage only the
     # checksum input before asking setup-go to restore its module cache.
     - name: Stage Go cache metadata
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-fetch.outputs.fetched != 'true'
       shell: bash
       env:
         ACTION_ROOT: ${{ steps.reeve-hash.outputs.root }}
@@ -228,14 +239,14 @@ runs:
         cp "$ACTION_ROOT/go.sum" "$CACHE_DEPENDENCY_FILE"
 
     - name: Set up Go (from reeve's go.mod)
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-fetch.outputs.fetched != 'true'
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
       with:
         go-version-file: ${{ steps.reeve-hash.outputs.root }}/go.mod
         cache-dependency-path: ${{ github.workspace }}/.reeve-action-go.sum
 
     - name: Build reeve
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched != 'true'
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-fetch.outputs.fetched != 'true'
       shell: bash
       env:
         SRCHASH: ${{ steps.reeve-hash.outputs.hash }}
@@ -246,12 +257,15 @@ runs:
           -o "$RUNNER_TEMP/reeve-bin/reeve" ./cmd/reeve
       working-directory: ${{ steps.reeve-hash.outputs.root }}
 
-    - name: Save reeve binary cache
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true'
+    # The cache save is skipped on a cache hit: the archive in place was
+    # already verified when it was first stored, and this run verified it
+    # again before extracting.
+    - name: Save reeve asset cache
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched == 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
-        path: ${{ runner.temp }}/reeve-bin/reeve
-        key: reeve-bin-v2-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ steps.reeve-hash.outputs.hash }}
+        path: ${{ runner.temp }}/reeve-asset
+        key: reeve-asset-v1-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}
 
     - name: Add reeve to PATH
       if: steps.reeve-dispatch.outputs.run == 'true'

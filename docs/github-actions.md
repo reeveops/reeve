@@ -210,6 +210,7 @@ The documented candidate `d31c814640689c2f2e1b0d02d2bc11a80a94faab` includes the
 | Other branches/forks | Source build. |
 
 Cache identity includes the source repository/hash, variant, platform, and cache schema; cache publication precedes workload execution.
+The cache stores the verified download archive per resolved release tag; re-verification against the live signed checksums runs on every run. A source build (the fallback when verification is soft-failed or the binary does not execute) is never cached - the next run pays the toolchain cost again. That is the known cost of never caching an unverified artifact.
 Unavailable or unverifiable downloads fall back to a source build, which still requires a functioning toolchain and dependency access.
 
 The shared workflow uses the composite action from its own exact commit.
