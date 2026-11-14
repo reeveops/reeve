@@ -44,9 +44,14 @@ requires:
 - config key `approvals.required_permission` (same enum), read from
   TRUSTED configuration.
 
-**Precedence: the CLI flag wins** over the config key, which wins over the
-action input's default (`write`). An unresolvable value at any layer fails
-closed at load, naming the layer and the value.
+**Precedence: the CLI flag wins over the config key, and the config key
+(trusted configuration) wins over the action input - explicitly set or
+default alike.** When the action input is explicitly set AND the config key
+is set and they disagree, the config key wins (it is the operator's reviewed
+repository authority; the action input rides the caller's workflow file) and
+the run's log states which source supplied the effective value. An
+unresolvable value at any layer fails closed at load, naming the layer and
+the value.
 
 ## Compatibility
 
