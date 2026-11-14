@@ -16,11 +16,108 @@ package log
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
+
+	"github.com/reeveops/reeve/internal/core/redact"
 )
+
+// invocationRedactor is the process-scoped redaction registry every log
+// record passes through. Install() seeds it with the credential-rule floor
+// (a logger with no redactor installed must not be reachable); a run
+// replaces it with its invocation-scoped redactor (registered auth env
+// values + the same rules) and clears it when done.
+var invocationRedactor atomic.Pointer[redact.Redactor]
+
+// SetRedactor installs the redactor applied to every log record from this
+// process. A run calls it once after registering values that are secret in
+// that run; nil restores the credential-rule floor (never a bare
+// passthrough), so tests and non-running callers keep sensible masking.
+func SetRedactor(r *redact.Redactor) {
+	if r == nil {
+		invocationRedactor.Store(redact.NewDefault())
+		return
+	}
+	invocationRedactor.Store(r)
+}
+
+// currentRedactor returns the redactor every record passes through. Install
+// guarantees this is never nil.
+func currentRedactor() *redact.Redactor {
+	if r := invocationRedactor.Load(); r != nil {
+		return r
+	}
+	d := redact.NewDefault()
+	invocationRedactor.Store(d)
+	return d
+}
+
+// redactValue applies the redactor to a value the sink is about to emit.
+// EVERY kind can leak: errors carry request URLs and configuration, Stringers
+// render operator-controlled text, LogValuers resolve at emit time. Any
+// non-string kind whose text rendering is not already clean is replaced by
+// its redacted string form - a masked log line beats a leaking typed value.
+func redactValue(a slog.Attr) slog.Attr {
+	red := currentRedactor()
+	switch a.Value.Kind() {
+	case slog.KindString:
+		return slog.String(a.Key, red.Redact(a.Value.String()))
+	case slog.KindGroup:
+		group := a.Value.Group()
+		out := make([]slog.Attr, 0, len(group))
+		for _, ga := range group {
+			out = append(out, redactValue(ga))
+		}
+		return slog.Attr{Key: a.Key, Value: slog.GroupValue(out...)}
+	default:
+		// Resolve LogValuers now so their expansion is redacted too; then
+		// render the value to text and mask it. A clean rendering is kept
+		// in its original shape (numbers, durations, bools); anything the
+		// redactor touched becomes its redacted string.
+		text := valueText(a.Value)
+		if masked := red.Redact(text); masked != text {
+			return slog.String(a.Key, masked)
+		}
+		return a
+	}
+}
+
+// valueText renders an attribute value the way the sink would. Errors
+// render as their message, Stringers as their String(), everything else via
+// fmt.Sprint on the resolved value.
+func valueText(v slog.Value) string {
+	v = v.Resolve()
+	switch v.Kind() {
+	case slog.KindAny:
+		switch any := v.Any().(type) {
+		case error:
+			return any.Error()
+		case fmt.Stringer:
+			return any.String()
+		default:
+			return fmt.Sprint(any)
+		}
+	default:
+		return fmt.Sprint(v.Any())
+	}
+}
+
+// redactRecord copies r with the message and all attribute values passed
+// through the current redactor.
+func redactRecord(r slog.Record) slog.Record {
+	red := currentRedactor()
+	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	out.Message = red.Redact(r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		out.AddAttrs(redactValue(a))
+		return true
+	})
+	return out
+}
 
 // Level parses a level string (case-insensitive) into a slog.Level. Unknown
 // values fall back to LevelInfo. The empty string also resolves to Info so
@@ -75,6 +172,11 @@ func ParseFormat(name string) Format {
 // red "Error:" - routing normal logs to stdout stops debug traces from looking
 // like failures. When w is non-nil (tests), everything goes to w.
 func Install(w io.Writer, level slog.Level, format Format) *slog.Logger {
+	// A logger with no redactor installed must not be reachable: every
+	// command bootstraps its logging here, and this seeds the credential-rule
+	// floor before any record can be emitted. A run upgrades it via
+	// SetRedactor with its invocation-scoped redactor.
+	currentRedactor()
 	opts := &slog.HandlerOptions{Level: level}
 	var h slog.Handler
 	if w != nil {
@@ -91,10 +193,43 @@ func Install(w io.Writer, level slog.Level, format Format) *slog.Logger {
 }
 
 func newHandler(w io.Writer, format Format, opts *slog.HandlerOptions) slog.Handler {
+	var h slog.Handler
 	if format == FormatJSON {
-		return slog.NewJSONHandler(w, opts)
+		h = slog.NewJSONHandler(w, opts)
+	} else {
+		h = slog.NewTextHandler(w, opts)
 	}
-	return slog.NewTextHandler(w, opts)
+	// The sink redacts first: nothing reaching a log line bypasses
+	// internal/core/redact, whatever the caller-level formatting.
+	return &redactingHandler{next: h}
+}
+
+// redactingHandler wraps any slog.Handler and passes every record - message
+// and attribute values - through the invocation-scoped redactor before the
+// underlying handler formats it. Producers still redact at the source where
+// they know the context; this guarantees the sink.
+type redactingHandler struct {
+	next slog.Handler
+}
+
+func (h *redactingHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return h.next.Enabled(ctx, l)
+}
+
+func (h *redactingHandler) Handle(ctx context.Context, r slog.Record) error {
+	return h.next.Handle(ctx, redactRecord(r))
+}
+
+func (h *redactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	out := make([]slog.Attr, len(attrs))
+	for i, a := range attrs {
+		out[i] = redactValue(a)
+	}
+	return &redactingHandler{next: h.next.WithAttrs(out)}
+}
+
+func (h *redactingHandler) WithGroup(name string) slog.Handler {
+	return &redactingHandler{next: h.next.WithGroup(name)}
 }
 
 // splitHandler routes Warn/Error to err and everything below to out. Both
