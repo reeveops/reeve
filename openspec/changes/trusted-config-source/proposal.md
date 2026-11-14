@@ -13,6 +13,7 @@ A PR can therefore modify the same policy, credentials, executable paths, and ou
 - Merge the two sources through an explicit field ownership table.
 - Report PR-side control changes that were ignored for the current run.
 - Fail closed when trusted configuration cannot be resolved or validated.
+- Resolve the entire break-glass authorization surface - `break_glass.*` and the CODEOWNERS its `codeowners` source consults - from the trusted revision. A PR can no longer authorize its own emergency override: the modification takes effect only after merge. `break_glass.reject_self_authorization` stays accepted and gains a strictly enforceable meaning (deny break-glass in a PR that touches its own authorizing files).
 
 ## Scope
 
@@ -23,3 +24,11 @@ Local operations and scheduled drift continue to load the checked-out repository
 
 An internal PR may still propose control-setting changes, but those changes take effect only after merge.
 Workload declarations needed to preview newly added stacks remain head-owned.
+
+## Decision (maintainer-approved, 2026-11-13)
+
+Break-glass authorization is read from the base revision - trusted configuration and the CODEOWNERS content the `codeowners` source consults - and a PR **cannot grant itself break-glass authority**: an actor added to `break_glass.authorized` or granted CODEOWNERS ownership in the PR's own HEAD obtains that authority only after the PR merges.
+
+Break-glass inside a PR is otherwise unchanged for actors ALREADY authorized on the base branch: they still resolve authority through the same sources (trusted `break_glass:` block, `codeowners`), with the same gate-override semantics, audit recording, and trace style as today. This change only moves WHERE the authorization surface is read from - it does not disable break-glass in PRs, and every refusal keeps naming what was refused and the traces naming every source consulted.
+
+The documented head-resolved self-authorization ("self-add flagged, not forbidden") is intentionally retired by this change: it is the same `reject_self_authorization` hole this proposal closes, and no new keys are introduced - `reject_self_authorization` keeps working with a strictly enforceable meaning.
