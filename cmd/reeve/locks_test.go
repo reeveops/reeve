@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reeveops/reeve/internal/audit"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
 	corelocks "github.com/reeveops/reeve/internal/core/locks"
@@ -364,6 +365,73 @@ func TestSplitRef(t *testing.T) {
 	}
 }
 
+// TestForceUnlockWritesFailedCompletionOnUnlockError pins the audit
+// close-out: when the force path's mutation attempt errors AFTER the intent
+// record exists, a "failed" completion record is written - the audit trail
+// must never end on an open intent. The reachable error here is a lock
+// object whose content does not match its key, which the earlier pre-read
+// (a raw decode, no key validation) accepts but UnlockPR refuses.
+func TestForceUnlockWritesFailedCompletionOnUnlockError(t *testing.T) {
+	root, s := lockRepo(t)
+	setAdminOverride(t, root, "  admin_override:\n    allowed: [mallory]\n")
+	acquire(t, s, "proj", "dev", 7)
+
+	// Corrupt the lock object: content that does not match its key.
+	lockPath := filepath.Join(root, ".reeve-state", "locks", "proj", "dev.json")
+	bad := `{"project":"other","stack":"x","holder":null,"queue":[],"updated_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(lockPath, []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runReeve(t, "locks", "unlock", "proj/dev", "--pr", "7", "--force",
+		"--actor", "mallory", "--reason", "audit close-out")
+	if err == nil || !strings.Contains(err.Error(), "lock content does not match key") {
+		t.Fatalf("expected the mismatched-content refusal, got %v", err)
+	}
+
+	// The intent record must be closed out with a failed completion.
+	fs, err := filesystem.New(filepath.Join(root, ".reeve-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := fs.List(context.Background(), "audit/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var intents, failures int
+	for _, k := range keys {
+		data, _, err := filesystem.ReadBytes(context.Background(), fs, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var e audit.Entry
+		if err := json.Unmarshal(data, &e); err != nil {
+			t.Fatalf("decode audit entry %s: %v", k, err)
+		}
+		if e.Op != "force_unlock" || e.LockOverride == nil {
+			continue
+		}
+		switch e.Outcome {
+		case "force_unlock_intent":
+			intents++
+			if !strings.Contains(e.LockOverride.Reason, "audit close-out") {
+				t.Fatalf("intent reason = %q", e.LockOverride.Reason)
+			}
+		case "failed":
+			failures++
+			if len(e.Stacks) != 1 || e.Stacks[0].Status != "force_unlock_failed" {
+				t.Fatalf("failed completion stacks = %+v", e.Stacks)
+			}
+			if !strings.Contains(e.Stacks[0].Error, "lock content does not match key") {
+				t.Fatalf("failed completion must carry the refusal: %+v", e.Stacks[0])
+			}
+		}
+	}
+	if intents != 1 || failures != 1 {
+		t.Fatalf("audit entries: intents=%d failed-completions=%d, want 1 and 1", intents, failures)
+	}
+}
+
 func TestShortEtag(t *testing.T) {
 	if got := shortEtag("short"); got != "short" {
 		t.Errorf("shortEtag(short) = %q", got)
@@ -371,5 +439,178 @@ func TestShortEtag(t *testing.T) {
 	long := strings.Repeat("a", 20)
 	if got := shortEtag(long); got != strings.Repeat("a", 12)+"…" {
 		t.Errorf("shortEtag(long) = %q", got)
+	}
+}
+
+// TestForceUnlockWritesAuditRecord pins the audit gate on the dangerous
+// unlock shape: an admin force-unlock and a --pr --force removal (what a
+// `/reeve unlock --force` comment dispatches) must record actor, stack,
+// previous holder, and any promotion, and the recorded reason must pass
+// through redaction.
+func TestForceUnlockWritesAuditRecord(t *testing.T) {
+	secretReason := "ghp_" + strings.Repeat("A", 36) + " emergency unlock"
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		scope  string
+		wantPR int
+	}{
+		{"admin force-unlock", []string{"proj/dev", "--force", "--actor", "mallory", "--reason", secretReason}, "admin", 7},
+		{"pr-scoped force removal", []string{"proj/dev", "--pr", "7", "--force", "--actor", "mallory", "--reason", secretReason}, "pr", 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, s := lockRepo(t)
+			// The admin allowlist is set explicitly so this test holds both
+			// before and after admin-override-empty-denies merges: an empty
+			// list denies everyone once that lands.
+			setAdminOverride(t, root, "  admin_override:\n    allowed: [mallory]\n")
+			acquire(t, s, "proj", "dev", tc.wantPR)
+			enqueue(t, s, "proj", "dev", 8)
+
+			out, err := runReeve(t, append([]string{"locks", "unlock"}, tc.args...)...)
+			if err != nil {
+				t.Fatalf("locks unlock: %v\n%s", err, out)
+			}
+
+			// The override took effect: holder cleared, queue promoted.
+			l, _, err := s.Get(context.Background(), "proj", "dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if l.Holder == nil || l.Holder.PR != 8 {
+				t.Fatalf("queue must be promoted after the override: %+v", l.Holder)
+			}
+
+			// The audit record exists: an intent entry written BEFORE the
+			// mutation and a completion after it.
+			fs, err := filesystem.New(filepath.Join(root, ".reeve-state"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys, err := fs.List(context.Background(), "audit/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var intents, completions []audit.Entry
+			for _, k := range keys {
+				data, _, err := filesystem.ReadBytes(context.Background(), fs, k)
+				if err != nil {
+					t.Fatalf("read %s: %v", k, err)
+				}
+				var e audit.Entry
+				if err := json.Unmarshal(data, &e); err != nil {
+					t.Fatalf("decode audit entry %s: %v", k, err)
+				}
+				if e.Op != "force_unlock" || e.LockOverride == nil {
+					t.Fatalf("audit entry %s is not a force-unlock record: %+v", k, e)
+				}
+				if e.LockOverride.Scope != tc.scope {
+					t.Fatalf("scope = %q, want %q", e.LockOverride.Scope, tc.scope)
+				}
+				if e.Actor != "mallory" {
+					t.Fatalf("actor = %q, want mallory", e.Actor)
+				}
+				prev := e.LockOverride.Previous
+				if len(prev) != 1 || prev[0].Project != "proj" || prev[0].Stack != "dev" ||
+					prev[0].PR != tc.wantPR || prev[0].Actor != "alice" || !prev[0].Active {
+					t.Fatalf("previous holder = %+v, want PR #%d by alice, active", prev, tc.wantPR)
+				}
+				if strings.Contains(e.LockOverride.Reason, secretReason[:8]) {
+					t.Fatalf("audit reason contains the raw secret: %q", e.LockOverride.Reason)
+				}
+				if !strings.Contains(e.LockOverride.Reason, "[redacted]") {
+					t.Fatalf("audit reason must be redacted: %q", e.LockOverride.Reason)
+				}
+				switch e.Outcome {
+				case "force_unlock_intent":
+					intents = append(intents, e)
+				case "success":
+					if e.LockOverride.PromotedPR != 8 {
+						t.Fatalf("promoted PR = %d, want 8", e.LockOverride.PromotedPR)
+					}
+					completions = append(completions, e)
+				}
+			}
+			if len(intents) != 1 || len(completions) != 1 {
+				t.Fatalf("audit entries: intents=%d completions=%d, want 1 each", len(intents), len(completions))
+			}
+			// The intent entry was written write-once before the mutation:
+			// it and the completion carry distinct run ids.
+			if intents[0].RunID != completions[0].RunID+"-intent" {
+				t.Fatalf("intent run id %q must pair with completion %q", intents[0].RunID, completions[0].RunID)
+			}
+		})
+	}
+}
+
+// TestFailingIntentAuditWriteRefusesForceUnlock pins the hard gate on the
+// audit record: when the INTENT write cannot land, the force-unlock is
+// refused - the command errors naming the audit failure, the holder and
+// queue are unchanged, and no audit record (intent or completion) exists.
+// Both the admin shape and the --pr --force shape are covered; a write-once
+// failure at the filesystem level (a read-only audit directory) is the
+// deterministic route to a failed intent write.
+func TestFailingIntentAuditWriteRefusesForceUnlock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"admin force-unlock", []string{"proj/dev", "--force", "--actor", "mallory", "--reason", "no audit, no override"}},
+		{"pr-scoped force removal", []string{"proj/dev", "--pr", "7", "--force", "--actor", "mallory", "--reason", "no audit, no override"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, s := lockRepo(t)
+			setAdminOverride(t, root, "  admin_override:\n    allowed: [mallory]\n")
+			acquire(t, s, "proj", "dev", 7)
+			enqueue(t, s, "proj", "dev", 8)
+
+			// The audit write surface fails at the filesystem level: the
+			// audit directory is read-only, so the intent write - and the
+			// key's directory creation under it - always fails.
+			auditDir := filepath.Join(root, ".reeve-state", "audit")
+			if err := os.MkdirAll(auditDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(auditDir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(auditDir, 0o700) })
+
+			_, err := runReeve(t, append([]string{"locks", "unlock"}, tc.args...)...)
+			if err == nil || !strings.Contains(err.Error(), "audit record could not be written") {
+				t.Fatalf("the refused intent must name the audit failure: %v", err)
+			}
+
+			// The holder and the queue are unchanged.
+			l, _, gerr := s.Get(context.Background(), "proj", "dev")
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if l.Holder == nil || l.Holder.PR != 7 {
+				t.Fatalf("the holder must be untouched by the refused unlock: %+v", l.Holder)
+			}
+			found8 := false
+			for _, q := range l.Queue {
+				if q.PR == 8 {
+					found8 = true
+				}
+			}
+			if !found8 {
+				t.Fatalf("the queue must be untouched by the refused unlock: %+v", l.Queue)
+			}
+
+			// No audit record exists - no failed-intent entry, no completion.
+			fs, ferr := filesystem.New(filepath.Join(root, ".reeve-state"))
+			if ferr != nil {
+				t.Fatal(ferr)
+			}
+			keys, lerr := fs.List(context.Background(), "audit/")
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			if len(keys) != 0 {
+				t.Fatalf("a refused unlock must leave no audit record: %v", keys)
+			}
+		})
 	}
 }
