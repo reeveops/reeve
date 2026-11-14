@@ -497,9 +497,6 @@ func TestForceUnlockWritesAuditRecord(t *testing.T) {
 				if err != nil {
 					t.Fatalf("read %s: %v", k, err)
 				}
-				if err != nil {
-					continue
-				}
 				var e audit.Entry
 				if err := json.Unmarshal(data, &e); err != nil {
 					t.Fatalf("decode audit entry %s: %v", k, err)
@@ -541,6 +538,78 @@ func TestForceUnlockWritesAuditRecord(t *testing.T) {
 			// it and the completion carry distinct run ids.
 			if intents[0].RunID != completions[0].RunID+"-intent" {
 				t.Fatalf("intent run id %q must pair with completion %q", intents[0].RunID, completions[0].RunID)
+			}
+		})
+	}
+}
+
+// TestFailingIntentAuditWriteRefusesForceUnlock pins the hard gate on the
+// audit record: when the INTENT write cannot land, the force-unlock is
+// refused - the command errors naming the audit failure, the holder and
+// queue are unchanged, and no audit record (intent or completion) exists.
+// Both the admin shape and the --pr --force shape are covered; a write-once
+// failure at the filesystem level (a read-only audit directory) is the
+// deterministic route to a failed intent write.
+func TestFailingIntentAuditWriteRefusesForceUnlock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"admin force-unlock", []string{"proj/dev", "--force", "--actor", "mallory", "--reason", "no audit, no override"}},
+		{"pr-scoped force removal", []string{"proj/dev", "--pr", "7", "--force", "--actor", "mallory", "--reason", "no audit, no override"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, s := lockRepo(t)
+			setAdminOverride(t, root, "  admin_override:\n    allowed: [mallory]\n")
+			acquire(t, s, "proj", "dev", 7)
+			enqueue(t, s, "proj", "dev", 8)
+
+			// The audit write surface fails at the filesystem level: the
+			// audit directory is read-only, so the intent write - and the
+			// key's directory creation under it - always fails.
+			auditDir := filepath.Join(root, ".reeve-state", "audit")
+			if err := os.MkdirAll(auditDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(auditDir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(auditDir, 0o700) })
+
+			_, err := runReeve(t, append([]string{"locks", "unlock"}, tc.args...)...)
+			if err == nil || !strings.Contains(err.Error(), "audit record could not be written") {
+				t.Fatalf("the refused intent must name the audit failure: %v", err)
+			}
+
+			// The holder and the queue are unchanged.
+			l, _, gerr := s.Get(context.Background(), "proj", "dev")
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if l.Holder == nil || l.Holder.PR != 7 {
+				t.Fatalf("the holder must be untouched by the refused unlock: %+v", l.Holder)
+			}
+			found8 := false
+			for _, q := range l.Queue {
+				if q.PR == 8 {
+					found8 = true
+				}
+			}
+			if !found8 {
+				t.Fatalf("the queue must be untouched by the refused unlock: %+v", l.Queue)
+			}
+
+			// No audit record exists - no failed-intent entry, no completion.
+			fs, ferr := filesystem.New(filepath.Join(root, ".reeve-state"))
+			if ferr != nil {
+				t.Fatal(ferr)
+			}
+			keys, lerr := fs.List(context.Background(), "audit/")
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			if len(keys) != 0 {
+				t.Fatalf("a refused unlock must leave no audit record: %v", keys)
 			}
 		})
 	}
