@@ -4,11 +4,27 @@
 
 Reeve authenticates with a token that already reads the repository. The REST
 collaborator-permission endpoint
-(`GET /repos/{owner}/{repo}/collaborators/{username}/permission`) reports the
-actor's effective permission (`admin`, `maintain`, `write`, `read`, `none`)
-in one request. Resolution is keyed on the login and cached per invocation:
-one lookup per distinct comment author, reused across the dispatch gate and
-the approval source.
+(`GET /repos/{owner}/{repo}/collaborators/{username}/permission`) answers in
+one request with three fields that matter, per GitHub's REST documentation:
+
+- `permission` - the LEGACY base role: `admin`, `write`, `read`, `none`. It
+  does NOT distinguish `maintain`: GitHub documents that maintain is mapped
+  to write here (and triage to read).
+- `role_name` - the name of the ASSIGNED role, including `maintain` and
+  custom repository roles. **This is the field the mapping reads**, because
+  it is the only response field that distinguishes `maintain` from `write`
+  (`user.permissions` carries only the boolean flag object).
+- `user.permissions` - the boolean object (`admin`, `maintain`, `push`,
+  `pull`); read for context, not used for the mapping.
+
+So the recognized `role_name` values are exactly `admin`, `maintain`,
+`write`, `triage`, `read`, `none`. A CUSTOM repository role name (any other
+string) does not map to any level: the resolution FAILS CLOSED and names
+the unrecognized role - even though `permission` reveals its legacy base
+level, descending to it would silently grant a role name the operator never
+chose to reason about. Resolution is keyed on the login and cached per
+invocation: one lookup per distinct comment author, reused across the
+dispatch gate and the approval source.
 
 Failure modes, fail-closed:
 

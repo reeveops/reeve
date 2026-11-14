@@ -15,10 +15,13 @@ permission.
 - A new action input, `required-permission` (default `write`), states the
   minimum repository permission needed to dispatch `reeve` commands and to
   have a `pr_comment` approval counted.
-- Dispatch validates the actor's real repository permission through the
-  GitHub API the action already authenticates with, and denies anything
-  below the required level (`write`, `maintain`, `admin` accepted; reading
-  lower levels down to `write`).
+- Dispatch validates the actor's real repository role through the GitHub
+  API the action already authenticates with (`role_name`: `admin`,
+  `maintain`, `write`, `triage`, `read`, `none`), and denies anything below
+  the required level (`write`, `maintain`, `admin` accepted as
+  `required-permission`). Levels below `write` are inputs the mapping still
+  reports (`read`, `none`) but always denies; they are rejected as
+  `required-permission` values at action-input validation.
 - `allowed-associations` stays: association remains the cheap prefilter and
   the coarse deny-list (`NONE` is denied by default). An actor whose
   association passes the allowlist but whose real permission is below
@@ -33,13 +36,21 @@ permission.
 ## Scope
 
 Action input + the two authorization surfaces (dispatch classification,
-pr_comment approval source). No reeve config schema changes: the
-`required-permission` knob is Action-level, matching where
-`allowed-associations` already lives.
+pr_comment approval source). The `pr_comment` approval source runs INSIDE
+the binary, so the bar reaches it through both runtime knobs AGENTS.md
+requires:
+
+- CLI flag `--required-permission` (`write` | `maintain` | `admin`),
+- config key `approvals.required_permission` (same enum), read from
+  TRUSTED configuration.
+
+**Precedence: the CLI flag wins** over the config key, which wins over the
+action input's default (`write`). An unresolvable value at any layer fails
+closed at load, naming the layer and the value.
 
 ## Compatibility
 
-Breaking for the plan's D3: org members (and anyone else) WITHOUT real
+Breaking: org members (and anyone else) WITHOUT real
 `write` access to the repository lose `/reeve` command and comment-approval
 ability even when their association passed the allowlist. Repositories that
 relied on association-as-proxy keep access through the real-permission check
