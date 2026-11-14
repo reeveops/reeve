@@ -49,7 +49,7 @@ Credentialed fork preview requires a runtime capability flag proving a separate 
 If the capability is absent, authorization is recorded as blocked and no credentials or engine binary are used.
 
 Environment filtering alone does not satisfy this capability.
-The first implementation may keep the capability permanently false until the worker boundary ships.
+The RC ships the capability permanently false: with it false, every fork preview - authorized or not - is validation-only, per the RC default in proposal.md. There is no override path; enabling it is a spec change naming a working isolated-worker prerequisite.
 
 ## Pinned worker source
 

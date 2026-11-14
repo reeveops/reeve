@@ -5,7 +5,9 @@
 ### Requirement: Fork preview execution is explicitly authorized
 
 An unapproved fork MUST NOT acquire stack credentials or execute an IaC engine.
-A credentialed fork preview MUST require a trusted actor, the current API-resolved HEAD SHA, an unconsumed authorization, and a capable isolated worker.
+A credentialed fork preview MUST require a trusted actor, the current
+API-resolved HEAD SHA, an unconsumed authorization, and a capable isolated
+worker.
 
 #### Scenario: Unapproved fork
 
@@ -71,3 +73,32 @@ No force or break-glass option may bypass this prohibition.
 
 - **WHEN** any fork PR invokes break-glass apply
 - **THEN** the operation is denied before authorization policy hooks or credentials
+
+## ADDED Requirements
+
+### Requirement: Credentialed fork execution ships disabled
+
+The initial release MUST keep fork engine execution disabled outright: every
+fork preview runs validation-only. No configuration key, command-line flag,
+`--force`, or break-glass path enables fork engine execution; enabling it is
+a spec change that names both prerequisites - a working isolated worker and
+validated approved-fork read-only bindings.
+
+#### Scenario: Authorized fork under the RC default
+
+- **GIVEN** a valid one-shot authorization for the fork's current HEAD
+- **WHEN** the fork preview starts under the RC default (no isolated-worker
+  prerequisite exists yet)
+- **THEN** no credential provider is resolved and no IaC engine is invoked
+- **AND** the PR result states that engine execution did not run and why
+- **AND** the authorization is NOT consumed: the run executed nothing under
+  it, so the same authorization can still be spent by a later run that can
+  actually execute (the consumption is recorded when a run uses the
+  authorization to acquire credentials or start an engine)
+
+#### Scenario: No overriding knob exists
+
+- **GIVEN** any configuration, flag, force, or break-glass setting
+- **WHEN** a fork preview runs
+- **THEN** the engine is not invoked
+- **AND** the validation-only outcome and its reason are stated on the PR
