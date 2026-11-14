@@ -101,20 +101,3 @@ is not nothing. Requiring approvals for it, though, would mean approving a
 change set that does not exist, and would put the fix for stale state behind
 the review cycle that stale state is currently breaking. Locks, freeze,
 fork/draft, and the audit log carry it instead.
-
-**Round-6 spec corrections (review follow-up 6):** the first requirement's
-fallback paragraph was rewritten so the ONLY apply-time fallback is a
-manifest entry with no plan key - a recorded key is a kept promise and its
-missing/oversized/digest-less/mismatched artifact fails closed (the next
-requirement). A preview that cannot upload its artifact now RECORDS NO plan
-key and says so on the timeline (the no-key scenario no longer lists "the
-upload failed" as an apply-time cause). Two new requirements-side items: a
-scenario for the beta-era manifest that records a key WITHOUT a digest (fails
-closed naming the stack, run id and the predates-digest-binding reason,
-re-run the preview; the recovery path applies like any other unkept
-promise); and the `--replan` surfaces specified as the CLI flag plus
-`--replan` on `/reeve apply` comments - behind apply's actor gates, recorded
-on the timeline and in the audit entry with the actor, with the comment
-parser's accepted argument set for `apply` explicitly gaining it (one
-scenario per surface). "Oversized" is now concrete: beyond the 64 MiB
-plan-artifact cap (`maxPlanArtifactBytes`).
