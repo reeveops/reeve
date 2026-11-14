@@ -84,20 +84,22 @@ func TestGateBlockedPrLeavesQueue(t *testing.T) {
 		t.Fatalf("status = %q, want blocked", ss.Status)
 	}
 
-	// PR 18 must be out of the queue across ALL of its run ids (today's
-	// run and the stale earlier run); PR 19 keeps its place.
+	// The queue entry today's run enqueued must be gone. This fixture has
+	// exactly one PR-18 entry - the store refuses a second per PR, so no
+	// earlier run can coexist here; cross-run sweeping is covered by
+	// TestDequeueSweepsStaleRunEntries. PR 19 keeps its place.
 	l, _, err := ls.Get(ctx, "api", "prod")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stale18 []string
+	var leftover18 []string
 	for _, q := range l.Queue {
 		if q.PR == 18 {
-			stale18 = append(stale18, q.RunID)
+			leftover18 = append(leftover18, q.RunID)
 		}
 	}
-	if len(stale18) != 0 || l.Holder == nil || l.Holder.PR != 501 {
-		t.Fatalf("queue after dequeue (stale entries: %v): holder=%+v queue=%+v", stale18, l.Holder, l.Queue)
+	if len(leftover18) != 0 || l.Holder == nil || l.Holder.PR != 501 {
+		t.Fatalf("queue after dequeue (leftover PR-18 entries: %v): holder=%+v queue=%+v", leftover18, l.Holder, l.Queue)
 	}
 
 	// The gate-blocked comment must say the queue entry was removed and
@@ -166,15 +168,16 @@ func TestDequeueSweepsStaleRunEntries(t *testing.T) {
 	ctx := context.Background()
 	_, ls := applyQueueFixture(t, &bgVCS{}, true)
 
-	// Seed PR 18's entries directly (a store can only hold ONE queue entry
-	// per PR: TryAcquire refuses an already-queued PR), then prove a
+	// Seed PR 18's single queue entry directly (a store holds ONE queue
+	// entry per PR: TryAcquire refuses an already-queued PR), then prove a
 	// later run's removal sweeps it regardless of the enqueuing run id.
 	if _, ok, err := ls.TryAcquire(ctx, "api", "prod", corelocks.Holder{PR: 18, RunID: "apply-1-older", Actor: "alice"}, time.Hour); err != nil || ok {
 		t.Fatalf("seed stale queue entry: ok=%v err=%v", ok, err)
 	}
 
-	// The current run's dequeue (run id apply-9) must remove both stale
-	// entries: the sweep keys on the PR, not the run id.
+	// The current run's dequeue (run id apply-9) must remove the ONE stale
+	// entry the earlier run enqueued: the sweep keys on the PR, not the
+	// run id.
 	if _, err := ls.UnlockPR(ctx, "api", "prod", 18, "apply-9", time.Hour, false); err != nil {
 		t.Fatalf("UnlockPR: %v", err)
 	}
