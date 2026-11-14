@@ -8,6 +8,7 @@ An unapproved fork MUST NOT acquire stack credentials or execute an IaC engine.
 A credentialed fork preview MUST require a trusted actor, the current
 API-resolved HEAD SHA, an unconsumed authorization, and a capable isolated
 worker.
+
 #### Scenario: Unapproved fork
 
 - **WHEN** preview resolves a PR as a fork without a valid authorization
@@ -85,11 +86,15 @@ validated approved-fork read-only bindings.
 
 #### Scenario: Authorized fork under the RC default
 
-- **GIVEN** a valid one-shot authorization consumed for the fork's current
-  HEAD
-- **WHEN** the fork preview starts
+- **GIVEN** a valid one-shot authorization for the fork's current HEAD
+- **WHEN** the fork preview starts under the RC default (no isolated-worker
+  prerequisite exists yet)
 - **THEN** no credential provider is resolved and no IaC engine is invoked
 - **AND** the PR result states that engine execution did not run and why
+- **AND** the authorization is NOT consumed: the run executed nothing under
+  it, so the same authorization can still be spent by a later run that can
+  actually execute (the consumption is recorded when a run uses the
+  authorization to acquire credentials or start an engine)
 
 #### Scenario: No overriding knob exists
 

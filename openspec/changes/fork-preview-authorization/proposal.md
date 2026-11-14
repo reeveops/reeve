@@ -26,7 +26,7 @@ Fork previews become validation-only until an authorization is present and the w
 
 ## RC default (decision)
 
-The review of 2026-11-10 makes the initial release candidate decision explicit: **credentialed fork execution ships disabled - every fork preview is validation-only.** Fork previews do not run the engine until a trusted commenter authorises the exact SHA OR the runtime proves worker isolation; and for the RC, even an authorized fork does not run the engine because neither prerequisite has an implementation.
+The review of 2026-11-10 makes the initial release candidate decision explicit: **credentialed fork execution ships disabled - every fork preview is validation-only.** Fork previews do not run the engine until **both** a trusted commenter authorises the exact SHA **and** a capable isolated worker (whose checks the authorization consumes) is in place; and for the RC, even a fully authorized fork does not run the engine because neither prerequisite has an implementation - so the authorization alone executes nothing, and the PR result says so.
 
 - The authorization command, records, and audit machinery above are specified now so enablement is a deliberate later change, not an accident of a missing gate.
 - No configuration key, CLI flag, `--force`, or break-glass path enables fork engine execution. Enablement requires a spec change that names a working isolated-worker prerequisite, not an operator toggle.
