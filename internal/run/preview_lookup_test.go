@@ -550,3 +550,46 @@ func TestLoadPreviewSnapshotAcceptsClockSkew(t *testing.T) {
 		t.Fatalf("manifest must be indexed: %+v", st)
 	}
 }
+
+// TestPreviewSkewBoundary pins the limit itself: a stamp exactly AT
+// maxPreviewClockSkew counts as inside (the gate is strictly greater-than),
+// one second inside is kept, and one second past it is skipped - refusing
+// with the typed FuturePreviewError when nothing valid remains.
+func TestPreviewSkewBoundary(t *testing.T) {
+	base := time.Now().UTC()
+	limit := maxPreviewClockSkew
+	for _, c := range []struct {
+		name   string
+		offset time.Duration
+		kept   bool
+	}{
+		{"just inside the limit", limit - time.Second, true},
+		{"exactly at the limit", limit, true},
+		{"just outside the limit", limit + time.Second, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store, err := filesystem.New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			sha := "dddddddddddddddddddddddddddddddddddddddd"
+			putManifest(t, store, 9, "preview-1", sha, base.Add(c.offset).Format(time.RFC3339),
+				[]summary.StackSummary{{Project: "api", Stack: "prod", Status: summary.StatusPlanned}})
+
+			_, err = loadPreviewSnapshot(context.Background(), store, 9, sha, func() time.Time { return base })
+			if c.kept {
+				if err != nil {
+					t.Fatalf("a stamp %s past the clock is within skew and must be kept: %v", c.offset, err)
+				}
+				return
+			}
+			var fpe *FuturePreviewError
+			if !errors.As(err, &fpe) {
+				t.Fatalf("a stamp %s past the clock is beyond the skew and must be skipped with the typed refusal, got %v", c.offset, err)
+			}
+			if !strings.Contains(err.Error(), "Re-run /reeve preview") {
+				t.Fatalf("the refusal must carry the next step: %v", err)
+			}
+		})
+	}
+}
