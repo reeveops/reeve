@@ -55,6 +55,30 @@ change set (approvals, checks, preview freshness) — it has no change set.
 
 **`preview_freshness` defaults to 4h.** Only a literal `"0"` disables it.
 
+## Digest binding and fail-closed availability (remediation 2026-11-11 delta)
+
+The original degradation rule ("a missing or unreadable artifact falls back
+to computing a plan at apply time") is deliberately reversed by this delta,
+following the 2026-11-10 review: when the manifest PROMISES a plan - records a
+plan key - the apply fails closed when that promise cannot be kept, because
+"this apply re-planned" silently breaks the whole reason plan locking exists.
+
+- The manifest entry records the plan artifact's SHA-256 digest; apply
+  verifies it before handing the file to the engine. A mismatch means corrupt
+  or tampered artifacts, never a smaller plan.
+- The compatibility path stays narrow and explicit: only a manifest with NO
+  plan key (older manifests, or locking disabled at preview time) re-plans,
+  with the loud timeline statement that already exists.
+- Recovery is explicit and separate: `engine.plan_locking.allow_replan`
+  (default `false`, deny - the opt-out this delta decides on) or a per-run
+  `--replan` flag re-plans loudly, on the timeline and in the audit record.
+  The flag lets an operator recover mid-incident without leaving a standing
+  config weakening in place.
+
+Breaking as planned: applies that previously re-planned on a missing
+promised plan now fail; existing deployments must set the recovery knob or
+treat the failure as the signal it is (run a new preview).
+
 ## Trade-offs
 
 **The stored plan is sensitive.** A plan artifact is the engine's serialized
