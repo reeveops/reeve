@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -37,6 +39,8 @@ func addCommentFlags(cmd *cobra.Command) {
 		"How a continued board splits: divided (default) | stack | group. Overrides comments.overflow.split.")
 	f.Int("comment-overflow-max-parts", 0,
 		"Maximum comments one board may occupy. Overrides comments.overflow.max_parts.")
+	f.String("comment-author", "",
+		"The login the GitHub API token writes comments as (e.g. reeve-bot[bot] for a GitHub App installation token). Overrides comments.author; bypasses /user identity resolution where it is unavailable.")
 }
 
 // applyCommentFlags folds the comment flags into the loaded shared config and
@@ -111,6 +115,20 @@ func applyCommentFlags(cmd *cobra.Command, shared *schemas.Shared) error {
 		}
 		c.Overflow.MaxParts = v
 	}
+	if f.Changed("comment-author") {
+		v, _ := f.GetString("comment-author")
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("--comment-author must not be empty when set")
+		}
+		c.Author = strings.TrimSpace(v)
+	}
+	if c.Author != "" {
+		// The github client resolves the comment author through
+		// REEVE_COMMENT_AUTHOR; this seam runs for every repo-context
+		// command before any client is constructed. os.Setenv inside the
+		// process is confined to this seam; the value is never logged.
+		_ = os.Setenv("REEVE_COMMENT_AUTHOR", c.Author)
+	}
 	return nil
 }
 
@@ -119,7 +137,7 @@ func applyCommentFlags(cmd *cobra.Command, shared *schemas.Shared) error {
 var commentFlagNames = []string{
 	"comment-sort", "comment-stack-view", "comment-style", "comment-show-gates",
 	"comment-collapse-threshold", "comment-overflow", "comment-overflow-split",
-	"comment-overflow-max-parts",
+	"comment-overflow-max-parts", "comment-author",
 }
 
 // oneOf rejects a value outside the allowed set, naming what was allowed. A

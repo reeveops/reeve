@@ -313,6 +313,12 @@ runs:
       env:
         ACTION_PATH: ${{ steps.reeve-hash.outputs.root }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
+        # When the token IS the runner's default github.token, the comment
+        # author is known (github-actions[bot], the identity that token
+        # always writes as) and /user is not consulted. A custom token
+        # resolves through /user, or refuses with the typed error so the
+        # operator can set comments.author / --comment-author.
+        REEVE_TOKEN_IS_DEFAULT: ${{ inputs.github-token == format('{0}', github.token) && 'true' || 'false' }}
         SLACK_BOT_TOKEN: ${{ inputs.slack-token }}
         REEVE_BIN: ${{ runner.temp }}/reeve-bin/reeve
         REEVE_LOG_LEVEL: ${{ inputs.log-level }}

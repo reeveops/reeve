@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	gh "github.com/google/go-github/v66/github"
 	"golang.org/x/oauth2"
@@ -24,6 +26,11 @@ type Client struct {
 	gh    *gh.Client
 	owner string
 	repo  string
+	// commentAuthorOverride is the operator-declared login the token writes
+	// comments as (comments.author / --comment-author, folded to
+	// REEVE_COMMENT_AUTHOR). It outranks both the action-supplied default-
+	// token author and /user resolution.
+	commentAuthorOverride atomic.Pointer[string]
 
 	commentMu    sync.Mutex
 	commentCache map[int][]*gh.IssueComment
@@ -63,7 +70,15 @@ func New(ctx context.Context, token, owner, repo string) (*Client, error) {
 			return nil, fmt.Errorf("github: invalid GITHUB_API_URL %q: %w", os.Getenv("GITHUB_API_URL"), err)
 		}
 	}
-	return &Client{gh: ghc, owner: owner, repo: repo}, nil
+	client := &Client{gh: ghc, owner: owner, repo: repo}
+	// The operator-declared comment author (comments.author /
+	// --comment-author, folded to REEVE_COMMENT_AUTHOR by the shared flag
+	// seam) short-circuits /user resolution. The action-supplied default-
+	// token author is resolved later, in authenticatedCommentAuthor.
+	if a := strings.TrimSpace(os.Getenv("REEVE_COMMENT_AUTHOR")); a != "" {
+		client.commentAuthorOverride.Store(&a)
+	}
+	return client, nil
 }
 
 // apiBaseURL returns the non-default API base URL from GITHUB_API_URL, or
@@ -167,8 +182,27 @@ func (c *Client) upsertCommentLocked(ctx context.Context, number int, body, mark
 	if err != nil {
 		return err
 	}
+	// Marker comments are reeve's; ONLY the account the token authenticates
+	// as may be edited. The previous behavior matched any comment whose body
+	// contained the marker and rewrote it, so a foreign comment quoting the
+	// marker (e.g. a maintainer quoting the board) was destroyed. Identity
+	// resolution failing fails the upsert closed: without it reeve cannot
+	// tell its own comments from anyone else's. This is NOT a guess: an
+	// unresolved author (e.g. /user unavailable under an App installation
+	// token) is logged loudly and the write is refused - a wrong guess
+	// posts a duplicate comment on every run.
+	author, aerr := c.authenticatedCommentAuthor(ctx)
+	if aerr != nil {
+		slog.Error("comment author could not be determined; refusing to write comments (set comments.author or --comment-author)", "err", aerr)
+		return aerr
+	}
 	for _, cm := range comments {
 		if !strings.Contains(cm.GetBody(), marker) {
+			continue
+		}
+		if login := cm.GetUser().GetLogin(); login != author {
+			slog.Warn("marker comment belongs to another author; leaving it alone",
+				"author", login, "marker", marker, "pr", number)
 			continue
 		}
 		edited, resp, err := c.gh.Issues.EditComment(ctx, c.owner, c.repo, cm.GetID(), &gh.IssueComment{Body: gh.String(body)})
@@ -237,6 +271,7 @@ func (c *Client) DeleteCommentsByMarkerPrefix(ctx context.Context, number int, p
 	}
 	author, err := c.authenticatedCommentAuthor(ctx)
 	if err != nil {
+		slog.Error("comment author could not be determined; refusing to write comments", "err", err)
 		return 0, err
 	}
 	c.commentMu.Lock()
@@ -318,21 +353,56 @@ func cloneIssueComment(comment *gh.IssueComment) *gh.IssueComment {
 }
 
 // authenticatedCommentAuthor identifies the account whose token writes reeve
-// comments. User tokens expose it through /user; GitHub Actions installation
-// tokens write as the platform's fixed github-actions[bot] identity.
+// comments. Precedence, highest first:
+//  1. the operator override (comments.author / --comment-author, riding
+//     REEVE_COMMENT_AUTHOR),
+//  2. the action-supplied default-token knowledge: when the composite action
+//     sees that github-token IS the runner's default github.token, it sets
+//     REEVE_TOKEN_IS_DEFAULT=true and the author is github-actions[bot] -
+//     known from the token kind, not guessed, so /user is not consulted at
+//     all (the default token cannot be relied on to resolve an identity
+//     through it),
+//  3. /user: user tokens return the user, App installation tokens return the
+//     app's bot user (`<slug>[bot]`).
+//
+// When none of these resolve, the identity is NOT guessed - a wrong author
+// makes every upsert post a duplicate comment forever. The caller refuses
+// the write with the typed error naming the explicit setting.
 func (c *Client) authenticatedCommentAuthor(ctx context.Context) (string, error) {
+	if o := c.commentAuthorOverride.Load(); o != nil && *o != "" {
+		return *o, nil
+	}
+	// The default GITHUB_TOKEN always writes as github-actions[bot]: this is
+	// a property of the token kind the action detected, not a guess to fall
+	// back on when /user is unreachable.
+	if os.Getenv("REEVE_TOKEN_IS_DEFAULT") == "true" {
+		return "github-actions[bot]", nil
+	}
 	user, _, err := c.gh.Users.Get(ctx, "")
 	if err == nil && user.GetLogin() != "" {
 		return user.GetLogin(), nil
 	}
-	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		return "github-actions[bot]", nil
-	}
 	if err == nil {
 		err = errors.New("authenticated user response had no login")
 	}
-	return "", fmt.Errorf("identify authenticated comment author: %w", err)
+	// Typed refusal: callers can errors.As it; the text names the fix.
+	return "", &CommentAuthorError{cause: err}
 }
+
+// CommentAuthorError is the typed refusal when the comment author cannot be
+// determined: the comment write is refused (never guessed - the old
+// github-actions[bot] assumption was wrong for App installation tokens)
+// and the text names the explicit setting that fixes it. The default-token
+// path never reaches it: the action declares its author.
+type CommentAuthorError struct {
+	cause error
+}
+
+func (e *CommentAuthorError) Error() string {
+	return "comment write refused: the authenticated comment author could not be determined (set comments.author or --comment-author)"
+}
+
+func (e *CommentAuthorError) Unwrap() error { return e.cause }
 
 // partOrdinal extracts a board part's ordinal from a comment body, given the
 // board's marker prefix. Part 1 carries the bare marker and reports 1.

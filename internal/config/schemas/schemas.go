@@ -231,6 +231,13 @@ type CommentsConfig struct {
 	Style             string         `yaml:"style"`      // replace (default) | append | section
 	StackView         string         `yaml:"stack_view"` // all (default) | changed — whether to list no-op stacks in the table
 	Overflow          OverflowConfig `yaml:"overflow"`
+	// Author is the login the API token writes comments as (e.g.
+	// `reeve-bot[bot]` for a GitHub App installation token). It bypasses
+	// /user identity resolution, which is unavailable on some GHES
+	// configurations; the match-author rule for marker comments uses it.
+	// Empty resolves the identity through the API and refuses the comment
+	// write if that fails (never guesses).
+	Author string `yaml:"author,omitempty"`
 }
 
 // OverflowConfig controls what happens when a board exceeds GitHub's comment
