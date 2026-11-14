@@ -557,6 +557,14 @@ func classifyEventRefusal(t *testing.T, eventName, eventJSON, command string) st
 	if err == nil {
 		t.Fatalf("event must be refused (exit non-zero), but the classifier exited 0 with output:\n%s", output)
 	}
+	// Nothing may dispatch off a refused event: no run=true in
+	// GITHUB_OUTPUT. The file may not exist at all - a refused run writes
+	// no dispatch.
+	if out, rerr := os.ReadFile(outputPath); rerr != nil && !os.IsNotExist(rerr) {
+		t.Fatalf("read the classifier output file: %v", rerr)
+	} else if rerr == nil && strings.Contains(string(out), "run=true") {
+		t.Fatalf("a refused run must leave no run=true in GITHUB_OUTPUT: %s", out)
+	}
 	return string(output)
 }
 
