@@ -527,6 +527,96 @@ func TestActionClassifier(t *testing.T) {
 	}
 }
 
+// classifyEventRefusal runs the classifier expecting a refusal: a non-zero
+// exit with the reason on stderr.
+func classifyEventRefusal(t *testing.T, eventName, eventJSON, command string) string {
+	t.Helper()
+	dir := t.TempDir()
+	eventPath := filepath.Join(dir, "event.json")
+	outputPath := filepath.Join(dir, "output")
+	if err := os.WriteFile(eventPath, []byte(eventJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	script := repoPath(t, ".github", "scripts", "classify-event.sh")
+	// #nosec G204 -- the executable is a repository-owned script and fixtures travel through environment variables.
+	cmd := exec.Command(script)
+	for key, value := range map[string]string{
+		"GITHUB_OUTPUT":              outputPath,
+		"GITHUB_EVENT_NAME":          eventName,
+		"GITHUB_EVENT_PATH":          eventPath,
+		"REEVE_INPUT_COMMAND":        command,
+		"REEVE_RUN_ON_APPROVAL":      "false",
+		"REEVE_ALLOWED_ASSOCIATIONS": "OWNER,MEMBER,COLLABORATOR",
+		"REEVE_COMMAND_PREFIXES":     "/reeve",
+	} {
+		t.Setenv(key, value)
+	}
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("event must be refused (exit non-zero), but the classifier exited 0 with output:\n%s", output)
+	}
+	// Nothing may dispatch off a refused event: no run=true in
+	// GITHUB_OUTPUT. The file may not exist at all - a refused run writes
+	// no dispatch.
+	if out, rerr := os.ReadFile(outputPath); rerr != nil && !os.IsNotExist(rerr) {
+		t.Fatalf("read the classifier output file: %v", rerr)
+	} else if rerr == nil && strings.Contains(string(out), "run=true") {
+		t.Fatalf("a refused run must leave no run=true in GITHUB_OUTPUT: %s", out)
+	}
+	return string(output)
+}
+
+// TestExplicitCommandOnCommentEventsIsGated asserts that an explicit
+// `command` input no longer skips the actor gates on comment events. The
+// explicit-command path used to return before the bot and association
+// checks, so anything able to influence a workflow input ran as if the
+// actor were pre-trusted.
+func TestExplicitCommandOnCommentEventsIsGated(t *testing.T) {
+	commentEvent := func(assoc, typ, login string) string {
+		return `{"action":"created","issue":{"pull_request":{}},"comment":{"author_association":"` + assoc + `","user":{"type":"` + typ + `","login":"` + login + `"}}}`
+	}
+	reviewEvent := func(assoc, typ, login string) string {
+		return `{"action":"submitted","review":{"author_association":"` + assoc + `","user":{"type":"` + typ + `","login":"` + login + `"},"state":"approved"}}`
+	}
+
+	cases := []struct {
+		name       string
+		eventName  string
+		eventJSON  string
+		wantRefuse string
+	}{
+		{"issue_comment NONE is refused", "issue_comment", commentEvent("NONE", "User", "operator"),
+			"drift run refused: @operator has association NONE; allowed: OWNER,MEMBER,COLLABORATOR."},
+		{"issue_comment bot is refused", "issue_comment", commentEvent("MEMBER", "Bot", "acme-bot"),
+			"drift run refused: @acme-bot is a bot (self-trigger guard); only a human may pass command."},
+		{"pull_request_review NONE is refused", "pull_request_review", reviewEvent("NONE", "User", "operator"),
+			"drift run refused: @operator has association NONE; allowed: OWNER,MEMBER,COLLABORATOR."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := classifyEventRefusal(t, c.eventName, c.eventJSON, "drift run")
+			if !strings.Contains(out, c.wantRefuse) {
+				t.Fatalf("refusal output must name the command, actor, association, and allowlist:\nwant: %s\ngot:  %s", c.wantRefuse, out)
+			}
+		})
+	}
+
+	// An authorized human still dispatches on a comment event.
+	commentMember := commentEvent("MEMBER", "User", "operator")
+	if dispatch := classifyActionEvent(t, "issue_comment", commentMember, "drift run", "false"); !dispatch.Run || dispatch.Command != "drift run" {
+		t.Fatalf("authorized human on issue_comment must dispatch, got run=%v command=%q", dispatch.Run, dispatch.Command)
+	}
+
+	// Workflow-owned events keep dispatching an explicit command.
+	for _, name := range []string{"workflow_dispatch", "schedule"} {
+		if dispatch := classifyActionEvent(t, name, `{}`, "drift run", "false"); !dispatch.Run || dispatch.Command != "drift run" {
+			t.Fatalf("%s must dispatch an explicit command, got run=%v command=%q", name, dispatch.Run, dispatch.Command)
+		}
+	}
+}
+
 func TestActionHeavyStepsUseDispatchGuard(t *testing.T) {
 	action := readRepoFile(t, ".github", "actions", "reeve", "action.yml")
 	for _, name := range []string{
