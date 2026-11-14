@@ -6,9 +6,7 @@
 
 The head-resolved model is retired: resolving the authorization surface from
 the PR HEAD let a PR grant itself emergency override authority - the
-`reject_self_authorization` hole this proposal closes. (The base spec states
-this as a plain subheading, not a `Requirement:` heading, so the removal
-matches it verbatim and folds in on archive.)
+`reject_self_authorization` hole this proposal closes.
 
 ## ADDED Requirements
 
@@ -20,7 +18,12 @@ CODEOWNERS content the `codeowners` source consults - and never from PR HEAD.
 A PR that adds an actor to `break_glass.authorized` or grants itself
 CODEOWNERS ownership of a changed path MUST NOT authorize its own emergency
 override: the addition takes effect only after merge. No new configuration
-keys are introduced by this change. The `authorizing-config-modified` audit
+keys are introduced by this change. Break-glass inside a PR is otherwise
+unchanged for actors ALREADY authorized on the base branch: they still
+resolve authority through the same sources with the same gate-override
+semantics, audit recording, and trace style - this change only moves WHERE
+the authorization surface is read from, and does not disable break-glass in
+PRs. The `authorizing-config-modified` audit
 signal stays: the modification is inert for the current run, and the audit
 record still names every touched path. `break_glass.reject_self_authorization`
 stays accepted and keeps enforceable meaning: when set, a PR that modifies

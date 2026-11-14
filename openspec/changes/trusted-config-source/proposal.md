@@ -24,13 +24,11 @@ Local operations and scheduled drift continue to load the checked-out repository
 
 An internal PR may still propose control-setting changes, but those changes take effect only after merge.
 Workload declarations needed to preview newly added stacks remain head-owned.
-The documented head-resolved break-glass self-authorization ("self-add flagged, not forbidden") is intentionally retired by this change: it is the same `reject_self_authorization` hole this proposal closes, and no new keys are introduced - `reject_self_authorization` keeps working with a strictly enforceable meaning.
 
-**Round-6 spec corrections (review follow-up 6):** the approvals delta's
-REMOVED header now matches the base spec's actual heading — a plain
-subheading, `### Head-resolved; self-add flagged, not forbidden (with opt-in
-lockdown)` — instead of inventing a `### Requirement:` title, so the removal
-folds in on archive. The trailing prose (the audit-signal and
-`reject_self_authorization` continuation) moved from below the last scenario
-into the requirement body, where delta prose belongs. The decision itself is
-unchanged and remains under review.
+## Decision (maintainer-approved, 2026-11-13)
+
+Break-glass authorization is read from the base revision - trusted configuration and the CODEOWNERS content the `codeowners` source consults - and a PR **cannot grant itself break-glass authority**: an actor added to `break_glass.authorized` or granted CODEOWNERS ownership in the PR's own HEAD obtains that authority only after the PR merges.
+
+Break-glass inside a PR is otherwise unchanged for actors ALREADY authorized on the base branch: they still resolve authority through the same sources (trusted `break_glass:` block, `codeowners`), with the same gate-override semantics, audit recording, and trace style as today. This change only moves WHERE the authorization surface is read from - it does not disable break-glass in PRs, and every refusal keeps naming what was refused and the traces naming every source consulted.
+
+The documented head-resolved self-authorization ("self-add flagged, not forbidden") is intentionally retired by this change: it is the same `reject_self_authorization` hole this proposal closes, and no new keys are introduced - `reject_self_authorization` keeps working with a strictly enforceable meaning.
