@@ -888,6 +888,14 @@ func classifyActionEventExpectRefusal(t *testing.T, eventName, eventJSON, comman
 	if err == nil {
 		t.Fatalf("unknown argument must refuse the dispatch (exit non-zero), but the classifier exited 0 with output:\n%s", output)
 	}
+	// The refusal must leave NOTHING behind: no run=true in GITHUB_OUTPUT -
+	// nothing downstream may dispatch off a refused command. The file may
+	// not exist at all: a refused run never writes the dispatch.
+	if out, rerr := os.ReadFile(outputPath); rerr != nil && !os.IsNotExist(rerr) {
+		t.Fatalf("read the classifier output file: %v", rerr)
+	} else if rerr == nil && strings.Contains(string(out), "run=true") {
+		t.Fatalf("a refused command must leave no run=true in GITHUB_OUTPUT: %s", out)
+	}
 	return string(output)
 }
 
@@ -1160,6 +1168,14 @@ func TestClassifierRefusalIsPostedAsPRReply(t *testing.T) {
 		t.Fatalf("job log must carry the refusal:\nwant: %s\ngot:  %s", refusal, output)
 	}
 
+	// Nothing downstream may dispatch off a refused command: no run=true
+	// in GITHUB_OUTPUT. The file may not exist at all: a refused run never
+	// writes the dispatch.
+	if out, rerr := os.ReadFile(outputPath); rerr != nil && !os.IsNotExist(rerr) {
+		t.Fatalf("read the classifier output file: %v", rerr)
+	} else if rerr == nil && strings.Contains(string(out), "run=true") {
+		t.Fatalf("a refused run must leave no run=true in GITHUB_OUTPUT: %s", out)
+	}
 	calls, err := os.ReadFile(curlLog)
 	if err != nil {
 		t.Fatalf("the refusal must have been posted to the PR: %v", err)
