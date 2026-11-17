@@ -54,6 +54,7 @@ type bgVCS struct {
 	repoPrivate   bool // reported as vcs.PR.RepoPrivate
 	forkPR        bool // reported as vcs.PR.IsFork
 	approvalsList []approvals.Approval
+	failingChecks []string
 	comments      map[string][]string // marker → bodies (upserts)
 	posted        []string            // plain PostComment bodies
 	getPRCalls    int
@@ -89,6 +90,9 @@ func (f *bgVCS) Capabilities() vcs.CommentCapabilities {
 	return vcs.CommentCapabilities{SupportsEdit: true}
 }
 func (f *bgVCS) ChecksGreen(ctx context.Context, _ string, _ vcs.ChecksGreenOpts) (bool, []string, error) {
+	if len(f.failingChecks) > 0 {
+		return false, f.failingChecks, nil
+	}
 	return true, nil, nil
 }
 func (f *bgVCS) CompareBranches(ctx context.Context, _, _ string) (int, error) { return 0, nil }

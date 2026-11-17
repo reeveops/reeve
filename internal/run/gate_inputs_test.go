@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/reeveops/reeve/internal/config/schemas"
@@ -12,13 +13,14 @@ import (
 
 // gateVCS is a scriptable stand-in for the gate-input reads.
 type gateVCS struct {
-	checksGreen bool
-	checksErr   error
-	behind      int
-	compareErr  error
-	reviews     []approvals.Approval
-	comments    []approvals.Approval
-	codeowners  string
+	checksGreen   bool
+	failingChecks []string
+	checksErr     error
+	behind        int
+	compareErr    error
+	reviews       []approvals.Approval
+	comments      []approvals.Approval
+	codeowners    string
 
 	sawCommentCommand string
 	commentCalls      int
@@ -28,7 +30,7 @@ func (f *gateVCS) ChecksGreen(context.Context, string, vcs.ChecksGreenOpts) (boo
 	if f.checksErr != nil {
 		return false, nil, f.checksErr
 	}
-	return f.checksGreen, nil, nil
+	return f.checksGreen, f.failingChecks, nil
 }
 func (f *gateVCS) CompareBranches(context.Context, string, string) (int, error) {
 	if f.compareErr != nil {
@@ -135,6 +137,23 @@ func TestGatherGateInputsUsesPRHeadSHA(t *testing.T) {
 	}
 	if gi.ApprovalPR.HeadSHA != "runner-checkout-sha" {
 		t.Fatalf("fallback HeadSHA = %q", gi.ApprovalPR.HeadSHA)
+	}
+}
+
+func TestGatherGateInputsRedactsFailingCheckNames(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("A", 36)
+	v := &gateVCS{failingChecks: []string{"credential-scan/" + secret + " failed"}}
+	gi, err := gatherGateInputs(context.Background(), v, &schemas.Shared{},
+		vcs.CommentApprovalConfig{}, 7, testPR(), "sha", nil, vcs.ChecksGreenOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gi.FailingChecks) != 1 || strings.Contains(gi.FailingChecks[0], secret) ||
+		!strings.Contains(gi.FailingChecks[0], "credential-scan/[redacted] failed") {
+		t.Fatalf("failing checks were not redacted at the run seam: %v", gi.FailingChecks)
+	}
+	if v.failingChecks[0] != "credential-scan/"+secret+" failed" {
+		t.Fatal("redaction must not mutate the VCS adapter's slice")
 	}
 }
 

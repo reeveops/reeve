@@ -12,7 +12,8 @@ passing only when the operator opts out via that key or the matching CLI
 flag - repositories where reeve is the only check. Legacy combined statuses
 count as check evidence; zero check runs with statuses present follows the
 normal status path. The failing-check detail MUST surface in the gate reason
-on the PR comment.
+on the PR comment, and check names/status contexts MUST pass through the
+run-layer redactor before reaching gate traces, logs, or comments.
 
 #### Scenario: No checks ran at all
 
