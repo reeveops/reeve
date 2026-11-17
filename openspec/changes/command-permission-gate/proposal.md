@@ -56,6 +56,14 @@ the run's log states which source supplied the effective value. An
 unresolvable value at any layer fails closed at load, naming the layer and
 the value.
 
+Flag precedence has one invocation-trust boundary. A flag from a trusted
+invocation keeps its normal highest precedence, including when it lowers the
+bar. A flag arriving from an untrusted caller or comment surface MUST NOT
+lower `approvals.required_permission` from trusted configuration. Such an
+attempt fails closed and names the invocation-trust rule; an equal or higher
+value remains valid. Without a trusted config value, normal flag precedence
+applies.
+
 ## Compatibility
 
 Breaking: org members (and anyone else) WITHOUT real

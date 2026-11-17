@@ -111,17 +111,47 @@ SHALL override the action input whether it is explicitly set or left at its
 default, because the action input rides the caller's workflow file while the
 config key is the operator's reviewed repository authority. When a config
 key and an explicitly-set action input disagree, the config key MUST WIN and
-the run's log MUST state which source supplied the effective value. An
-unresolvable value at ANY layer (the flag, the config key, or the action
-input) MUST fail closed at load, naming the layer and the value.
+the run's log MUST state which source supplied the effective value. The log
+MUST name the effective source for every resolution. An unresolvable value
+at ANY layer (the flag, the config key, or the action input) MUST fail closed
+at load, naming the layer and the value.
+
+Trusted invocations retain the flag's normal highest precedence. A flag
+value arriving from an untrusted caller-controlled or comment surface MUST
+NOT lower a bar present in trusted configuration. Such an attempt MUST fail
+closed before dispatch or approval evaluation, naming the
+`untrusted-invocation-cannot-lower-required-permission` rule, the configured
+bar, and the attempted bar. An equal or higher untrusted flag value remains
+valid. Without a trusted config value, normal flag precedence applies.
 
 #### Scenario: The flag overrides both
 
 - **GIVEN** the config key and the action input are both set (the config key
   to `maintain`, the action input to `write`)
-- **WHEN** a run starts with `--required-permission=admin`
+- **WHEN** a trusted invocation starts with `--required-permission=admin`
 - **THEN** the effective bar is `admin`, and the log states the flag
   supplied it
+
+#### Scenario: A trusted invocation may lower the configured bar
+
+- **GIVEN** trusted configuration sets the bar to `admin`
+- **WHEN** a trusted invocation starts with `--required-permission=write`
+- **THEN** the effective bar is `write` under normal flag precedence
+- **AND** the log states that the flag supplied it
+
+#### Scenario: An untrusted invocation cannot lower the configured bar
+
+- **GIVEN** trusted configuration sets the bar to `admin`
+- **AND** `--required-permission=write` arrives from an untrusted caller or comment surface
+- **WHEN** the run resolves the permission bar
+- **THEN** resolution fails closed before dispatch or approval evaluation
+- **AND** the refusal names `untrusted-invocation-cannot-lower-required-permission`, the configured `admin` bar, and the attempted `write` bar
+
+#### Scenario: An untrusted invocation may maintain or raise the bar
+
+- **GIVEN** trusted configuration sets the bar to `write`
+- **WHEN** an untrusted invocation supplies `--required-permission=admin`
+- **THEN** the effective bar is `admin`, and the log states the flag supplied it
 
 #### Scenario: The config key overrides an explicitly-set action input
 

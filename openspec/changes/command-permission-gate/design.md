@@ -76,6 +76,12 @@ author fails the permission bar is refused with the same trace style the
 source already uses ("ignored ... reason ... next step") rather than
 dropped silently.
 
+## Permission-bar precedence and invocation trust
+
+The effective bar resolves as CLI flag > trusted `approvals.required_permission` > action input, whether the action input was explicitly set or is its default. The log always names the effective source; when trusted config overrides an explicitly-set action input, it also records that override.
+
+The CLI flag's highest precedence applies to trusted invocations. A flag value arriving from an untrusted caller-controlled or comment surface carries an untrusted invocation marker through parsing and resolution. When trusted config is present, that flag may maintain or raise the configured bar but cannot lower it. A lowering attempt fails closed before dispatch or approval evaluation, naming the `untrusted-invocation-cannot-lower-required-permission` rule, the configured bar, and the attempted bar. This exception does not silently reorder sources: trusted invocations retain normal flag precedence, and without a trusted config value an untrusted flag cannot lower a config bar that does not exist.
+
 ## Trust boundary note
 
 The permission lookup uses the action's token against the source repository;
