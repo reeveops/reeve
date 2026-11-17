@@ -112,7 +112,7 @@ verify_sha256() {
 # The identity is scoped per artifact kind - the signing run must be the one
 # that actually produced the artifact:
 #   version tag (stable/rc): release.yml@refs/tags/<requested version>
-#   per-commit master/edge:  edge-build.yml@refs/heads/master
+#   per-commit edge build:   edge-build.yml@refs/heads/<resolved tag's branch>
 # A signature from any other workflow or ref (e.g. v0.8.0 and earlier, signed
 # from master) is refused and names what was required and found.
 verify_signature() {
@@ -155,11 +155,13 @@ re_quote() {
   printf '%s' "$1" | sed 's/[][\.*^$()+?{|}]/\\&/g'
 }
 
-# required_identity <kind> <ref> <repo> <id-re-var> <id-desc-var> <what-var>
+# required_identity <kind> <version-or-resolved-tag> <repo> <id-re-var> <id-desc-var> <what-var>
 # Sets the per-kind signing identity: regexp, human description, and the
-# artifact label the refusal renders.
+# artifact label the refusal renders. Edge and commit artifacts use the branch
+# prefix on their RESOLVED release tag: master-* signs on master and next-* on
+# next. In particular, a full commit SHA can select either branch.
 required_identity() {
-  local kind="$1" ref="$2" repo="$3" repo_re
+  local kind="$1" ref="$2" repo="$3" repo_re branch
   repo_re=$(re_quote "${repo:-.+}")
   case "$kind" in
     version)
@@ -168,9 +170,14 @@ required_identity() {
       printf -v "$6" '%s' "version ${ref}"
       ;;
     edge | commit)
-      printf -v "$4" '%s' "^https://github\.com/${repo_re}/\.github/workflows/edge-build\.yml@refs/heads/master$"
-      printf -v "$5" '%s' "edge-build.yml@refs/heads/master"
-      printf -v "$6" '%s' "per-commit master build ${ref}"
+      case "$ref" in
+        master-*) branch=master ;;
+        next-*) branch=next ;;
+        *) return 1 ;;
+      esac
+      printf -v "$4" '%s' "^https://github\.com/${repo_re}/\.github/workflows/edge-build\.yml@refs/heads/${branch}$"
+      printf -v "$5" '%s' "edge-build.yml@refs/heads/${branch}"
+      printf -v "$6" '%s' "per-commit ${branch} build ${ref}"
       ;;
     *)
       return 1
@@ -215,11 +222,9 @@ fetch_main() {
     return 0
   fi
 
-  # The signing identity is scoped to the artifact kind: a version tag must
-  # be signed by a run on its own tag, a per-commit build by the edge
-  # workflow on master. Everything downstream verifies against exactly that.
-  local id_re id_desc what
-  required_identity "$kind" "$ref" "$repo" id_re id_desc what
+  # The signing identity is scoped to the artifact kind. Edge/commit identity
+  # is selected after release resolution because the tag carries the branch.
+  local id_re id_desc what identity_ref
 
   if [[ "$kind" != "version" && ! "${REEVE_SOURCE_HASH:-}" =~ ^[0-9a-f]{64}$ ]]; then
     fallback "canonical action source hash is unavailable or invalid"
@@ -288,7 +293,14 @@ fetch_main() {
   esac
 
   if [[ "$ok" == true ]]; then
-    if ! verify_sha256 "$workdir/$asset" "$workdir/$sums"; then
+    identity_ref="$ref"
+    if [[ "$kind" != "version" ]]; then
+      identity_ref="$tag"
+    fi
+    if ! required_identity "$kind" "$identity_ref" "$repo" id_re id_desc what; then
+      ok=false
+      reason="resolved release tag $tag does not identify a master-* or next-* edge build"
+    elif ! verify_sha256 "$workdir/$asset" "$workdir/$sums"; then
       ok=false
       reason="the downloaded archive does not match its checksums entry"
     elif ! verify_signature "$workdir/$sums" "$workdir/${sums}.bundle" "$id_re" "$id_desc" "$what"; then

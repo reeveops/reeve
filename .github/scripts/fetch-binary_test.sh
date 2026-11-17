@@ -65,7 +65,7 @@ set -euo pipefail
 printf '%s\n' "$*" >> "$GH_FAKE_CALL_LOG"
 if [[ "${1:-}" == "api" ]]; then
   if [[ "${GH_FAKE_API_EMPTY:-false}" != "true" ]]; then
-    printf '%s\n' fake-release
+    printf '%s\n' "${GH_FAKE_API_TAG:-master-fake}"
   fi
   exit 0
 fi
@@ -159,6 +159,7 @@ run_fetch() {
     GH_FAKE_CALL_LOG="$case_dir/gh.calls" \
     COSIGN_FAKE_CALL_LOG="$case_dir/cosign.calls" \
     GH_FAKE_API_EMPTY="${GH_FAKE_API_EMPTY:-false}" \
+    GH_FAKE_API_TAG="${GH_FAKE_API_TAG:-}" \
     GH_FAKE_DOWNLOAD_FAIL="${GH_FAKE_DOWNLOAD_FAIL:-false}" \
     COSIGN_FAKE_FAIL="${COSIGN_FAKE_FAIL:-false}" \
     COSIGN_FAKE_IDENTITY="${COSIGN_FAKE_IDENTITY:-}" \
@@ -206,14 +207,21 @@ assert_contains "$(cat "$wrong_source_dir/log")" "release source hash mismatch"
 
 # The signing identity is scoped per artifact kind (the maintainer decision:
 # everything with a version tag is signed by a run on that tag; per-commit
-# builds by the edge workflow on master).
+# builds by the edge workflow on the resolved release tag's branch).
 required_identity version v0.9.0 reeveops/reeve id_re id_desc id_what
 assert_eq "$id_re" '^https://github\.com/reeveops/reeve/\.github/workflows/release\.yml@refs/tags/v0\.9\.0$'
 assert_eq "$id_desc" 'release.yml@refs/tags/v0.9.0'
 assert_eq "$id_what" 'version v0.9.0'
-required_identity commit "$commit_ref" reeveops/reeve id_re id_desc id_what
+required_identity commit master-0123456 reeveops/reeve id_re id_desc id_what
 assert_eq "$id_re" '^https://github\.com/reeveops/reeve/\.github/workflows/edge-build\.yml@refs/heads/master$'
 assert_eq "$id_desc" 'edge-build.yml@refs/heads/master'
+required_identity commit next-191b271 reeveops/reeve id_re id_desc id_what
+assert_eq "$id_re" '^https://github\.com/reeveops/reeve/\.github/workflows/edge-build\.yml@refs/heads/next$'
+assert_eq "$id_desc" 'edge-build.yml@refs/heads/next'
+assert_eq "$id_what" 'per-commit next build next-191b271'
+if required_identity commit "$commit_ref" reeveops/reeve id_re id_desc id_what; then
+  fail "a raw commit SHA has no branch; identity must come from the resolved tag"
+fi
 required_identity version v0.9.0-rc.1 someone.example/forks/reeve id_re id_desc id_what
 assert_eq "$id_re" '^https://github\.com/someone\.example/forks/reeve/\.github/workflows/release\.yml@refs/tags/v0\.9\.0-rc\.1$'
 
@@ -237,16 +245,47 @@ if grep -q 'refs/(heads|tags)' "$version_dir/cosign.calls"; then
   fail "the identity must be scoped to this version's tag, not any workflow or ref"
 fi
 
-# A per-commit build verified against the edge-on-master identity is
-# accepted - edge-build.yml@refs/heads/master, exactly.
+# A per-commit build verified against the edge-on-master identity is accepted.
+GH_FAKE_API_TAG=master-0123456
 COSIGN_FAKE_IDENTITY="https://github.com/reeveops/reeve/.github/workflows/edge-build.yml@refs/heads/master"
-edge_dir=$(run_fetch edge-signed-from-master "$commit_ref" "$good_fixture")
-unset COSIGN_FAKE_IDENTITY
+edge_dir=$(run_fetch edge-signed-from-master master "$good_fixture")
+unset COSIGN_FAKE_IDENTITY GH_FAKE_API_TAG
 assert_eq "$(cat "$edge_dir/output")" fetched=true
 assert_contains "$(cat "$edge_dir/cosign.calls")" 'edge-build\.yml@refs/heads/master'
 if grep -q 'refs/(heads|tags)' "$edge_dir/cosign.calls"; then
-  fail "per-commit builds must pin edge-build.yml@refs/heads/master, not any workflow or ref"
+  fail "per-commit builds must pin one exact edge branch, not any workflow or ref"
 fi
+
+# next edge releases verify on next, not the old hardcoded master identity.
+GH_FAKE_API_TAG=next-191b271
+COSIGN_FAKE_IDENTITY="https://github.com/reeveops/reeve/.github/workflows/edge-build.yml@refs/heads/next"
+next_dir=$(run_fetch edge-signed-from-next next "$good_fixture")
+unset COSIGN_FAKE_IDENTITY GH_FAKE_API_TAG
+assert_eq "$(cat "$next_dir/output")" fetched=true
+assert_contains "$(cat "$next_dir/cosign.calls")" 'edge-build\.yml@refs/heads/next'
+
+# A full commit SHA that resolves to a next-* release also uses next.
+GH_FAKE_API_TAG=next-191b271
+COSIGN_FAKE_IDENTITY="https://github.com/reeveops/reeve/.github/workflows/edge-build.yml@refs/heads/next"
+commit_next_dir=$(run_fetch commit-selecting-next "$commit_ref" "$good_fixture")
+unset COSIGN_FAKE_IDENTITY GH_FAKE_API_TAG
+assert_eq "$(cat "$commit_next_dir/output")" fetched=true
+assert_contains "$(cat "$commit_next_dir/cosign.calls")" 'edge-build\.yml@refs/heads/next'
+
+# A next artifact signed on master is refused. The diagnostic names the
+# resolved version, required identity, found identity, and next step.
+GH_FAKE_API_TAG=next-191b271
+COSIGN_FAKE_IDENTITY="https://github.com/reeveops/reeve/.github/workflows/edge-build.yml@refs/heads/master"
+wrong_branch_dir=$(run_fetch next-signed-from-master-refused "$commit_ref" "$good_fixture")
+unset COSIGN_FAKE_IDENTITY GH_FAKE_API_TAG
+assert_eq "$(cat "$wrong_branch_dir/output")" fetched=false
+[[ ! -e "$wrong_branch_dir/reeve" ]] || fail "a wrong-branch signature installed a binary"
+wrong_branch_log="$(cat "$wrong_branch_dir/log")"
+assert_contains "$wrong_branch_log" "signature verification FAILED for per-commit next build next-191b271"
+assert_contains "$wrong_branch_log" "must identify edge-build.yml@refs/heads/next"
+assert_contains "$wrong_branch_log" "certificate: https://github.com/reeveops/reeve/.github/workflows/edge-build.yml@refs/heads/master"
+assert_contains "$wrong_branch_log" "next step: the prebuilt binary is NOT used; this run builds reeve from source"
+assert_contains "$wrong_branch_log" "prebuilt fetch failed: the checksums signature does not come from edge-build.yml@refs/heads/next"
 
 # A version tag signed the OLD way (release.yml on master, as v0.8.0 and
 # earlier were) is REFUSED: the refusal names the version, the identity
