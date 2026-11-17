@@ -560,9 +560,10 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	overriddenSeen := map[preconditions.GateID]bool{}
 	var overriddenGates []string
 	type applyPlan struct {
-		s    discovery.Stack
-		ss   summary.StackSummary
-		prev PreviewStatus
+		s             discovery.Stack
+		ss            summary.StackSummary
+		prev          PreviewStatus
+		stopHeartbeat func()
 	}
 	var approved []applyPlan
 	for _, s := range target {
@@ -613,6 +614,15 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			ss.Error = BuildRedactor(in.Shared).Redact(fmt.Sprintf("lock acquire: %v", err))
 			summaries = append(summaries, ss)
 			continue
+		}
+		// Protect the lock for the entire gate-to-apply lifetime. Starting the
+		// heartbeat only at this stack's engine call would let an earlier long
+		// apply expire a later stack's lease and allow another PR to take it.
+		stopHeartbeat := func() {}
+		if acquired {
+			stopHeartbeat = in.Locks.StartHeartbeat(ctx, s.Project, s.Name, corelocks.Holder{
+				PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
+			}, ttl)
 		}
 		lockBlockedBy := 0
 		if !acquired && lock.Holder != nil {
@@ -723,14 +733,16 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			}
 			anyBlocked = true
 			if acquired {
+				stopHeartbeat()
 				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "gates blocked")
 			}
 			summaries = append(summaries, ss)
 			continue
 		}
 
-		// Gates passed for this stack: it joins the apply phase.
-		approved = append(approved, applyPlan{s: s, ss: ss, prev: prev})
+		// Gates passed for this stack: it joins the apply phase with the
+		// heartbeat acquired above still running.
+		approved = append(approved, applyPlan{s: s, ss: ss, prev: prev, stopHeartbeat: stopHeartbeat})
 	}
 
 	// The gates have now been evaluated for every target stack. Announce
@@ -765,6 +777,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		s := ap.s
 		ss := ap.ss
 		prev := ap.prev
+		stopHeartbeat := ap.stopHeartbeat
 		redactor := BuildRedactor(in.Shared)
 
 		// Cancelled during the earlier stacks' applies: this stack never
@@ -773,6 +786,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		if ctx.Err() != nil {
 			ss.Status = summary.StatusError
 			ss.Error = "run cancelled before this stack was applied: " + ctx.Err().Error()
+			stopHeartbeat()
 			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "run cancelled before apply")
 			summaries = append(summaries, ss)
 			continue
@@ -783,6 +797,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			if stateErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(stateErr.Error())
+				stopHeartbeat()
 				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state auth failed")
 				summaries = append(summaries, ss)
 				continue
@@ -795,6 +810,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			if loginErr := PulumiLogin(ctx, in.Config, stateEnv); loginErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(loginErr.Error())
+				stopHeartbeat()
 				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state login failed")
 				summaries = append(summaries, ss)
 				continue
@@ -808,6 +824,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())
+			stopHeartbeat()
 			releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "auth resolve failed")
 			summaries = append(summaries, ss)
 			continue
@@ -851,12 +868,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 
 		stackCtx, endStack := in.OTEL.StartStackSpan(ctx, s.Project, s.Name, s.Env, "apply")
 		stackStart := time.Now()
-		// Lease heartbeat: an apply longer than locking.ttl must not have
-		// its LIVE holder reaped mid-flight (two applies would then run
-		// concurrently). Refreshes every ttl/3 until the engine returns.
-		stopHeartbeat := in.Locks.StartHeartbeat(stackCtx, s.Project, s.Name, corelocks.Holder{
-			PR: in.PRNumber, CommitSHA: in.CommitSHA, RunID: runID, Actor: in.Actor,
-		}, ttl)
+		// The gate-phase heartbeat remains active through this engine call.
 		res, aerr := in.Engine.Apply(stackCtx, s, iac.ApplyOpts{
 			Cwd:        absJoin(in.RepoRoot, s.Path),
 			Env:        authEnv,

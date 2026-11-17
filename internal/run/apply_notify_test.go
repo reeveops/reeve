@@ -126,8 +126,16 @@ func TestBreakGlassAnnouncesAtAuthorization(t *testing.T) {
 	}
 
 	comments := fv.allComments()
-	if !strings.Contains(comments, "break-glass override") {
-		t.Fatalf("the break_glass notification must fire at authorization time:\n%s", comments)
+	// Inspect the deployment-timeline marker written by the notification
+	// channel, not the separate apply timeline's authorization audit entry.
+	var notificationComments string
+	for marker, bodies := range fv.comments {
+		if strings.HasPrefix(marker, "<!-- reeve:timeline:v1:") {
+			notificationComments += strings.Join(bodies, "\n")
+		}
+	}
+	if got := strings.Count(notificationComments, "break-glass override"); got != 1 {
+		t.Fatalf("break_glass notification entries = %d, want 1:\n%s", got, notificationComments)
 	}
 	for _, banned := range []string{"✅ **approved**", "🚀 **apply started**"} {
 		if strings.Contains(comments, banned) {
