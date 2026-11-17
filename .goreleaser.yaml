@@ -88,11 +88,15 @@ homebrew_casks:
   homepage: "https://github.com/reeveops/reeve"
   description: "PR-native, self-hosted GitOps orchestrator for Pulumi, Terraform, and OpenTofu"
   # strip the quarantine xattr so the unsigned binary runs without Gatekeeper prompt
+  # Homebrew replaced the arbitrary-Ruby postflight stanza with the
+  # declarative install_steps DSL (GoReleaser v2.19+): system_command
+  # becomes run, if OS.mac? becomes on_macos, #{staged_path} becomes
+  # {{ .StagedPath }}.
   hooks:
     post:
-      install: |
-        if OS.mac?
-          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/reeve"]
+      install_steps: |
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/reeve"]
         end
 
 dockers_v2:
