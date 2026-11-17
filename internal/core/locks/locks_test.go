@@ -189,6 +189,35 @@ func TestUnlockPRRunScopedKeepsOtherRunsHolder(t *testing.T) {
 	}
 }
 
+func TestUnlockRunScopesHolderAndQueue(t *testing.T) {
+	t.Run("another live run and its queue entries survive", func(t *testing.T) {
+		l := NewLock("api", "prod", t0)
+		l.Holder = &Holder{PR: 1, RunID: "run-live", ExpiresAt: t0.Add(time.Hour).UTC().Format(time.RFC3339)}
+		l.Queue = []QueueItem{
+			{PR: 1, RunID: "run-denied"},
+			{PR: 1, RunID: "run-live"},
+			{PR: 2, RunID: "run-next"},
+		}
+		got := UnlockRun(l, 1, "run-denied", time.Hour, t0.Add(time.Minute))
+		if got.Holder == nil || got.Holder.RunID != "run-live" {
+			t.Fatalf("a different live run's holder must survive: %+v", got.Holder)
+		}
+		if len(got.Queue) != 2 || got.Queue[0].RunID != "run-live" || got.Queue[1].RunID != "run-next" {
+			t.Fatalf("only the denied run's queue entry may be removed: %+v", got.Queue)
+		}
+	})
+
+	t.Run("own promoted active holder releases", func(t *testing.T) {
+		l := NewLock("api", "prod", t0)
+		l.Holder = &Holder{PR: 1, RunID: "run-denied", Promoted: true, ExpiresAt: t0.Add(time.Hour).UTC().Format(time.RFC3339)}
+		l.Queue = []QueueItem{{PR: 2, RunID: "run-next"}}
+		got := UnlockRun(l, 1, "run-denied", time.Hour, t0.Add(time.Minute))
+		if got.Holder == nil || got.Holder.PR != 2 || got.Holder.RunID != "run-next" {
+			t.Fatalf("the denied run must release and promote the next PR: %+v", got.Holder)
+		}
+	})
+}
+
 func TestExpiredHolderEvictedOnAcquire(t *testing.T) {
 	l := NewLock("api", "prod", t0)
 	l, _, _ = TryAcquire(l, Holder{PR: 1}, time.Hour, t0)
