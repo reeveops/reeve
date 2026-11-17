@@ -5,3 +5,5 @@
 - [x] 3. Apply cancels the engine on loss (SIGINT + grace) and fails the stack with the abort message
 - [x] 4. Refresh aborts the same way
 - [x] 5. Run test: force-unlock mid-apply cancels the engine and fails the stack; lock not retaken
+- [x] 6. Treat `ApplyResult.Error` with a nil Go error as a failed apply and retain the recorded hold
+- [x] 7. Post failed/interrupted hold notices and timeline entries through the detached terminal context

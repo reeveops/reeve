@@ -897,9 +897,22 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 				s.Project, s.Name, s.Env, "aborted", ss.Error, in.PRNumber, in.CommitSHA)
 			continue
 		}
-		if aerr != nil {
+		// Engine adapters report operational apply failures in ApplyResult.Error
+		// with a nil Go error. Preserve their result metadata, then route both
+		// failure shapes through the same persistent-hold path.
+		if aerr == nil {
+			ss.Counts = res.Counts
+			ss.DurationMS = res.DurationMS
+			ss.FullPlan = redactor.Redact(res.Output)
+			in.OTEL.RecordStackChanges(ctx, s.Project, s.Name, res.Counts.Add, res.Counts.Change, res.Counts.Delete, res.Counts.Replace)
+		}
+		if aerr != nil || res.Error != "" {
+			failureText := res.Error
+			if aerr != nil {
+				failureText = aerr.Error()
+			}
 			ss.Status = summary.StatusError
-			ss.Error = redactor.Redact(aerr.Error())
+			ss.Error = redactor.Redact(failureText)
 			stackOutcome = "error"
 			endStack(stackOutcome, time.Since(stackStart).Seconds())
 
@@ -912,7 +925,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			if countPassed(summaries) > 0 {
 				outcome = "partial"
 			}
-			if errors.Is(aerr, ctx.Err()) || errors.Is(aerr, context.Canceled) {
+			if ctx.Err() != nil || errors.Is(aerr, context.Canceled) {
 				outcome = "interrupted"
 			}
 			key := auditKeyForRun(start, runID)
@@ -950,32 +963,29 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			slog.Error("apply failed mid-flight; the lock stays held with the reason",
 				"stack", s.Ref(), "pr", in.PRNumber, "run_id", runID,
 				"outcome", outcome, "run_url", in.CIRunURL, "audit_key", key,
-				"err", redactor.Redact(aerr.Error()))
+				"err", redactor.Redact(failureText))
+			// The interrupted run's context is already cancelled. Use a detached
+			// terminal context for the timeline and PR notice so both still land.
+			nctx, ncancel := terminalContext(ctx)
 			// The timeline entry carries the held-lock fact and pointers
 			// next to the failure, so the run record itself says why the
 			// lock did not release.
-			timeline.add(ctx, "🔒", "lock stays held: "+s.Ref(), redactor.Redact(hold))
+			timeline.add(nctx, "🔒", "lock stays held: "+s.Ref(), redactor.Redact(hold))
 			// Tell the PR: the commenter sees the failure and the held-lock
 			// fact next to it, not only in the CI log.
 			if in.VCS != nil && in.PRNumber > 0 {
-				if cerr := in.VCS.PostComment(ctx, in.PRNumber, redactor.Redact(hold)); cerr != nil {
+				if cerr := in.VCS.PostComment(nctx, in.PRNumber, redactor.Redact(hold)); cerr != nil {
 					slog.Warn("could not post the held-lock notice", "stack", s.Ref(), "pr", in.PRNumber, "err", cerr)
 				}
 			}
+			ncancel()
 			summaries = append(summaries, ss)
 			PostAnnotation(ctx, in.Annotations, annotations.EventApplyFailed,
 				s.Project, s.Name, s.Env, "failed", ss.Error, in.PRNumber, in.CommitSHA)
 			continue
 		}
 		endStack(stackOutcome, time.Since(stackStart).Seconds())
-		ss.Counts = res.Counts
-		ss.DurationMS = res.DurationMS
-		ss.FullPlan = redactor.Redact(res.Output)
-		in.OTEL.RecordStackChanges(ctx, s.Project, s.Name, res.Counts.Add, res.Counts.Change, res.Counts.Delete, res.Counts.Replace)
-		if res.Error != "" {
-			ss.Status = summary.StatusError
-			ss.Error = redactor.Redact(res.Error)
-		} else if res.Counts.Total() == 0 {
+		if res.Counts.Total() == 0 {
 			ss.Status = summary.StatusNoOp
 		} else {
 			ss.Status = summary.StatusPlanned

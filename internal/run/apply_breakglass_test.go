@@ -57,6 +57,9 @@ type bgVCS struct {
 	comments      map[string][]string // marker → bodies (upserts)
 	posted        []string            // plain PostComment bodies
 	getPRCalls    int
+	// rejectCancelled makes comment writes behave like a real remote client:
+	// an already-cancelled context cannot deliver the request.
+	rejectCancelled bool
 }
 
 func (f *bgVCS) ListChangedFiles(ctx context.Context, _ int) ([]string, error) {
@@ -75,6 +78,9 @@ func (f *bgVCS) GetPR(ctx context.Context, n int) (*vcs.PR, error) {
 	return &vcs.PR{Number: n, HeadSHA: headSHA, BaseRef: "main", Author: "author", RepoPrivate: f.repoPrivate, IsFork: f.forkPR}, nil
 }
 func (f *bgVCS) UpsertComment(ctx context.Context, _ int, body, marker string) error {
+	if f.rejectCancelled && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if f.comments == nil {
 		f.comments = map[string][]string{}
 	}
@@ -82,6 +88,9 @@ func (f *bgVCS) UpsertComment(ctx context.Context, _ int, body, marker string) e
 	return nil
 }
 func (f *bgVCS) PostComment(ctx context.Context, _ int, body string) error {
+	if f.rejectCancelled && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	f.posted = append(f.posted, body)
 	return nil
 }

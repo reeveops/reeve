@@ -19,6 +19,7 @@ import (
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/discovery"
 	"github.com/reeveops/reeve/internal/core/summary"
+	"github.com/reeveops/reeve/internal/iac"
 )
 
 // TestHeldLockNeverFreeAndRefusalCarriesReason pins the maintainer decision:
@@ -195,6 +196,77 @@ func TestFailedApplyLogsHoldAtErrorLevel(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("the error-level hold log must carry:\nwant: %s\ngot:\n%s", want, joined)
 		}
+	}
+}
+
+// resultErrorEngine matches the real Pulumi/HCL adapters: an operational
+// apply failure is data in ApplyResult.Error, not a non-nil Go error.
+type resultErrorEngine struct {
+	bgEngine
+	failure string
+}
+
+func (e *resultErrorEngine) Apply(_ context.Context, s discovery.Stack, _ iac.ApplyOpts) (iac.ApplyResult, error) {
+	e.applied = append(e.applied, s.Ref())
+	return iac.ApplyResult{
+		Counts: summary.Counts{Change: 1},
+		Output: "partial engine output",
+		Error:  e.failure,
+	}, nil
+}
+
+// TestApplyResultErrorKeepsHoldAndNotifies pins the adapter failure shape:
+// ApplyResult.Error with a nil Go error fails the stack, records the hold,
+// never releases it, and reaches both the error log and PR comments redacted.
+func TestApplyResultErrorKeepsHoldAndNotifies(t *testing.T) {
+	var captured []string
+	capture := slog.NewTextHandler(&capturingWriter{lines: &captured}, &slog.HandlerOptions{Level: slog.LevelInfo})
+	prev := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	secret := "ghp_" + strings.Repeat("A", 36)
+	engine := &resultErrorEngine{
+		bgEngine: bgEngine{enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"}}},
+		failure:  "pulumi up rejected the change: " + secret,
+	}
+	fv := &bgVCS{changed: []string{"projects/api/main.ts"}, headSHA: bgSHA}
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := plainApplyInput(t, engine, fv, store)
+	in.CIRunURL = "https://ci.example/run/result-error"
+
+	out, err := Apply(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !out.Failed || len(out.FailedStacks) != 1 || out.FailedStacks[0] != "api/prod" {
+		t.Fatalf("result error must fail the stack and run: %+v", out)
+	}
+	holder := holdHolder(t, in, context.Background())
+	if !holder.HoldStarted || holder.Outcome != "failed" || holder.RunID != out.RunID {
+		t.Fatalf("result error must leave this run's failed hold recorded: %+v", holder)
+	}
+	if holder.RunURL != in.CIRunURL || holder.AuditKey == "" || holder.RecordedAt == "" {
+		t.Fatalf("result-error hold must carry the reason pointers: %+v", holder)
+	}
+
+	logs := strings.Join(captured, "\n")
+	comments := fv.allComments()
+	for _, want := range []string{"STILL HELD", "outcome `failed`", in.CIRunURL, "[redacted]"} {
+		if !strings.Contains(comments, want) {
+			t.Fatalf("PR comments must carry the held result-error reason %q:\n%s", want, comments)
+		}
+	}
+	for _, want := range []string{"level=ERROR", "the lock stays held", "outcome=failed", "pulumi up rejected the change", "[redacted]"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("error log must carry the result-error hold %q:\n%s", want, logs)
+		}
+	}
+	if strings.Contains(comments, secret) || strings.Contains(logs, secret) {
+		t.Fatalf("result error reached an output without redaction:\ncomments:\n%s\nlogs:\n%s", comments, logs)
 	}
 }
 

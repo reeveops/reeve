@@ -39,7 +39,7 @@ func TestApplyCancelledMidRunRecordsHoldsAndFails(t *testing.T) {
 		}},
 		started: make(chan struct{}),
 	}
-	fv := &bgVCS{changed: []string{"projects/api/main.ts", "projects/worker/main.ts"}, headSHA: bgSHA}
+	fv := &bgVCS{changed: []string{"projects/api/main.ts", "projects/worker/main.ts"}, headSHA: bgSHA, rejectCancelled: true}
 	store, _ := filesystem.New(t.TempDir())
 	in := plainApplyInput(t, engine, fv, store)
 	in.Config = &schemas.Engine{Engine: schemas.EngineBody{
@@ -113,8 +113,13 @@ func TestApplyCancelledMidRunRecordsHoldsAndFails(t *testing.T) {
 		t.Fatalf("the interrupted hold must carry the audit key and timestamp: %+v", api.Holder)
 	}
 
-	// The interrupted failure notice reaches the PR.
-	if !strings.Contains(fv.allComments(), "STILL HELD") {
-		t.Fatalf("the PR must carry the held-lock notice: %s", fv.allComments())
+	// The interrupted failure notice and per-stack timeline entry both reach
+	// the PR. The fake rejects writes made with the cancelled run context, so
+	// this proves both used the detached terminal context.
+	comments := fv.allComments()
+	for _, want := range []string{"STILL HELD", "lock stays held: api/prod"} {
+		if !strings.Contains(comments, want) {
+			t.Fatalf("interrupted terminal reporting must carry %q: %s", want, comments)
+		}
 	}
 }

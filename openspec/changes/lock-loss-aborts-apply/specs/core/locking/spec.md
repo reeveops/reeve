@@ -51,11 +51,15 @@ refusal by the recorded state and show the removed hold's status alongside
 the removal. A failed or partial apply MUST log at error level, comment on
 the PR, and add the held-lock fact with its pointers to the run's timeline
 entry for the failed stack - all naming the exact command that clears the
-hold once the state is validated.
+hold once the state is validated. Engine failures include both a non-nil Go
+error and an `ApplyResult.Error` returned with a nil Go error. The PR notice
+and failed stack's timeline entry MUST use the detached terminal context when
+the run context has been cancelled.
 
 #### Scenario: A failed apply leaves the lock held with its reason
 
-- **WHEN** an apply's engine call fails
+- **WHEN** an apply's engine call returns a Go error or an
+  `ApplyResult.Error` with a nil Go error
 - **THEN** the lock stays held by the failing run with outcome `failed`
   (or `partial` when earlier stacks succeeded), the run URL, the audit
   record key, and a timestamp
