@@ -210,6 +210,17 @@ func newHandler(w io.Writer, format Format, opts *slog.HandlerOptions) slog.Hand
 // they know the context; this guarantees the sink.
 type redactingHandler struct {
 	next slog.Handler
+	// ops preserves the order of WithAttrs and WithGroup calls. Attributes
+	// stay raw until Handle so secrets registered after logger construction
+	// are masked; replaying the operations also preserves slog's grouping
+	// semantics for attributes attached before and after each group.
+	ops []handlerOp
+}
+
+type handlerOp struct {
+	attrs   []slog.Attr
+	group   string
+	isGroup bool
 }
 
 func (h *redactingHandler) Enabled(ctx context.Context, l slog.Level) bool {
@@ -217,19 +228,35 @@ func (h *redactingHandler) Enabled(ctx context.Context, l slog.Level) bool {
 }
 
 func (h *redactingHandler) Handle(ctx context.Context, r slog.Record) error {
-	return h.next.Handle(ctx, redactRecord(r))
+	next := h.next
+	for _, op := range h.ops {
+		if op.isGroup {
+			next = next.WithGroup(op.group)
+			continue
+		}
+		attrs := make([]slog.Attr, len(op.attrs))
+		for i, a := range op.attrs {
+			attrs[i] = redactValue(a)
+		}
+		next = next.WithAttrs(attrs)
+	}
+	return next.Handle(ctx, redactRecord(r))
 }
 
 func (h *redactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	out := make([]slog.Attr, len(attrs))
-	for i, a := range attrs {
-		out[i] = redactValue(a)
-	}
-	return &redactingHandler{next: h.next.WithAttrs(out)}
+	// slog takes ownership of attrs, so retain an immutable copy and defer
+	// redaction until emit time. In particular, do not bake the current secret
+	// set into the underlying handler here.
+	persistent := append([]slog.Attr(nil), attrs...)
+	ops := append([]handlerOp(nil), h.ops...)
+	ops = append(ops, handlerOp{attrs: persistent})
+	return &redactingHandler{next: h.next, ops: ops}
 }
 
 func (h *redactingHandler) WithGroup(name string) slog.Handler {
-	return &redactingHandler{next: h.next.WithGroup(name)}
+	ops := append([]handlerOp(nil), h.ops...)
+	ops = append(ops, handlerOp{group: name, isGroup: true})
+	return &redactingHandler{next: h.next, ops: ops}
 }
 
 // splitHandler routes Warn/Error to err and everything below to out. Both

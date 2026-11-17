@@ -190,6 +190,42 @@ func TestSinkRedactsEveryAttributeKind(t *testing.T) {
 	}
 }
 
+// TestSinkRedactsPersistentAttrsAtEmitTime covers logger.With attributes
+// constructed before their values become known secrets. The raw attribute is
+// retained inside a group so the test also pins slog's group semantics while
+// redaction moves from WithAttrs construction to Handle.
+func TestSinkRedactsPersistentAttrsAtEmitTime(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		format     Format
+		groupedKey string
+	}{
+		{name: "text", format: FormatText, groupedKey: "request.credential=[redacted]"},
+		{name: "json", format: FormatJSON, groupedKey: `"request":{"credential":"[redacted]"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := Install(&buf, slog.LevelInfo, c.format)
+			r := redact.NewDefault()
+			SetRedactor(r)
+			t.Cleanup(func() { SetRedactor(nil) })
+
+			const secret = "persistent-secret-42"
+			persistent := logger.WithGroup("request").With("credential", secret)
+			r.AddSecret(secret)
+			persistent.Info("credential resolved")
+
+			out := buf.String()
+			if strings.Contains(out, secret) {
+				t.Fatalf("persistent attribute leaked after secret registration: %s", out)
+			}
+			if !strings.Contains(out, c.groupedKey) {
+				t.Fatalf("masked attribute lost its slog group %q: %s", c.groupedKey, out)
+			}
+		})
+	}
+}
+
 func funcWithSecrets(secrets ...string) *redact.Redactor {
 	r := redact.NewDefault()
 	for _, s := range secrets {

@@ -18,6 +18,15 @@ redacted form at every place it surfaces.
 - **THEN** the log output shows `[redacted]` instead, in both text and JSON
   formats
 
+#### Scenario: A secret registered after a persistent log attribute
+
+- **GIVEN** a logger created with `With` or `WithGroup` before a credential
+  value is registered as secret
+- **WHEN** that logger emits a later record
+- **THEN** its persistent attributes are redacted at emit time using the
+  current secret set
+- **AND** slog group structure is preserved
+
 #### Scenario: An apply manifest persistence error
 
 - **GIVEN** the apply manifest could not be written
