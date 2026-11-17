@@ -104,7 +104,7 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 		return fmt.Errorf("prepare engine execution environment: %w", err)
 	}
 	defer executionCleanup()
-	stateEnv, resolver, rebinder, authCleanup, err := buildDriftAuth(ctx, cfg.Auth, engineCfg, authReg, executionEnv)
+	stateEnv, stateSecrets, resolver, rebinder, authCleanup, err := buildDriftAuth(ctx, cfg.Auth, engineCfg, authReg, executionEnv)
 	if err != nil {
 		return err
 	}
@@ -113,7 +113,7 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 			slog.Warn("credential cache cleanup failed", "err", err)
 		}
 	}()
-	if err := run.PulumiLogin(ctx, engineCfg, stateEnv, nil); err != nil {
+	if err := run.PulumiLogin(ctx, engineCfg, stateEnv, stateSecrets); err != nil {
 		return err
 	}
 
@@ -301,45 +301,47 @@ func runDrift(cmd *cobra.Command, bootstrap bool) error {
 	return driftExitError(cfg, out)
 }
 
-func buildDriftAuth(ctx context.Context, authCfg *schemas.Auth, engineCfg *schemas.Engine, registry *auth.Registry, executionEnv map[string]string) (map[string]string, drift.AuthResolver, drift.AuthResolver, func() error, error) {
+func buildDriftAuth(ctx context.Context, authCfg *schemas.Auth, engineCfg *schemas.Engine, registry *auth.Registry, executionEnv map[string]string) (map[string]string, map[string]struct{}, drift.AuthResolver, drift.AuthResolver, func() error, error) {
 	var source run.CredentialAcquirer
 	var cache *auth.CredentialCache
 	if registry != nil {
 		cache = auth.NewCredentialCache(registry)
 		source = cache
 	}
-	stateAuthEnv, _, stateCleanup, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, source)
+	stateAuthEnv, stateSecrets, stateCleanup, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, source)
 	if err != nil {
 		if cache != nil {
-			return nil, nil, nil, nil, errors.Join(err, cache.Close())
+			return nil, nil, nil, nil, nil, errors.Join(err, cache.Close())
 		}
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	stateEnv := mergeDriftEnv(executionEnv, stateAuthEnv)
 	var stateMu sync.RWMutex
-	resolver := func(ctx context.Context, ref string) (map[string]string, func(), error) {
-		env, _, cleanup, err := run.ResolveAuthEnvWith(ctx, authCfg, source, ref, auth.ModeDrift, run.LocalAuth{})
+	resolver := func(ctx context.Context, ref string) (map[string]string, map[string]struct{}, func(), error) {
+		env, stackSecrets, cleanup, err := run.ResolveAuthEnvWith(ctx, authCfg, source, ref, auth.ModeDrift, run.LocalAuth{})
 		if err != nil {
-			return nil, cleanup, err
+			return nil, nil, cleanup, err
 		}
 		stateMu.RLock()
 		merged := mergeDriftEnv(stateEnv, env)
+		secrets := mergeDriftSecrets(stateSecrets, stackSecrets)
 		stateMu.RUnlock()
-		return merged, cleanup, nil
+		return merged, secrets, cleanup, nil
 	}
 	rebinder := resolver
 	if cache != nil {
-		rebinder = func(ctx context.Context, ref string) (map[string]string, func(), error) {
+		rebinder = func(ctx context.Context, ref string) (map[string]string, map[string]struct{}, func(), error) {
 			if err := cache.InvalidateAll(); err != nil {
-				return nil, func() {}, err
+				return nil, nil, func() {}, err
 			}
-			refreshedStateAuth, _, releaseState, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, cache)
+			refreshedStateAuth, refreshedStateSecrets, releaseState, err := run.ResolveStateAuthEnvWith(ctx, engineCfg, cache)
 			if err != nil {
-				return nil, releaseState, err
+				return nil, nil, releaseState, err
 			}
 			releaseState()
 			stateMu.Lock()
 			stateEnv = mergeDriftEnv(executionEnv, refreshedStateAuth)
+			stateSecrets = refreshedStateSecrets
 			stateMu.Unlock()
 			return resolver(ctx, ref)
 		}
@@ -351,7 +353,17 @@ func buildDriftAuth(ctx context.Context, authCfg *schemas.Auth, engineCfg *schem
 		}
 		return nil
 	}
-	return stateEnv, resolver, rebinder, cleanup, nil
+	return stateEnv, stateSecrets, resolver, rebinder, cleanup, nil
+}
+
+func mergeDriftSecrets(sets ...map[string]struct{}) map[string]struct{} {
+	merged := map[string]struct{}{}
+	for _, set := range sets {
+		for value := range set {
+			merged[value] = struct{}{}
+		}
+	}
+	return merged
 }
 
 func mergeDriftEnv(base, override map[string]string) map[string]string {

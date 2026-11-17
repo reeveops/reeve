@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"reflect"
 	"runtime"
 	"strconv"
 	"sync"
@@ -12,13 +13,14 @@ import (
 )
 
 type cacheProvider struct {
-	name      string
-	acquires  atomic.Int32
-	cleanups  atomic.Int32
-	expiresAt time.Time
-	started   chan struct{}
-	release   chan struct{}
-	err       error
+	name          string
+	acquires      atomic.Int32
+	cleanups      atomic.Int32
+	expiresAt     time.Time
+	secretEnvKeys []string
+	started       chan struct{}
+	release       chan struct{}
+	err           error
 }
 
 func (p *cacheProvider) Name() string { return p.name }
@@ -42,10 +44,11 @@ func (p *cacheProvider) Acquire(ctx context.Context) (*Credential, error) {
 		return nil, p.err
 	}
 	return &Credential{
-		Env:       map[string]string{"TOKEN": p.name, "GENERATION": strconv.Itoa(int(acquisition))},
-		Kind:      "test",
-		Source:    p.name,
-		ExpiresAt: p.expiresAt,
+		Env:           map[string]string{"TOKEN": p.name, "GENERATION": strconv.Itoa(int(acquisition))},
+		SecretEnvKeys: p.secretEnvKeys,
+		Kind:          "test",
+		Source:        p.name,
+		ExpiresAt:     p.expiresAt,
 		Cleanup: func() error {
 			p.cleanups.Add(1)
 			return nil
@@ -91,6 +94,40 @@ func TestCredentialCacheReusesAndClones(t *testing.T) {
 	}
 	if provider.cleanups.Load() != 1 {
 		t.Fatalf("provider cleanups = %d, want 1", provider.cleanups.Load())
+	}
+}
+
+func TestCredentialCachePreservesSecretEnvKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		keys []string
+	}{
+		{name: "unclassified remains nil", keys: nil},
+		{name: "explicit empty remains non-nil", keys: []string{}},
+		{name: "classified keys survive", keys: []string{"TOKEN"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &cacheProvider{name: "shared", secretEnvKeys: tc.keys}
+			cache := cacheWithProvider(t, provider)
+			t.Cleanup(func() { _ = cache.Close() })
+			_, creds, err := cache.AcquireAll(t.Context(), []string{"shared"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(creds[0].SecretEnvKeys, tc.keys) {
+				t.Fatalf("SecretEnvKeys = %#v, want %#v", creds[0].SecretEnvKeys, tc.keys)
+			}
+			if len(tc.keys) > 0 {
+				creds[0].SecretEnvKeys[0] = "MUTATED"
+				_, second, err := cache.AcquireAll(t.Context(), []string{"shared"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(second[0].SecretEnvKeys, tc.keys) {
+					t.Fatalf("cached classification was mutated through a clone: %#v", second[0].SecretEnvKeys)
+				}
+			}
+		})
 	}
 }
 

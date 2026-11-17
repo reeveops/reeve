@@ -125,11 +125,11 @@ func TestRetryAuthExpiredRebindsOnce(t *testing.T) {
 
 	authCalls := 0
 	var lifecycle []string
-	resolver := func(context.Context, string) (map[string]string, func(), error) {
+	resolver := func(context.Context, string) (map[string]string, map[string]struct{}, func(), error) {
 		authCalls++
 		generation := authCalls
 		lifecycle = append(lifecycle, fmt.Sprintf("acquire-%d", generation))
-		return map[string]string{"AWS_SESSION_TOKEN": "tok"}, func() {
+		return map[string]string{"AWS_SESSION_TOKEN": "tok"}, nil, func() {
 			lifecycle = append(lifecycle, fmt.Sprintf("cleanup-%d", generation))
 		}, nil
 	}
@@ -157,13 +157,13 @@ func TestRetryAuthExpiredUsesRebinder(t *testing.T) {
 	t.Parallel()
 
 	resolved, rebound := 0, 0
-	resolver := func(context.Context, string) (map[string]string, func(), error) {
+	resolver := func(context.Context, string) (map[string]string, map[string]struct{}, func(), error) {
 		resolved++
-		return map[string]string{"TOKEN": "old"}, func() {}, nil
+		return map[string]string{"TOKEN": "old"}, nil, func() {}, nil
 	}
-	rebinder := func(context.Context, string) (map[string]string, func(), error) {
+	rebinder := func(context.Context, string) (map[string]string, map[string]struct{}, func(), error) {
 		rebound++
-		return map[string]string{"TOKEN": "new"}, func() {}, nil
+		return map[string]string{"TOKEN": "new"}, nil, func() {}, nil
 	}
 	eng := &scriptEngine{results: []scriptResult{
 		{res: iac.PreviewResult{Error: "ExpiredToken: the security token included in the request is expired"}},
@@ -183,8 +183,8 @@ func TestRetryCleansCredentialAfterSuccessfulCheck(t *testing.T) {
 	t.Parallel()
 
 	cleaned := 0
-	resolver := func(context.Context, string) (map[string]string, func(), error) {
-		return map[string]string{"TOKEN": "value"}, func() { cleaned++ }, nil
+	resolver := func(context.Context, string) (map[string]string, map[string]struct{}, func(), error) {
+		return map[string]string{"TOKEN": "value"}, nil, func() { cleaned++ }, nil
 	}
 	eng := &scriptEngine{results: []scriptResult{{res: iac.PreviewResult{}}}}
 	item, _ := runRetry(context.Background(), eng, 0, resolver)
@@ -200,8 +200,8 @@ func TestRetryCleansCredentialWhenResolverFails(t *testing.T) {
 	t.Parallel()
 
 	cleaned := 0
-	resolver := func(context.Context, string) (map[string]string, func(), error) {
-		return nil, func() { cleaned++ }, errors.New("credential acquisition failed")
+	resolver := func(context.Context, string) (map[string]string, map[string]struct{}, func(), error) {
+		return nil, nil, func() { cleaned++ }, errors.New("credential acquisition failed")
 	}
 	eng := &scriptEngine{results: []scriptResult{{res: iac.PreviewResult{}}}}
 	item, _ := runRetry(context.Background(), eng, 0, resolver)

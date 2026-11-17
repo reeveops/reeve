@@ -26,8 +26,11 @@ type Engine interface {
 	DriftCheck(ctx context.Context, stack discovery.Stack, opts iac.PreviewOpts, refreshFirst bool) (iac.PreviewResult, error)
 }
 
-// AuthResolver returns stack env vars and their ownership cleanup.
-type AuthResolver func(ctx context.Context, stackRef string) (map[string]string, func(), error)
+// AuthResolver returns stack env vars, the exact values to register as
+// secrets, and their ownership cleanup. A nil secret set retains the
+// fail-closed legacy behavior of registering every env value; a non-nil empty
+// set means the provider classified every value as non-secret.
+type AuthResolver func(ctx context.Context, stackRef string) (map[string]string, map[string]struct{}, func(), error)
 
 // Options configures a drift run.
 type Options struct {
@@ -397,15 +400,23 @@ func runOne(ctx context.Context, opts Options, s discovery.Stack, now time.Time)
 	for {
 		timedOut = false
 		if authResolver != nil && !haveAuth {
-			e, cleanup, err := authResolver(ctx, ref)
+			e, secrets, cleanup, err := authResolver(ctx, ref)
 			if err != nil {
 				authCleanup = cleanup
 				cleanupAuth()
 				res, checkErr = iac.PreviewResult{}, err
 			} else {
 				env, authCleanup, haveAuth = e, cleanup, true
-				for _, v := range env {
-					opts.Redactor.AddSecret(v)
+				if secrets == nil {
+					// Resolvers without a classification retain the safe legacy
+					// default. Only an explicitly empty set opts every value out.
+					for _, v := range env {
+						opts.Redactor.AddSecret(v)
+					}
+				} else {
+					for v := range secrets {
+						opts.Redactor.AddSecret(v)
+					}
 				}
 			}
 		}

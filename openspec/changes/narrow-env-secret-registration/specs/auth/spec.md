@@ -9,7 +9,10 @@ provider classification. A credential SHOULD declare `SecretEnvKeys`: the env
 variables whose values are credentials. Registration then covers exactly
 those values, keeping region, profile-name, and path values readable. A
 credential that does not classify MUST keep the fail-closed default: every
-value registered (over-redact, never under-redact).
+value registered (over-redact, never under-redact). Credential caches MUST
+preserve the classification, including the distinction between nil and an
+explicit empty set. Drift state login and per-stack drift output MUST use the
+narrowed secret sets returned by their resolvers.
 
 #### Scenario: Region and path values stay readable
 
