@@ -3,7 +3,7 @@ experimental = true
 
 [tools]
 go = "1.27.4"
-goreleaser = "latest"
+goreleaser = "2.20.1"
 # Pinned >= 2.15: this release is built with Go 1.27, so it can load
 # .golangci.yml against this repo's `go 1.27.4` directive.
 golangci-lint = "2.15.0"
