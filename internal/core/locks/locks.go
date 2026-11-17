@@ -181,6 +181,20 @@ func UnlockPR(l Lock, pr int, runID string, ttl time.Duration, now time.Time) Lo
 	return l
 }
 
+// UnlockRun removes only the holder or queue entry owned by pr+runID. Unlike
+// UnlockPR, it never removes another run's queue entry for the same PR. It is
+// for a denied run cleaning up its own reservation, including a reservation
+// promoted while that run was evaluating its other gates.
+func UnlockRun(l Lock, pr int, runID string, ttl time.Duration, now time.Time) Lock {
+	if l.Holder != nil && l.Holder.PR == pr && l.Holder.RunID == runID {
+		l.Holder = nil
+		l = promoteNext(l, now, promoteTTL(ttl))
+	}
+	l.Queue = removeRun(l.Queue, pr, runID)
+	l.UpdatedAt = now.UTC().Format(time.RFC3339)
+	return l
+}
+
 // Reap evicts an expired holder if present. Returns (lock, evicted). ttl
 // bounds the promoted holder's lease; <=0 falls back to defaultPromoteTTL.
 func Reap(l Lock, ttl time.Duration, now time.Time) (Lock, bool) {
@@ -296,6 +310,19 @@ func removePR(q []QueueItem, pr int) []QueueItem {
 	out := make([]QueueItem, 0, len(q))
 	for _, item := range q {
 		if item.PR != pr {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func removeRun(q []QueueItem, pr int, runID string) []QueueItem {
+	if len(q) == 0 {
+		return q
+	}
+	out := make([]QueueItem, 0, len(q))
+	for _, item := range q {
+		if item.PR != pr || item.RunID != runID {
 			out = append(out, item)
 		}
 	}

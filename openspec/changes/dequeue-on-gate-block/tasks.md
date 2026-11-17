@@ -4,3 +4,4 @@
 - [x] 2. Only lock-gate blocks keep the deliberate queue entry
 - [x] 3. The gate-blocked comment carries the removal note and the re-apply step; failed removals report the error
 - [x] 4. Run test: blocked PR absent from the queue; next PR promoted on holder release
+- [x] 5. Scope denied-run cleanup by PR and run id, including a holder promoted during gate evaluation

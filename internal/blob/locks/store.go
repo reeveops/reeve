@@ -232,6 +232,24 @@ func (s *Store) unlockSnapshot(ctx context.Context, key string, snapshot lockSna
 	})
 }
 
+// UnlockRun removes only the reservation owned by pr+runID. It deliberately
+// has no active-holder refusal: the caller is the denied run cleaning up its
+// own reservation, which may have been promoted while its gates were running.
+// A different run of the same PR is left untouched, in both holder and queue.
+func (s *Store) UnlockRun(ctx context.Context, project, stack string, pr int, runID string, ttl time.Duration) (corelocks.Lock, error) {
+	l, etag, err := s.Get(ctx, project, stack)
+	if err != nil {
+		return corelocks.Lock{}, err
+	}
+	l, _, err = s.maintain(ctx, s.key(project, stack), lockSnapshot{lock: l, etag: etag}, func(cur corelocks.Lock) (corelocks.Lock, bool, error) {
+		next := corelocks.UnlockRun(cur, pr, runID, ttl, s.Now())
+		sameHolder := cur.Holder == nil && next.Holder == nil ||
+			cur.Holder != nil && next.Holder != nil && *cur.Holder == *next.Holder
+		return next, !sameHolder || !slices.Equal(cur.Queue, next.Queue), nil
+	})
+	return l, err
+}
+
 // UnlockPRAll removes pr from holder/queue across every stored lock.
 // Returns the number of locks the pr was removed from plus the
 // "project/stack" refs that were SKIPPED because the pr holds them with

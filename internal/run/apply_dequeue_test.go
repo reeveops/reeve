@@ -2,10 +2,12 @@ package run
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
 	"github.com/reeveops/reeve/internal/core/discovery"
@@ -116,6 +118,89 @@ func TestGateBlockedPrLeavesQueue(t *testing.T) {
 	l, _, _ = ls.Get(ctx, "api", "prod")
 	if l.Holder == nil || l.Holder.PR != 19 {
 		t.Fatalf("next queued PR must be promoted on release: holder=%+v", l.Holder)
+	}
+}
+
+// promoteOnQueueWriteStore simulates the holder releasing immediately after
+// this run's queue CAS lands and before gate evaluation finishes. The release
+// uses the inner store to avoid recursively entering the wrapper.
+type promoteOnQueueWriteStore struct {
+	blob.Store
+	inner    blob.Store
+	promoted bool
+	err      error
+}
+
+func (s *promoteOnQueueWriteStore) PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch string) (*blob.Metadata, error) {
+	md, err := s.Store.PutIfMatch(ctx, key, r, ifMatch)
+	if err == nil && !s.promoted && key == "locks/api/prod.json" {
+		s.promoted = true
+		_, s.err = blocks.New(s.inner).Release(ctx, "api", "prod", 501, "holder-run", time.Hour)
+	}
+	return md, err
+}
+
+// TestGateDeniedRunPromotedDuringEvaluationLeavesLock is the deterministic
+// promotion race: this run queues, the old holder releases before the approvals
+// denial is handled, and the denied run is now an active promoted holder. Its
+// own reservation must still be removed; the next legitimate PR takes the lock.
+func TestGateDeniedRunPromotedDuringEvaluationLeavesLock(t *testing.T) {
+	ctx := context.Background()
+	inner, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls := blocks.New(inner)
+	seedQueuedStack(t, ls, 501, []int{19})
+	store := &promoteOnQueueWriteStore{Store: inner, inner: inner}
+	engine := &bgEngine{enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"}}}
+	fv := &bgVCS{changed: []string{"projects/api/main.ts"}, headSHA: bgSHA}
+	in := plainApplyInput(t, engine, fv, store)
+	fv.approvalsList = nil // deterministic non-lock denial after the queue write
+
+	out, err := Apply(ctx, in)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !out.Blocked {
+		t.Fatalf("the approvals denial must block the run: %+v", out)
+	}
+	if !store.promoted || store.err != nil {
+		t.Fatalf("fixture must promote the denied run during evaluation: promoted=%v err=%v", store.promoted, store.err)
+	}
+	var denied *summary.StackSummary
+	for i := range out.Stacks {
+		if out.Stacks[i].Ref() == "api/prod" {
+			denied = &out.Stacks[i]
+		}
+	}
+	if denied == nil || denied.Status != summary.StatusBlocked {
+		t.Fatalf("api/prod must be the denied stack: %+v", out.Stacks)
+	}
+	approvalDenied := false
+	for _, gate := range denied.Gates {
+		if gate.Gate == "approvals" && gate.Outcome == "fail" && strings.TrimSpace(gate.Reason) != "" {
+			approvalDenied = true
+		}
+	}
+	if !approvalDenied {
+		t.Fatalf("the test must assert the approvals denial and its reason: %+v", denied.Gates)
+	}
+
+	l, _, err := ls.Get(ctx, "api", "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Holder == nil || l.Holder.PR != 19 || l.Holder.RunID != "next-run" {
+		t.Fatalf("the denied run must release its promoted holder to PR 19: holder=%+v queue=%+v", l.Holder, l.Queue)
+	}
+	for _, q := range l.Queue {
+		if q.PR == 18 && q.RunID == out.RunID {
+			t.Fatalf("the denied run's queue entry survived: %+v", l.Queue)
+		}
+	}
+	if want := "Removed from the lock queue for api/prod; re-run `/reeve apply` once the gates pass."; !strings.Contains(fv.allComments(), want) {
+		t.Fatalf("the denied run must report removal and the next step %q:\n%s", want, fv.allComments())
 	}
 }
 

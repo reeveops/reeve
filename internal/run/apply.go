@@ -746,8 +746,11 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			} else if otherGateFailed && in.Locks != nil {
 				// Blocked by non-lock gates while queued: the reservation
 				// can never be used (its gates will fail again), so remove
-				// the queue entry the lock attempt created.
-				_, derr := in.Locks.UnlockPR(ctx, s.Project, s.Name, in.PRNumber, runID, ttl, false)
+				// the entry the lock attempt created. It may already have been
+				// promoted while the other gates ran; UnlockRun clears this run's
+				// own holder or queue entry without an active-lease refusal and
+				// without touching a different run of the same PR.
+				_, derr := in.Locks.UnlockRun(ctx, s.Project, s.Name, in.PRNumber, runID, ttl)
 				dequeueNote := ""
 				if derr != nil {
 					// Fail loud, not silent: the queue entry is still there
