@@ -96,6 +96,47 @@ func TestApplyFailedStackSetsFailedOutput(t *testing.T) {
 	}
 }
 
+func TestApplyRedactsFailingCheckNamesInGateAndComment(t *testing.T) {
+	ctx := context.Background()
+	engine := &failEngine{bgEngine: bgEngine{enum: []discovery.Stack{{Project: "api", Path: "projects/api", Name: "prod", Env: "prod"}}}}
+	secret := "ghp_" + strings.Repeat("A", 36)
+	fv := &bgVCS{
+		changed:       []string{"projects/api/main.ts"},
+		headSHA:       bgSHA,
+		failingChecks: []string{"credential-scan/" + secret + " failed"},
+	}
+	store, _ := filesystem.New(t.TempDir())
+	in := plainApplyInput(t, engine, fv, store)
+	requireChecks := true
+	in.Shared.Preconditions.RequireChecksPassing = &requireChecks
+
+	out, err := Apply(ctx, in)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !out.Blocked || len(engine.applied) != 0 {
+		t.Fatalf("failing checks must block before apply: output=%+v applied=%v", out, engine.applied)
+	}
+	var gateReason string
+	for _, g := range out.Stacks[0].Gates {
+		if g.Gate == "checks_green" {
+			gateReason = g.Reason
+		}
+	}
+	for sink, text := range map[string]string{
+		"gate reason":            gateReason,
+		"returned apply comment": out.CommentBody,
+		"posted apply comment":   fv.allComments(),
+	} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("credential-shaped check name leaked into %s: %s", sink, text)
+		}
+		if !strings.Contains(text, "credential-scan/[redacted] failed") {
+			t.Fatalf("%s lost the masked check detail: %s", sink, text)
+		}
+	}
+}
+
 func TestApplyCleanRunNotFailed(t *testing.T) {
 	ctx := context.Background()
 	engine := &failEngine{

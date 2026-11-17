@@ -2,6 +2,7 @@ package preconditions
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -351,5 +352,32 @@ func TestEvaluateAllMatchesEvaluateWhenClean(t *testing.T) {
 	}
 	if !reflect.DeepEqual(a.Gates, b.Gates) {
 		t.Fatalf("clean run: traces should match exactly (order and outcomes),\nEvaluate:    %+v\nEvaluateAll: %+v", a.Gates, b.Gates)
+	}
+}
+
+// TestChecksFailuresSurfaceInGateReason pins the fail-with-why half of the
+// required-checks gate: the failing-check detail (and the zero-evidence
+// refusal) becomes the gate reason the reviewer sees, not a bare "not
+// passing".
+func TestChecksFailuresSurfaceInGateReason(t *testing.T) {
+	cfg := Config{RequireChecksPassing: true}
+	in := Inputs{
+		ChecksGreen:        false,
+		ChecksFailures:     []string{"Required checks: no check runs found on abc1234. Zero checks is not treated as passing. Wait for CI, or set preconditions.allow_zero_checks if this repo has no other checks."},
+		PreviewSucceeded:   true,
+		ApprovalsSatisfied: true,
+		LockAcquirable:     true,
+	}
+	res := Evaluate(cfg, in)
+	if !res.Blocked {
+		t.Fatal("zero-evidence checks must deny the apply")
+	}
+	g, _ := gateFor(res, GateChecksGreen)
+	if g.Outcome != OutcomeFail {
+		t.Fatalf("checks gate should fail: %+v", g)
+	}
+	if !strings.Contains(g.Reason, "no check runs found on abc1234") ||
+		!strings.Contains(g.Reason, "preconditions.allow_zero_checks") {
+		t.Fatalf("gate reason must carry the full refusal: %+v", g)
 	}
 }

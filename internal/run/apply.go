@@ -102,6 +102,11 @@ type ApplyInput struct {
 	// one thing a locked plan forbids - so requesting it turns locking off
 	// for this run and says so on the timeline.
 	Refresh bool
+	// AllowZeroChecks overrides the preconditions allow_zero_checks opt-out
+	// from the CLI: zero observed checks pass the required-checks gate.
+	// Config (shared.yaml) opts in per repository; the flag is the action's
+	// equivalent knob.
+	AllowZeroChecks bool
 	// CommentApproval configures the opt-in pr_comment approval source
 	// (approvals.sources). It carries the command prefixes and
 	// author_association allowlist from the action inputs so the source can
@@ -356,9 +361,17 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 	}
 
 	// 2. Per-stack context: PR + checks + upstream-commits + approvals + CODEOWNERS.
+	preCfg := toPreconditionsConfig(in.Shared)
 	gi, err := gatherGateInputs(ctx, in.VCS, in.Shared, in.CommentApproval,
 		in.PRNumber, pr, in.CommitSHA, changed,
-		vcs.ChecksGreenOpts{IgnoreRunID: in.CIRunID, IgnoreNames: in.SelfCheckNames})
+		vcs.ChecksGreenOpts{
+			IgnoreRunID: in.CIRunID,
+			IgnoreNames: in.SelfCheckNames,
+			// Config opt-out OR the CLI override: zero observed checks is
+			// a denial unless this repository declares it has no other
+			// checks.
+			AllowZeroChecks: preCfg.AllowZeroChecks || in.AllowZeroChecks,
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +393,6 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 
 	// Freeze config.
 	freezeCfg := toFreezeConfig(in.Shared)
-	preCfg := toPreconditionsConfig(in.Shared)
 	ttl := LockTTL(in.Shared)
 
 	// Pre-resolve team-slug membership once for every stack we're about to
@@ -669,6 +681,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			UpToDate:           upToDate,
 			CommitsBehind:      behind,
 			ChecksGreen:        checksGreen,
+			ChecksFailures:     gi.FailingChecks,
 			HasFreshPreview:    prev.Found,
 			PreviewAge:         prev.Age,
 			PreviewSucceeded:   prev.Succeeded,

@@ -75,6 +75,17 @@ func gatherGateInputs(
 	g := &gateInputs{}
 
 	g.ChecksGreen, g.FailingChecks, g.ChecksErr = v.ChecksGreen(ctx, commitSHA, checksOpts)
+	// Check names and status contexts are external text that flow into gate
+	// reasons, logs, and PR comments. Redact at this shared run-layer seam,
+	// before any of those sinks consume them.
+	if g.FailingChecks != nil {
+		redactor := BuildRedactor(shared)
+		redacted := make([]string, len(g.FailingChecks))
+		for i, failure := range g.FailingChecks {
+			redacted[i] = redactor.Redact(failure)
+		}
+		g.FailingChecks = redacted
+	}
 	if g.ChecksErr != nil {
 		g.ChecksGreen = false // fail closed even if the caller ignores the error
 	} else if !g.ChecksGreen {
