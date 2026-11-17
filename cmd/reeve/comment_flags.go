@@ -39,7 +39,14 @@ func addCommentFlags(cmd *cobra.Command) {
 		"How a continued board splits: divided (default) | stack | group. Overrides comments.overflow.split.")
 	f.Int("comment-overflow-max-parts", 0,
 		"Maximum comments one board may occupy. Overrides comments.overflow.max_parts.")
-	f.String("comment-author", "",
+	addCommentAuthorFlag(cmd)
+}
+
+// addCommentAuthorFlag is shared by board commands and the simpler PR comment
+// commands (ready, pr-help, explain), which need author identity but none of
+// the stack-table rendering options.
+func addCommentAuthorFlag(cmd *cobra.Command) {
+	cmd.Flags().String("comment-author", "",
 		"The login the GitHub API token writes comments as (e.g. reeve-bot[bot] for a GitHub App installation token). Overrides comments.author; bypasses /user identity resolution where it is unavailable.")
 }
 

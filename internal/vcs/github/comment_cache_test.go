@@ -289,6 +289,37 @@ func TestUpsertCommentEditsOnlyOwnComment(t *testing.T) {
 	}
 }
 
+func TestUpsertCommentAuthorComparisonIsCaseInsensitive(t *testing.T) {
+	var edits, creates int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/o/r/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `[{"id":1,"user":{"login":"Reeve-Bot[bot]"},"body":"<!-- marker:case -->"}]`)
+		case http.MethodPost:
+			creates++
+			fmt.Fprint(w, `{"id":2,"user":{"login":"reeve-bot[bot]"},"body":"duplicate"}`)
+		default:
+			t.Fatalf("method = %s", r.Method)
+		}
+	})
+	mux.HandleFunc("/repos/o/r/issues/comments/1", func(w http.ResponseWriter, _ *http.Request) {
+		edits++
+		fmt.Fprint(w, `{"id":1,"user":{"login":"Reeve-Bot[bot]"},"body":"<!-- marker:case --> updated"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Setenv("REEVE_COMMENT_AUTHOR", "reeve-bot[bot]")
+	c := newAuthorClient(t, srv)
+
+	if err := c.UpsertComment(context.Background(), 12, "<!-- marker:case --> updated", "<!-- marker:case -->"); err != nil {
+		t.Fatal(err)
+	}
+	if edits != 1 || creates != 0 {
+		t.Fatalf("case-insensitive own author: edits=%d creates=%d, want 1 and 0", edits, creates)
+	}
+}
+
 // TestUpsertCommentIdentityFailureFailsClosed: when the token's identity
 // cannot be established, the upsert must not touch any comment - neither
 // editing nor creating - instead of guessing which comments are reeve's.

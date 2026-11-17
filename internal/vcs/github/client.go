@@ -200,7 +200,7 @@ func (c *Client) upsertCommentLocked(ctx context.Context, number int, body, mark
 		if !strings.Contains(cm.GetBody(), marker) {
 			continue
 		}
-		if login := cm.GetUser().GetLogin(); login != author {
+		if login := cm.GetUser().GetLogin(); !strings.EqualFold(login, author) {
 			slog.Warn("marker comment belongs to another author; leaving it alone",
 				"author", login, "marker", marker, "pr", number)
 			continue

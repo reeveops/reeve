@@ -5,9 +5,11 @@
 ### Requirement: Comment upserts edit only reeve's own comments
 
 A marker-based comment upsert MUST edit a comment only when the comment's
-author is the account whose token the adapter authenticates as. A comment by
-another author that contains the marker MUST be left alone, logged with its
-author, and answered by creating reeve's own comment.
+author is the account whose token the adapter authenticates as. Login
+comparison MUST be case-insensitive because GitHub logins are
+case-insensitive. A comment by another author that contains the marker MUST be
+left alone, logged with its author, and answered by creating reeve's own
+comment.
 
 The token identity is resolved in this precedence, highest first:
 
@@ -22,6 +24,10 @@ The token identity is resolved in this precedence, highest first:
 The adapter MUST NOT guess an identity. When none of these resolve, the
 upsert MUST fail closed: no comment is edited or created, and the failure
 MUST be typed and name the setting that fixes it.
+
+Every command that constructs a GitHub client for PR comments, including
+`ready`, `pr-help`, and `explain`, MUST apply the operator setting before
+client construction so the precedence above is honored.
 
 #### Scenario: A foreign comment quoting the marker
 
@@ -55,3 +61,17 @@ MUST be typed and name the setting that fixes it.
   failing `/user`
 - **THEN** upserts match against the declared author in both cases and
   `/user` is not consulted
+
+#### Scenario: GitHub returns a different login case
+
+- **GIVEN** the declared or resolved author is `reeve-bot[bot]`
+- **AND** the existing marker comment's author is `Reeve-Bot[bot]`
+- **WHEN** the adapter upserts that marker
+- **THEN** it edits the existing comment rather than creating a duplicate
+
+#### Scenario: A PR command loads the operator setting
+
+- **GIVEN** `comments.author` in config or a `--comment-author` flag
+- **WHEN** `ready`, `pr-help`, or `explain` constructs its GitHub client
+- **THEN** the client receives the configured author, with the flag winning
+  over config, before any default-token or `/user` resolution

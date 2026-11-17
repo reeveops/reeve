@@ -48,3 +48,9 @@ resolve through `/user` and refuse with the typed error on failure. The
 unused `SetCommentAuthor` was removed; the operator setting threads through
 the shared flag seam (`REEVE_COMMENT_AUTHOR`), with precedence operator
 setting > default-token author > `/user`.
+
+**Third-round follow-up:** `ready`, `pr-help`, and `explain` now register
+`--comment-author` and apply config/flag overrides before constructing the
+GitHub client through one shared helper. Upsert author matching uses
+case-insensitive login comparison, matching deletion and GitHub's login
+semantics, so case-only differences do not create duplicate boards.
