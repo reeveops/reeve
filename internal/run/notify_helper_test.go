@@ -25,7 +25,7 @@ func TestPulumiLoginUsesExplicitEnvAndRedactsFailure(t *testing.T) {
 	}}
 	err := PulumiLogin(context.Background(), cfg, map[string]string{
 		"HOME": home, "PULUMI_ACCESS_TOKEN": "state-secret-token",
-	})
+	}, map[string]struct{}{"state-secret-token": {}})
 	if err == nil {
 		t.Fatal("expected fake login failure")
 	}

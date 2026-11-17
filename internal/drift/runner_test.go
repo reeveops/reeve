@@ -39,6 +39,28 @@ func runOneWith(engine Engine, mode string) (Item, Event) {
 	return item, ev
 }
 
+// TestRunOneUsesNarrowAuthSecretSet verifies that drift registers the
+// resolver's classified secrets rather than masking every environment value.
+func TestRunOneUsesNarrowAuthSecretSet(t *testing.T) {
+	const token = "drift-token-secret-42"
+	const region = "us-east-1"
+	opts := Options{
+		Engine:   fakeEngine{err: errors.New("credentials " + token + " region " + region)},
+		Redactor: redact.New(),
+		AuthResolver: func(context.Context, string) (map[string]string, map[string]struct{}, func(), error) {
+			return map[string]string{"TOKEN": token, "AWS_REGION": region},
+				map[string]struct{}{token: {}}, func() {}, nil
+		},
+	}
+	item, _, _, _ := runOne(t.Context(), opts, discovery.Stack{Project: "p", Name: "s"}, time.Now())
+	if strings.Contains(item.Error, token) || !strings.Contains(item.Error, "[redacted]") {
+		t.Fatalf("classified token was not masked: %q", item.Error)
+	}
+	if !strings.Contains(item.Error, region) {
+		t.Fatalf("non-secret region must stay readable: %q", item.Error)
+	}
+}
+
 // TestRunOneFailedCheckIsNotNoDrift is the regression for the critical
 // false-resolve: a DriftCheck that fails (non-nil error, empty result) must
 // classify as an error / check_failed, never as no_drift - otherwise an

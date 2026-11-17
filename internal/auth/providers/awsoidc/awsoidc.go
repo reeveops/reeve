@@ -99,10 +99,13 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 		env["AWS_DEFAULT_REGION"] = p.region
 	}
 	return &auth.Credential{
-		Env:       env,
-		Kind:      "aws-sts",
-		Source:    p.name,
-		ExpiresAt: aws.ToTime(out.Credentials.Expiration),
+		Env: env,
+		// The three STS values are credentials; region values are
+		// operator-meaningful and stay readable in engine output.
+		SecretEnvKeys: []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"},
+		Kind:          "aws-sts",
+		Source:        p.name,
+		ExpiresAt:     aws.ToTime(out.Credentials.Expiration),
 	}, nil
 }
 

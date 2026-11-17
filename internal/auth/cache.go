@@ -196,11 +196,18 @@ func cloneCredential(credential *Credential) *Credential {
 	for key, value := range credential.Env {
 		env[key] = value
 	}
+	var secretEnvKeys []string
+	if credential.SecretEnvKeys != nil {
+		// Preserve a non-nil empty classification: it means no env values are
+		// secrets, whereas nil deliberately retains the all-secret default.
+		secretEnvKeys = append([]string{}, credential.SecretEnvKeys...)
+	}
 	return &Credential{
-		Env:       env,
-		Kind:      credential.Kind,
-		Source:    credential.Source,
-		ExpiresAt: credential.ExpiresAt,
+		Env:           env,
+		SecretEnvKeys: secretEnvKeys,
+		Kind:          credential.Kind,
+		Source:        credential.Source,
+		ExpiresAt:     credential.ExpiresAt,
 	}
 }
 

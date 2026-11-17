@@ -12,6 +12,17 @@ import (
 type Credential struct {
 	// Env vars to set for the engine process.
 	Env map[string]string
+	// SecretEnvKeys names the env vars whose VALUES are credentials. The
+	// redaction registry masks only these values, so region and path
+	// values stay readable in engine output.
+	//
+	// nil (unset) means every value in Env is a secret - the fail-closed
+	// default for providers whose values are all credentials (secret
+	// managers, env passthrough). A provider classifying explicitly opts
+	// the REST of its keys out; an explicitly empty slice means no value
+	// is a credential (profile names, region values, credential file
+	// paths).
+	SecretEnvKeys []string
 	// Kind describes the credential shape for display / lint.
 	Kind string
 	// Source is the provider name that produced this credential.

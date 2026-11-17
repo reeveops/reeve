@@ -67,7 +67,11 @@ func (p *Provider) Acquire(ctx context.Context) (*auth.Credential, error) {
 		"AZURE_USE_OIDC":        "true",
 	}
 	return &auth.Credential{
-		Env: env, Kind: "azure-aad", Source: p.name, ExpiresAt: expiresAt,
+		Env: env,
+		// The two access tokens are credentials; tenant/client/subscription
+		// IDs identify the principal and stay readable in output.
+		SecretEnvKeys: []string{"AZURE_ACCESS_TOKEN", "ARM_ACCESS_TOKEN"},
+		Kind:          "azure-aad", Source: p.name, ExpiresAt: expiresAt,
 	}, nil
 }
 

@@ -545,6 +545,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}()
 	}
 	stateEnv := executionEnv
+	var stateSecrets map[string]struct{}
 
 	// Plan locking is on when config asks for it AND the engine can execute
 	// a saved plan AND there is a bucket to have stored one in. Resolved
@@ -732,7 +733,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 		}
 
 		if !stateAuthAcquired {
-			resolvedStateEnv, stateCleanup, stateErr := resolveStateAuthEnv(ctx, in.Config, credentialSource)
+			resolvedStateEnv, resolvedStateSecrets, stateCleanup, stateErr := resolveStateAuthEnv(ctx, in.Config, credentialSource)
 			if stateErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(stateErr.Error())
@@ -742,10 +743,11 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			}
 			defer stateCleanup()
 			stateEnv = mergeEnv(executionEnv, resolvedStateEnv)
+			stateSecrets = resolvedStateSecrets
 			stateAuthAcquired = true
 		}
 		if !pulumiLoginDone {
-			if loginErr := PulumiLogin(ctx, in.Config, stateEnv); loginErr != nil {
+			if loginErr := PulumiLogin(ctx, in.Config, stateEnv, stateSecrets); loginErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(loginErr.Error())
 				releaseLockOrLog(ctx, in.Locks, s.Project, s.Name, in.PRNumber, runID, ttl, "state login failed")
@@ -757,7 +759,7 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 
 		// Gates green: resolve the stack credentials and run apply. The
 		// invocation cache retains provider ownership until every stack exits.
-		authEnv, authCleanup, aerr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModeApply, LocalAuth{})
+		authEnv, authSecrets, authCleanup, aerr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModeApply, LocalAuth{})
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())
@@ -766,7 +768,12 @@ func Apply(ctx context.Context, in ApplyInput) (out *ApplyOutput, retErr error) 
 			continue
 		}
 		authEnv = mergeEnv(stateEnv, authEnv)
-		for _, v := range authEnv {
+		// Register only provider-marked secret VALUES (narrow registration):
+		// region and path values stay readable in engine output.
+		for v := range authSecrets {
+			redactor.AddSecret(v)
+		}
+		for v := range stateSecrets {
 			redactor.AddSecret(v)
 		}
 

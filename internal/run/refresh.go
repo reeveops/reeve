@@ -179,7 +179,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			}
 		}()
 	}
-	stateEnv, stateCleanup, err := resolveStateAuthEnv(ctx, in.Config, credentialSource)
+	stateEnv, stateSecrets, stateCleanup, err := resolveStateAuthEnv(ctx, in.Config, credentialSource)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +260,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 
 		redactor := BuildRedactor(in.Shared)
 		if !pulumiLoginDone {
-			if loginErr := PulumiLogin(ctx, in.Config, stateEnv); loginErr != nil {
+			if loginErr := PulumiLogin(ctx, in.Config, stateEnv, stateSecrets); loginErr != nil {
 				ss.Status = summary.StatusError
 				ss.Error = redactor.Redact(loginErr.Error())
 				anyFailed = true
@@ -274,7 +274,7 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 		}
 		// ModeApply: a refresh writes state, so it needs write credentials,
 		// not the read-only preview role.
-		authEnv, authCleanup, aerr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModeApply, LocalAuth{})
+		authEnv, authSecrets, authCleanup, aerr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModeApply, LocalAuth{})
 		if aerr != nil {
 			ss.Status = summary.StatusError
 			ss.Error = redactor.Redact(aerr.Error())
@@ -286,7 +286,12 @@ func Refresh(ctx context.Context, in RefreshInput) (*RefreshOutput, error) {
 			continue
 		}
 		authEnv = mergeEnv(stateEnv, authEnv)
-		for _, v := range authEnv {
+		// Register only provider-marked secret VALUES: region and path
+		// values stay readable in engine output.
+		for v := range authSecrets {
+			redactor.AddSecret(v)
+		}
+		for v := range stateSecrets {
 			redactor.AddSecret(v)
 		}
 

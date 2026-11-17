@@ -55,6 +55,8 @@ func (p *AWSSecretsManager) Acquire(ctx context.Context) (*auth.Credential, erro
 		ttl = time.Hour
 	}
 	return &auth.Credential{
+		// Secret-manager values are credentials by construction: the nil
+		// SecretEnvKeys default registers all of them for redaction.
 		Env: env, Kind: "aws-secret", Source: p.Name,
 		ExpiresAt: time.Now().Add(ttl),
 	}, nil
