@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Fetch a prebuilt reeve binary so the GitHub Action can skip the source
-# build. Called by action.yml on a cache miss; never fails the job - every
-# error path logs why and reports fetched=false so the action falls back to
-# building from source.
+# build. Verification failures log why and report fetched=false for a source
+# build fallback. The sole hard failure is an archive digest mismatch against
+# live, signature-verified checksums.
 #
 # Ref semantics (the wrapper's action ref or reusable workflow SHA):
 #   vX.Y.Z[-pre]  -> that release's goreleaser tarball, verified against the
@@ -146,8 +146,8 @@ verify_signature() {
 #
 # Verification is MANDATORY and against the LIVE signed checksums:
 #   1. checksums.txt and its cosign bundle are fetched fresh each run and
-#      the signature verified - a failure here fails the run (exit 1, the
-#      reason on stderr); nothing unverified is consumed.
+#      the signature verified - a failure here falls back to source with the
+#      reason; nothing unverified is consumed.
 #   2. the archive - cached from an earlier run or downloaded fresh - MUST
 #      digest-match the verified checksums. A mismatch fails the run with
 #      the expected digest, the actual digest, and the cache key. No silent
@@ -250,12 +250,14 @@ fetch_main() {
   esac
 
   sums_dir="$workdir"
-  local expected actual sums_log asset_log cached_file
+  local expected actual sums_log asset_log cached_file cache_tag
   # The cache stores one archive per RESOLVED release tag: an archive cached
   # for a different tag (edge resolves a new prerelease for the same source
   # hash) is a cache MISS, never a mismatch. Only a mismatch for the same
-  # tag is the hard tamper failure.
-  cached_file="$archive_dir/$(printf '%s' "$tag" | sed 's|[^A-Za-z0-9._-]|_|g').tar.gz"
+  # tag is the hard tamper failure. The sanitized tag also becomes the
+  # immutable cache key suffix in action.yml.
+  cache_tag=$(printf '%s' "$tag" | sed 's|[^A-Za-z0-9._-]|_|g')
+  cached_file="$archive_dir/$cache_tag.tar.gz"
 
   # 1. LIVE checksums + bundle, every run. Nothing is consumed without
   # them. Their fetch failure is a SOFT fallback stating the reason (gh's
@@ -340,11 +342,15 @@ fetch_main() {
     return 0
   fi
   # A freshly downloaded archive that verified and executes is stored for
-  # the next run, under the resolved release tag. Source builds are never
-  # cached - only this verified-download path writes the cache.
+  # the next run, under the resolved release tag. Tell the action to save it
+  # under that tag's immutable key even when this restore supplied an older
+  # tag. Source builds are never cached - only this verified-download path
+  # writes the cache.
   if [[ "$source_archive" != "$cached_file" && -n "$archive_dir" ]]; then
     mkdir -p "$archive_dir"
     cp "$source_archive" "$cached_file"
+    echo "resolved-tag=$cache_tag" >> "$out"
+    echo "cache-save=true" >> "$out"
   fi
   echo "Using prebuilt binary: $("$dest" --version)"
   echo "fetched=true" >> "$out"

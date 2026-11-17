@@ -12,8 +12,9 @@ branding:
 #                         release's checksums.txt (signed release pipeline).
 #        @master/@next -> the source-matched per-push prerelease.
 #        @<full SHA>   -> that commit's retained per-push prerelease.
-#   3. Other refs, unavailable assets, or any verification failure build from
-#      source (~30s on the first miss).
+#   3. Other refs, unavailable assets, or soft verification failures build
+#      from source (~30s on the first miss). A digest mismatch against live,
+#      signed checksums is the only hard verification failure.
 
 inputs:
   source-ref:
@@ -163,18 +164,20 @@ runs:
         echo "root=$action_root" >> "$GITHUB_OUTPUT"
         echo "hash=$("$action_root/.github/scripts/source-hash.sh" "$action_root")" >> "$GITHUB_OUTPUT"
 
-    # The cache holds the VERIFIED download archive, never an extracted
-    # binary: every run re-verifies the archive against the LIVE signed
-    # checksums before anything is extracted, so a poisoned cache entry
-    # cannot carry a matching sidecar - a forgery would have to match the
-    # release's real signature.
+    # The cache holds VERIFIED download archives, never an extracted binary:
+    # every run re-verifies the selected archive against LIVE signed checksums
+    # before extraction. The restore prefix selects the latest per-tag entry;
+    # the never-saved -restore primary key keeps cache-hit from suppressing a
+    # later immutable save when the resolver selects a new tag.
     - name: Restore reeve asset cache
       id: reeve-cache
       if: steps.reeve-dispatch.outputs.run == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/reeve-asset
-        key: reeve-asset-v1-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}
+        key: reeve-asset-v2-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}-restore
+        restore-keys: |
+          reeve-asset-v2-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}-
 
     # On every run, resolve a prebuilt binary before reaching for the Go
     # toolchain (see the NOTE at the top for the ref semantics). This runs on
@@ -182,10 +185,11 @@ runs:
     # signed checksums each time before anything is extracted. Selector
     # problems (missing release, unsupported ref, wrong action source) log a
     # reason and report fetched=false, which re-enables the source-build
-    # steps below. Verification failures - checksums or signature that
-    # cannot be fetched or verified, a digest mismatch on the cached or
-    # fresh archive - FAIL the run: nothing unverified is consumed (see
-    # fetch-binary.sh).
+    # steps below. Checksum/signature fetch or verification failures, missing
+    # cosign, wrong-source artifacts, and non-executable binaries soft-fallback
+    # with their reasons. Only a cached or fresh archive digest mismatch against
+    # verified signed checksums FAILS the run; nothing unverified is consumed
+    # (see fetch-binary.sh).
     - name: Classify prebuilt binary eligibility
       id: reeve-binary
       if: steps.reeve-dispatch.outputs.run == 'true'
@@ -257,15 +261,16 @@ runs:
           -o "$RUNNER_TEMP/reeve-bin/reeve" ./cmd/reeve
       working-directory: ${{ steps.reeve-hash.outputs.root }}
 
-    # The cache save is skipped on a cache hit: the archive in place was
-    # already verified when it was first stored, and this run verified it
-    # again before extracting.
+    # Save only a freshly downloaded archive that verified and executed. Its
+    # resolved tag is part of an immutable key, so a restore containing tag A
+    # followed by resolution to B saves B instead of skipping on cache-hit or
+    # trying to overwrite A. Source builds never set cache-save=true.
     - name: Save reeve asset cache
-      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-cache.outputs.cache-hit != 'true' && steps.reeve-fetch.outputs.fetched == 'true'
+      if: steps.reeve-dispatch.outputs.run == 'true' && steps.reeve-fetch.outputs.fetched == 'true' && steps.reeve-fetch.outputs.cache-save == 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/reeve-asset
-        key: reeve-asset-v1-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}
+        key: reeve-asset-v2-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}-${{ steps.reeve-fetch.outputs.resolved-tag }}
 
     - name: Add reeve to PATH
       if: steps.reeve-dispatch.outputs.run == 'true'

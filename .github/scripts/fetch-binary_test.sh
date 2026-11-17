@@ -184,7 +184,9 @@ mkdir -p "$good_cached_dir"
 # resolved release tag.
 REEVE_ARCHIVE_DIR="$good_cached_dir"
 cold_dir=$(run_fetch cold-hit "$commit_ref" "$good_fixture")
-assert_eq "$(cat "$cold_dir/output")" fetched=true
+assert_contains "$(cat "$cold_dir/output")" "fetched=true"
+assert_contains "$(cat "$cold_dir/output")" "resolved-tag=fake-release"
+assert_contains "$(cat "$cold_dir/output")" "cache-save=true"
 [[ -x "$cold_dir/reeve" ]] || fail "cold hit did not install an executable"
 assert_contains "$(cat "$cold_dir/log")" "Using prebuilt binary: reeve fixture"
 assert_contains "$(cat "$cold_dir/cosign.calls")" "verify-blob"
@@ -197,6 +199,9 @@ cached_dir=$(run_fetch cache-hit "$commit_ref" "$good_fixture")
 unset REEVE_ARCHIVE_DIR REEVE_CACHE_KEY
 assert_eq "$(cat "$cached_dir/output")" fetched=true
 [[ -x "$cached_dir/reeve" ]] || fail "cache hit did not install an executable"
+if grep -q 'cache-save=true' "$cached_dir/output"; then
+  fail "an already cached tag must not request an immutable-key overwrite"
+fi
 assert_contains "$(cat "$cached_dir/log")" "Using cached prebuilt archive for fake-release"
 if grep -q "release download fake-release --repo reeveops/reeve --pattern reeve_linux_amd64.tar.gz" "$cached_dir/gh.calls"; then
   fail "cache hit must not re-download the release asset"
@@ -347,8 +352,14 @@ GH_FAKE_TAG2=master-bbbb
 GH_FAKE_FIXTURE2="$edgeB_fixture"
 edge_b_dir=$(run_fetch edge-tag-b master "$edgeA_fixture")
 unset GH_FAKE_API_TAG GH_FAKE_TAG2 GH_FAKE_FIXTURE2 REEVE_ARCHIVE_DIR
-assert_eq "$(cat "$edge_a_dir/output")" fetched=true
-assert_eq "$(cat "$edge_b_dir/output")" fetched=true
+assert_contains "$(cat "$edge_a_dir/output")" "fetched=true"
+assert_contains "$(cat "$edge_a_dir/output")" "resolved-tag=master-aaaa"
+assert_contains "$(cat "$edge_a_dir/output")" "cache-save=true"
+assert_contains "$(cat "$edge_b_dir/output")" "fetched=true"
+# Tag A was restored in the same directory, but the fresh B download still
+# requests a save under B's immutable key.
+assert_contains "$(cat "$edge_b_dir/output")" "resolved-tag=master-bbbb"
+assert_contains "$(cat "$edge_b_dir/output")" "cache-save=true"
 [[ -f "$edge_cache/master-aaaa.tar.gz" ]] || fail "tag a archive missing"
 [[ -f "$edge_cache/master-bbbb.tar.gz" ]] || fail "tag b archive missing"
 if grep -q "master-aaaa.tar.gz" "$edge_b_dir/log"; then
@@ -362,6 +373,9 @@ edge_b2_dir=$(run_fetch edge-tag-b-again master "$edgeB_fixture")
 unset GH_FAKE_API_TAG REEVE_ARCHIVE_DIR
 assert_eq "$(cat "$edge_b2_dir/output")" fetched=true
 assert_contains "$(cat "$edge_b2_dir/log")" "Using cached prebuilt archive for master-bbbb"
+if grep -q 'cache-save=true' "$edge_b2_dir/output"; then
+  fail "an existing tag B key must not be overwritten"
+fi
 if grep -q "release download master-bbbb --repo reeveops/reeve --pattern reeve_linux_amd64.tar.gz" "$edge_b2_dir/gh.calls"; then
   fail "the second run of the same edge tag must not re-download"
 fi

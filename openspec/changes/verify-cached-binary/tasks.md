@@ -1,6 +1,8 @@
 # verify-cached-binary - tasks
 
-- [x] 1. Save records the binary's sha256 sidecar and caches the directory
-- [x] 2. Restore verifies the restored binary against the sidecar; mismatch or incompleteness deletes the entry and reports verified=false
-- [x] 3. Rebuild-path steps run when verification failed; a rejected entry never executes
-- [x] 4. Action security test asserts the mismatch path (verify conditions, sidecar recording, directory cache, rebuild conditions)
+- [x] 1. Cache downloaded release archives per resolved tag, never extracted binaries or local hash sidecars
+- [x] 2. Fetch and signature-verify live checksums on every run before using a cached or fresh archive
+- [x] 3. Hard-fail only a digest mismatch; soft-fallback with a reason for all other verification failures and non-executable binaries
+- [x] 4. Never cache source builds or binaries that fail `reeve --version`
+- [x] 5. Save a newly resolved tag under its own immutable cache key even when a restore supplied an earlier tag
+- [x] 6. Script tests cover cold/cached/tampered archives, every fallback policy row, tag changes, and action cache conditions

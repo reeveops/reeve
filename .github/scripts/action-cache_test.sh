@@ -4,9 +4,11 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ACTION_FILE="$SCRIPT_DIR/../actions/reeve/action.yml"
 CACHE_SHA=55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-# CACHE_KEY intentionally contains a literal GitHub expression under test.
+# CACHE_PREFIX intentionally contains literal GitHub expressions under test.
 # shellcheck disable=SC2016
-CACHE_KEY='reeve-asset-v1-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}'
+CACHE_PREFIX='reeve-asset-v2-${{ inputs.source-repository || github.action_repository }}-full-${{ runner.os }}-${{ runner.arch }}-${{ inputs.source-ref || github.action_ref }}-${{ steps.reeve-hash.outputs.hash }}-'
+# shellcheck disable=SC2016
+RESOLVED_TAG='${{ steps.reeve-fetch.outputs.resolved-tag }}'
 
 fail() {
   echo "$1" >&2
@@ -43,10 +45,16 @@ assert_contains "$restore_step" "uses: actions/cache/restore@$CACHE_SHA"
 assert_contains "$save_step" "uses: actions/cache/save@$CACHE_SHA"
 assert_contains "$restore_step" 'path: ${{ runner.temp }}/reeve-asset'
 assert_contains "$save_step" 'path: ${{ runner.temp }}/reeve-asset'
-assert_contains "$restore_step" "key: $CACHE_KEY"
-assert_contains "$save_step" "key: $CACHE_KEY"
-# The archive cache is written only after a SUCCESSFUL verified fetch.
+assert_contains "$restore_step" "key: ${CACHE_PREFIX}restore"
+assert_contains "$restore_step" "restore-keys:"
+assert_contains "$restore_step" "$CACHE_PREFIX"
+assert_contains "$save_step" "key: ${CACHE_PREFIX}${RESOLVED_TAG}"
+if [[ "$save_step" == *"key: ${CACHE_PREFIX}restore"* ]]; then
+  fail "the restore-only primary key must never be saved; per-tag keys are immutable"
+fi
+# The archive cache is written only after a SUCCESSFUL verified fresh fetch.
 assert_contains "$save_step" "steps.reeve-fetch.outputs.fetched == 'true'"
+assert_contains "$save_step" "steps.reeve-fetch.outputs.cache-save == 'true'"
 # The cache key must bind the artifact identity (the pinned ref), not just
 # the action source: different refs use different archives.
 assert_contains "$restore_step" '${{ inputs.source-ref || github.action_ref }}'
@@ -84,7 +92,8 @@ assert_contains "$fetch_step_full" "REEVE_CACHE_KEY:"
 #    checksums on every run, so a cache hit must never skip verification.
 # 2. Only the source-build steps are gated on fetched != 'true' (a soft
 #    fallback), with no cache-hit term: the fetch decision is the script's.
-# 3. The cache save runs only after a verified fetch on a cache miss.
+# 3. The cache save runs after a verified FRESH fetch even if an older tag was
+#    restored; its immutable key includes the newly resolved tag.
 for step_name in "Classify prebuilt binary eligibility" "Install cosign for binary verification" "Fetch prebuilt binary"; do
   step=$(step_block "$step_name")
   assert_contains "$step" "steps.reeve-dispatch.outputs.run == 'true'"
@@ -105,8 +114,9 @@ for step_name in "Stage Go cache metadata" "Set up Go (from reeve's go.mod)" "Bu
   assert_contains "$step" "steps.reeve-fetch.outputs.fetched != 'true'"
   assert_not_contains "$step" "reeve-cache.outputs.cache-hit"
 done
-assert_contains "$save_step" "steps.reeve-cache.outputs.cache-hit != 'true'"
+assert_not_contains "$save_step" "reeve-cache.outputs.cache-hit"
 assert_contains "$save_step" "steps.reeve-fetch.outputs.fetched == 'true'"
+assert_contains "$save_step" "steps.reeve-fetch.outputs.cache-save == 'true'"
 
 # The cache stores the archive directory, never the binary directory, and
 # never a hash sidecar.
