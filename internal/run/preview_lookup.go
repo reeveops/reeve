@@ -206,6 +206,7 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 		key       string
 		createdAt string
 		clock     time.Time
+		parsedAt  time.Time
 	}
 	for _, k := range keys {
 		runID, identityBound, candidate := previewManifestCandidate(k, prefix, commitSHA)
@@ -255,7 +256,8 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 				key       string
 				createdAt string
 				clock     time.Time
-			}{k, m.CreatedAt, now()})
+				parsedAt  time.Time
+			}{k, m.CreatedAt, now(), createdAt})
 			continue
 		}
 		if best == nil || createdAt.After(bestCreatedAt) ||
@@ -272,7 +274,7 @@ func newestPreviewManifest(ctx context.Context, store blob.Store, prNumber int, 
 	if best == nil && len(skippedFuture) > 0 {
 		newest := skippedFuture[0]
 		for _, sk := range skippedFuture[1:] {
-			if sk.createdAt > newest.createdAt {
+			if sk.parsedAt.After(newest.parsedAt) {
 				newest = sk
 			}
 		}

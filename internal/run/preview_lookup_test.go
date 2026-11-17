@@ -597,3 +597,30 @@ func TestPreviewSkewBoundary(t *testing.T) {
 		})
 	}
 }
+
+// TestFuturePreviewErrorSelectsNewestByTime pins that the refusal's skipped
+// manifest is selected by parsed time, not lexicographic RFC3339 text: a
+// +02:00 stamp can sort AFTER a later UTC stamp lexically while being older.
+func TestFuturePreviewErrorSelectsNewestByTime(t *testing.T) {
+	store, err := filesystem.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	base := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
+	// A is lexically later ("12" > "11") but chronologically earlier.
+	olderText := "2026-11-14T12:00:00+02:00" // 10:00Z
+	newerText := "2026-11-14T11:00:00Z"      // 11:00Z
+	stacks := []summary.StackSummary{{Project: "api", Stack: "prod", Status: summary.StatusPlanned}}
+	putManifest(t, store, 9, "preview-1", sha, olderText, stacks)
+	putManifest(t, store, 9, "preview-2", sha, newerText, stacks)
+
+	_, err = loadPreviewSnapshot(context.Background(), store, 9, sha, func() time.Time { return base })
+	var fpe *FuturePreviewError
+	if !errors.As(err, &fpe) {
+		t.Fatalf("expected the typed future-preview refusal, got %v", err)
+	}
+	if fpe.CreatedAt != newerText {
+		t.Fatalf("the refusal must name the chronologically newest manifest, got %q, want %q", fpe.CreatedAt, newerText)
+	}
+}
