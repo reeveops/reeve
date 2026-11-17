@@ -4,3 +4,4 @@
 - [x] 2. Intent entry written write-once BEFORE the mutation; audit write failure refuses the unlock
 - [x] 3. Reason and error text pass through redaction before storage
 - [x] 4. Test asserts both entries exist, carry the previous holder, and are redacted
+- [x] 5. Refuse intent precondition failures before mutation and close queue-only forced removals with a completion

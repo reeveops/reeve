@@ -321,7 +321,9 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
-	if force && len(previous) > 0 {
+	if force {
+		// A queue-only removal has no previous holder snapshot, but its intent
+		// still requires a completion after the successful mutation.
 		override.PromotedPR = promotedPR(l)
 		writeUnlockCompletion(ctx, aw, actor, repoHint(cmd), unlockID, override,
 			[]audit.Stack{{Ref: parts[0] + "/" + parts[1], Status: "force_unlocked"}}, "success")
@@ -405,8 +407,8 @@ func writeUnlockIntent(ctx context.Context, aw *audit.Writer, actor, repo, unloc
 		Outcome:      "force_unlock_intent",
 		LockOverride: &override,
 	}
-	if err := aw.Write(ctx, intent); err != nil && !errors.Is(err, blob.ErrPreconditionFailed) {
-		return fmt.Errorf("force-unlock refused: audit record could not be written (%v)", err)
+	if err := aw.Write(ctx, intent); err != nil {
+		return fmt.Errorf("force-unlock refused: audit record could not be written (%w); no lock state was changed; fix the audit store and retry", err)
 	}
 	return nil
 }

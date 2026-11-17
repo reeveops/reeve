@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/reeveops/reeve/internal/audit"
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/filesystem"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
 	corelocks "github.com/reeveops/reeve/internal/core/locks"
@@ -612,5 +615,123 @@ func TestFailingIntentAuditWriteRefusesForceUnlock(t *testing.T) {
 				t.Fatalf("a refused unlock must leave no audit record: %v", keys)
 			}
 		})
+	}
+}
+
+// preconditionAuditStore preserves the CAS probe but deterministically refuses
+// the actual audit create with the write-once precondition error.
+type preconditionAuditStore struct {
+	blob.Store
+}
+
+func (s *preconditionAuditStore) PutIfMatch(ctx context.Context, key string, r io.Reader, ifMatch string) (*blob.Metadata, error) {
+	if strings.HasPrefix(key, "audit/") {
+		return nil, blob.ErrPreconditionFailed
+	}
+	return s.Store.PutIfMatch(ctx, key, r, ifMatch)
+}
+
+func TestUnlockIntentPreconditionFailureRefuses(t *testing.T) {
+	root, _ := lockRepo(t)
+	fs, err := filesystem.New(filepath.Join(root, ".reeve-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aw := audit.NewWriter(&preconditionAuditStore{Store: fs})
+	override := audit.LockOverride{Project: "proj", Stack: "dev", Scope: "pr", Reason: "collision"}
+
+	err = writeUnlockIntent(context.Background(), aw, "mallory", "owner/repo", "unlock-fixed", override)
+	if !errors.Is(err, blob.ErrPreconditionFailed) {
+		t.Fatalf("intent precondition failure must be returned, got %v", err)
+	}
+	for _, want := range []string{"force-unlock refused", "audit record could not be written", "no lock state was changed", "retry"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal must name the rule, failed value, and next step %q: %v", want, err)
+		}
+	}
+	keys, err := fs.List(context.Background(), "audit/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("the refused intent must not produce an audit entry: %v", keys)
+	}
+}
+
+// TestPRForceUnlockQueueOnlyWritesCompletion closes the intent even when the
+// target PR had no holder snapshot: a successful queue-only forced removal is
+// still a completed override, not a permanently open intent.
+func TestPRForceUnlockQueueOnlyWritesCompletion(t *testing.T) {
+	root, s := lockRepo(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	queued := corelocks.Lock{
+		Project: "proj", Stack: "dev", UpdatedAt: now,
+		Queue: []corelocks.QueueItem{{PR: 8, RunID: "queued-run", Actor: "bob", EnqueuedAt: now}},
+	}
+	raw, err := json.Marshal(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockDir := filepath.Join(root, ".reeve-state", "locks", "proj")
+	if err := os.MkdirAll(lockDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockDir, "dev.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runReeve(t, "locks", "unlock", "proj/dev", "--pr", "8", "--force",
+		"--actor", "mallory", "--reason", "remove abandoned queue entry")
+	if err != nil {
+		t.Fatalf("queue-only force removal: %v\n%s", err, out)
+	}
+	l, _, err := s.Get(context.Background(), "proj", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Holder != nil || len(l.Queue) != 0 {
+		t.Fatalf("PR 8's queue-only entry must be removed: holder=%+v queue=%+v", l.Holder, l.Queue)
+	}
+
+	fs, err := filesystem.New(filepath.Join(root, ".reeve-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := fs.List(context.Background(), "audit/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var intents, completions []audit.Entry
+	for _, key := range keys {
+		data, _, err := filesystem.ReadBytes(context.Background(), fs, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var entry audit.Entry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			t.Fatalf("decode %s: %v", key, err)
+		}
+		if entry.Op != "force_unlock" || entry.LockOverride == nil {
+			continue
+		}
+		switch entry.Outcome {
+		case "force_unlock_intent":
+			intents = append(intents, entry)
+		case "success":
+			completions = append(completions, entry)
+		}
+	}
+	if len(intents) != 1 || len(completions) != 1 {
+		t.Fatalf("queue-only removal audit pair: intents=%d completions=%d, want 1 each", len(intents), len(completions))
+	}
+	completion := completions[0]
+	if len(completion.LockOverride.Previous) != 0 {
+		t.Fatalf("queue-only fixture must have no previous holder snapshot: %+v", completion.LockOverride.Previous)
+	}
+	if len(completion.Stacks) != 1 || completion.Stacks[0].Ref != "proj/dev" || completion.Stacks[0].Status != "force_unlocked" {
+		t.Fatalf("completion must name the successfully changed stack: %+v", completion.Stacks)
+	}
+	if intents[0].RunID != completion.RunID+"-intent" {
+		t.Fatalf("intent %q must pair with completion %q", intents[0].RunID, completion.RunID)
 	}
 }
