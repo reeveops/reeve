@@ -19,9 +19,11 @@ Its conditional existence is the sole authoritative consumed or replay state, an
 ## One-shot semantics
 
 The authorizing command creates the intent record and immediately invokes preview for the same API-resolved HEAD SHA.
-Preview creates the deterministic consumption receipt with an absent-object precondition before acquiring credentials or starting an engine.
+A validation-only run, or a run blocked before its execution prerequisites pass, creates no consumption receipt and leaves the authorization unconsumed.
 
-A concurrent claim or rerun for the same authorization receives a create conflict and cannot acquire credentials or start an engine.
+Only after exact-SHA authorization, worker isolation, a matching approved-fork binding, and its read-only proof have passed does preview create the deterministic consumption receipt with an absent-object precondition. Creation occurs immediately before the first authorized side effect: acquiring the read-only source-fetch credential and fetching the authorized source. It therefore precedes every credential acquisition and engine start, but does not consume an authorization merely to validate or report a blocked run.
+
+A concurrent claim or rerun for the same authorization receives a create conflict and cannot acquire credentials, fetch source, or start an engine.
 A new PR commit has a different key and requires a new authorization.
 
 ## Early trust classification
@@ -49,12 +51,12 @@ Credentialed fork preview requires a runtime capability flag proving a separate 
 If the capability is absent, authorization is recorded as blocked and no credentials or engine binary are used.
 
 Environment filtering alone does not satisfy this capability.
-The first implementation may keep the capability permanently false until the worker boundary ships.
+The RC ships the capability permanently false: with it false, every fork preview - authorized or not - is validation-only, per the RC default in proposal.md. There is no override path; enabling it is a spec change naming a working isolated-worker prerequisite.
 
 ## Pinned worker source
 
-The pinned source-fetch path runs only after the authorization is consumed, a matching approved-fork binding and its read-only proof validate without invoking a credential provider, and worker isolation is available.
-If no binding matches or either gate fails, no VCS credential is resolved, no source fetch occurs, and no engine is invoked.
+The pinned source-fetch path runs only after worker isolation is available and a matching approved-fork binding and its read-only proof validate without invoking a credential provider. Immediately before source-fetch credential acquisition, preview creates the consumption receipt; the receipt does not exist before those prerequisites pass.
+If no binding matches or any prerequisite gate fails, no receipt is created, no VCS credential is resolved, no source fetch occurs, and no engine is invoked.
 
 The isolated worker then fetches `authorization.head_sha` into its isolated workspace and checks it out in detached mode.
 The VCS credential used for the fetch is read-only, is removed before execution, and is never included in the engine environment.
@@ -69,5 +71,5 @@ Fork apply and refresh always deny before lock acquisition, auth resolution, pol
 
 ## Audit
 
-Authorization intent and consumption are durable before credential acquisition.
-The terminal preview audit links the intent, consumption receipt, actor, SHA, selected trust class, and outcome.
+Authorization intent is durable before any authorized side effect. When execution proceeds, the consumption receipt is durable immediately before the first such side effect.
+The terminal preview audit links the intent, actor, SHA, selected trust class, and outcome, plus the consumption receipt when one exists. A blocked or validation-only terminal audit MUST record the authorization intent and outcome even when no receipt exists, and MUST NOT imply that the authorization was consumed.
