@@ -29,7 +29,10 @@ func TestHeartbeatKeepsLongApplyAlive(t *testing.T) {
 	}
 	origExpiry := mustExpiry(t, s, ctx)
 
-	stop := s.StartHeartbeat(ctx, "api", "prod", holder, ttl)
+	lost := make(chan string, 1)
+	stop := s.StartHeartbeat(ctx, "api", "prod", holder, ttl, func(reason string) {
+		lost <- reason
+	})
 	defer stop()
 
 	// Wait until the heartbeat has actually extended the lease past its
@@ -95,7 +98,7 @@ func TestHeartbeatStopsOnContextCancel(t *testing.T) {
 	if _, ok, err := s.TryAcquire(ctx, "api", "prod", holder, ttl); err != nil || !ok {
 		t.Fatalf("acquire: ok=%v err=%v", ok, err)
 	}
-	stop := s.StartHeartbeat(ctx, "api", "prod", holder, ttl)
+	stop := s.StartHeartbeat(ctx, "api", "prod", holder, ttl, nil)
 	cancel()
 	// stop must return promptly because the goroutine exited on ctx.Done.
 	done := make(chan struct{})
@@ -109,11 +112,125 @@ func TestHeartbeatStopsOnContextCancel(t *testing.T) {
 
 func TestHeartbeatNilStoreOrZeroTTLIsNoop(t *testing.T) {
 	var s *Store
-	stop := s.StartHeartbeat(context.Background(), "api", "prod", corelocks.Holder{}, time.Hour)
+	stop := s.StartHeartbeat(context.Background(), "api", "prod", corelocks.Holder{}, time.Hour, nil)
 	stop()
 	fs, _ := filesystem.New(t.TempDir())
-	stop = New(fs).StartHeartbeat(context.Background(), "api", "prod", corelocks.Holder{}, 0)
+	stop = New(fs).StartHeartbeat(context.Background(), "api", "prod", corelocks.Holder{}, 0, nil)
 	stop()
+}
+
+// TestHeartbeatReportsLossAndNeverReacquires is the heart of the lock-loss
+// fix: when the lease is taken away mid-operation (force-unlock here), the
+// heartbeat must report the loss with the observed state, stop refreshing,
+// and MUST NOT re-acquire. The old heartbeat reused TryAcquire, which
+// reinstalled the holder and let the apply keep running on a lock it no
+// longer owned.
+func TestHeartbeatReportsLossAndNeverReacquires(t *testing.T) {
+	t.Run("released mid-operation", func(t *testing.T) {
+		ctx := context.Background()
+		fs, err := filesystem.New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := New(fs)
+		const ttl = time.Second // heartbeat every ttl/3
+		holder := corelocks.Holder{PR: 1, RunID: "r1", Actor: "alice"}
+		if _, ok, err := s.TryAcquire(ctx, "api", "prod", holder, ttl); err != nil || !ok {
+			t.Fatalf("acquire: ok=%v err=%v", ok, err)
+		}
+
+		lost := make(chan string, 1)
+		stop := s.StartHeartbeat(ctx, "api", "prod", holder, ttl, func(reason string) {
+			select {
+			case lost <- reason:
+			default:
+			}
+		})
+		defer stop()
+
+		// Simulate a force-unlock while the "apply" is running.
+		if _, err := s.ForceUnlock(ctx, "api", "prod", ttl); err != nil {
+			t.Fatalf("force-unlock: %v", err)
+		}
+
+		select {
+		case reason := <-lost:
+			want := "released; the lock has no holder"
+			if reason != want {
+				t.Fatalf("loss reason = %q, want %q", reason, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("heartbeat never reported the loss within 10s")
+		}
+
+		// The lock must NOT have been retaken: no holder, queue untouched.
+		l, _, err := s.Get(ctx, "api", "prod")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Holder != nil || len(l.Queue) != 0 {
+			t.Fatalf("heartbeat re-acquired after loss: holder=%+v queue=%+v", l.Holder, l.Queue)
+		}
+
+		// Direct RefreshLease keeps refusing (no silent re-acquire).
+		if err := s.RefreshLease(ctx, "api", "prod", holder, ttl); err == nil {
+			t.Fatal("RefreshLease after force-unlock must refuse")
+		}
+		l, _, _ = s.Get(ctx, "api", "prod")
+		if l.Holder != nil {
+			t.Fatalf("RefreshLease installed a holder: %+v", l.Holder)
+		}
+	})
+
+	t.Run("taken by another PR", func(t *testing.T) {
+		ctx := context.Background()
+		fs, err := filesystem.New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := New(fs)
+		const ttl = time.Second
+		holder := corelocks.Holder{PR: 1, RunID: "r1"}
+		if _, ok, err := s.TryAcquire(ctx, "api", "prod", holder, ttl); err != nil || !ok {
+			t.Fatalf("acquire: ok=%v err=%v", ok, err)
+		}
+		// Another PR takes over after the lease is cleared.
+		if _, err := s.ForceUnlock(ctx, "api", "prod", ttl); err != nil {
+			t.Fatal(err)
+		}
+		other := corelocks.Holder{PR: 2, RunID: "r2", Actor: "bob"}
+		if _, ok, err := s.TryAcquire(ctx, "api", "prod", other, ttl); err != nil || !ok {
+			t.Fatalf("other pr acquire: ok=%v err=%v", ok, err)
+		}
+
+		lost := make(chan string, 1)
+		stop := s.StartHeartbeat(ctx, "api", "prod", holder, ttl, func(reason string) {
+			select {
+			case lost <- reason:
+			default:
+			}
+		})
+		defer stop()
+
+		select {
+		case reason := <-lost:
+			want := "now held by PR #2"
+			if reason != want {
+				t.Fatalf("loss reason = %q, want %q", reason, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("heartbeat never reported the loss within 10s")
+		}
+
+		// The other PR's holder must be intact.
+		l, _, err := s.Get(ctx, "api", "prod")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Holder == nil || l.Holder.PR != 2 || l.Holder.RunID != "r2" {
+			t.Fatalf("heartbeat must not disturb the new holder: %+v", l.Holder)
+		}
+	})
 }
 
 func mustExpiry(t *testing.T, s *Store, ctx context.Context) time.Time {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/reeveops/reeve/internal/blob"
 	"github.com/reeveops/reeve/internal/blob/factory"
 	blocks "github.com/reeveops/reeve/internal/blob/locks"
 	"github.com/reeveops/reeve/internal/config"
@@ -94,6 +96,11 @@ func locksList(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Fprintf(w, "%s/%s  %s  holder=%s  queue=%d\n",
 			l.Project, l.Stack, st, holder, len(l.Queue))
+		if l.Holder != nil {
+			if status := l.Holder.HoldStatus(now); status != "" {
+				fmt.Fprintf(w, "    hold: %s\n", status)
+			}
+		}
 	}
 	return nil
 }
@@ -120,6 +127,21 @@ func locksExplain(cmd *cobra.Command, args []string) error {
 		h := l.Holder
 		fmt.Fprintf(w, "holder: PR #%d  actor=%s  run=%s  acquired=%s  expires=%s\n",
 			h.PR, h.Actor, h.RunID, h.AcquiredAt, h.ExpiresAt)
+		if h.Outcome != "" {
+			fmt.Fprintf(w, "outcome: %q  recorded=%s\n", h.Outcome, h.RecordedAt)
+			if h.RunURL != "" {
+				fmt.Fprintf(w, "run: %s\n", h.RunURL)
+			}
+			if h.AuditKey != "" {
+				fmt.Fprintf(w, "audit: %s\n", h.AuditKey)
+			}
+		}
+		if status := h.HoldStatus(time.Now()); status != "" {
+			fmt.Fprintf(w, "hold: %s\n", status)
+		}
+		if h.HoldStarted {
+			fmt.Fprintln(w, "the lock will not lapse on its own; the stack's real state must be validated (preview / inspect the run) before an explicit unlock clears it")
+		}
 	} else {
 		fmt.Fprintln(w, "holder: (free)")
 	}
@@ -199,6 +221,21 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 		if parts == nil {
 			return fmt.Errorf("expected project/stack, got %q", args[0])
 		}
+		// The holder's recorded reason surfaces BEFORE the override so the
+		// operator sees what they are clearing (and what to validate).
+		current, _, gerr := s.Get(ctx, parts[0], parts[1])
+		if gerr != nil && !errors.Is(gerr, blob.ErrNotFound) {
+			return gerr
+		}
+		if current.Holder != nil {
+			h := current.Holder
+			// The hold's full status - outcome (or the run-most-likely-died
+			// state) and pointers - surfaces BEFORE the override, worded by
+			// the real state.
+			fmt.Fprintf(w, "overriding %s/%s holder PR #%d\n", parts[0], parts[1], h.PR)
+			fmt.Fprintf(w, "  %s\n", h.HoldStatus(time.Now()))
+			fmt.Fprintln(w, "  validate the stack's real state before unlocking")
+		}
 		l, err := s.ForceUnlock(ctx, parts[0], parts[1], ttl)
 		if err != nil {
 			return err
@@ -212,8 +249,9 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 	}
 
 	// --pr path: remove the PR from its own holder/queue entries, one
-	// stack or all of them. Without --force, a holder whose lease is
-	// still active (likely a live apply) is refused with a hint.
+	// stack or all of them. A holder with a started hold is refused (its
+	// lock never lapses on its own); the refusal is worded by the recorded
+	// state and names the exact command that clears it.
 	force := flagBool(cmd, "force")
 	if len(args) == 0 {
 		n, active, err := s.UnlockPRAll(ctx, pr, "", ttl, force)
@@ -222,26 +260,74 @@ func locksUnlock(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Fprintf(w, "removed PR #%d from %d lock(s) by actor=%s reason=%q\n", pr, n, actor, reason)
 		if len(active) > 0 {
-			return fmt.Errorf("PR #%d is in the middle of an apply on %s; if you are sure you want to unlock, re-run with --force", pr, strings.Join(active, ", "))
+			return fmt.Errorf("%s", prScopeRefusal(s, ctx, pr, active, force))
 		}
 		return nil
 	}
+	// The holder's state surfaces BEFORE the removal so the override (and
+	// any refusal) is worded by the real state.
 	parts := splitRef(args[0])
 	if parts == nil {
 		return fmt.Errorf("expected project/stack, got %q", args[0])
 	}
+	current, _, gerr := s.Get(ctx, parts[0], parts[1])
+	if gerr != nil && !errors.Is(gerr, blob.ErrNotFound) {
+		return gerr
+	}
 	l, err := s.UnlockPR(ctx, parts[0], parts[1], pr, "", ttl, force)
 	if err != nil {
 		if errors.Is(err, blocks.ErrHolderActive) {
-			return fmt.Errorf("PR #%d is in the middle of an apply on %s/%s; if you are sure you want to unlock, re-run with --force", pr, parts[0], parts[1])
+			return fmt.Errorf("%s", prScopeRefusal(s, ctx, pr, []string{parts[0] + "/" + parts[1]}, force))
 		}
 		return err
+	}
+	if current.Holder != nil && current.Holder.HoldStarted {
+		// The removed hold's state surfaces on BOTH paths - the operator
+		// sees the recorded reason (or the run-died state) next to the
+		// removal, whatever the force flag.
+		verb := "removed hold on"
+		if force {
+			verb = "overriding"
+		}
+		fmt.Fprintf(w, "%s %s/%s holder PR #%d\n", verb, parts[0], parts[1], current.Holder.PR)
+		fmt.Fprintf(w, "  %s\n", current.Holder.HoldStatus(time.Now()))
+		fmt.Fprintln(w, "  validate the stack's real state before unlocking")
 	}
 	fmt.Fprintf(w, "removed PR #%d from %s/%s by actor=%s reason=%q\n", pr, parts[0], parts[1], actor, reason)
 	if l.Holder != nil {
 		fmt.Fprintf(w, "holder is now PR #%d (expires %s)\n", l.Holder.PR, l.Holder.ExpiresAt)
 	}
 	return nil
+}
+
+// prScopeRefusal words the PR-scoped unlock refusal by the holder's real
+// state: a recorded outcome names it with its pointers, a started hold with
+// no outcome says the run most likely died, and a plain active holder says a
+// live apply. Each names the exact command that clears the hold after the
+// stack's real state is validated.
+func prScopeRefusal(s *blocks.Store, ctx context.Context, pr int, stacks []string, force bool) string {
+	var parts []string
+	for _, ref := range stacks {
+		detail := ref
+		if p := strings.SplitN(ref, "/", 2); len(p) == 2 {
+			if l, _, gerr := s.Get(ctx, p[0], p[1]); gerr == nil && l.Holder != nil {
+				reason := l.Holder.HoldStatus(time.Now())
+				if reason == "" {
+					reason = fmt.Sprintf("the apply is most likely still running (lease expires %s)", l.Holder.ExpiresAt)
+				}
+				detail = fmt.Sprintf("%s (%s)", ref, reason)
+			}
+		}
+		parts = append(parts, detail)
+	}
+	var hint string
+	if len(stacks) == 1 {
+		hint = fmt.Sprintf("reeve locks unlock %s --pr %d --force", stacks[0], pr)
+	} else {
+		hint = fmt.Sprintf("reeve locks unlock --pr %d --force", pr)
+	}
+	return fmt.Sprintf("PR #%d holds lock(s) that never lapse on their own - %s. Validate the stack's real state (run `/reeve preview` or inspect the run), then clear the hold explicitly: `%s`",
+		pr, strings.Join(parts, "; "), hint)
 }
 
 func actorAllowed(actor string, allowed []string) bool {

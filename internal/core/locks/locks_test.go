@@ -21,6 +21,118 @@ func TestAcquireFree(t *testing.T) {
 	}
 }
 
+// TestRefreshLeaseIsRefreshOnly pins the heartbeat transition: RefreshLease
+// extends an ACTIVE lease for its own PR+RunID and refuses everything else
+// without touching the lock state. It never installs a holder, never adopts
+// a promoted reservation, never resurrects an expired lease, and never
+// enqueues - the heartbeat cannot re-acquire a lock the operator removed
+// (force-unlock), the reaper evicted, or another party took.
+func TestRefreshLeaseIsRefreshOnly(t *testing.T) {
+	acquire := func(pr int, runID string, at time.Time) Lock {
+		l := NewLock("api", "prod", t0)
+		out, ok, err := TryAcquire(l, Holder{PR: pr, RunID: runID, Actor: "alice"}, time.Hour, at)
+		if err != nil || !ok {
+			t.Fatalf("seed acquire %d/%s: ok=%v err=%v", pr, runID, ok, err)
+		}
+		return out
+	}
+
+	t.Run("active holder extends", func(t *testing.T) {
+		l := NewLock("api", "prod", t0)
+		h := Holder{PR: 1, RunID: "r1", Actor: "alice"}
+		holder := h
+		holder.AcquiredAt = t0.UTC().Format(time.RFC3339)
+		holder.ExpiresAt = t0.Add(time.Hour).UTC().Format(time.RFC3339)
+		l.Holder = &holder
+		got, err := RefreshLease(l, 1, "r1", time.Hour, t0.Add(10*time.Minute))
+		if err != nil {
+			t.Fatalf("refresh active lease: %v", err)
+		}
+		if got.Holder == nil || got.Holder.PR != 1 || got.Holder.RunID != "r1" {
+			t.Fatalf("holder changed: %+v", got.Holder)
+		}
+		exp, err := time.Parse(time.RFC3339, got.Holder.ExpiresAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := t0.Add(10 * time.Minute).Add(time.Hour)
+		if !exp.Equal(want) {
+			t.Fatalf("lease expiry = %s, want %s", exp, want)
+		}
+		if l.Holder.ExpiresAt == got.Holder.ExpiresAt {
+			t.Fatal("refresh must have written a new expiry")
+		}
+	})
+
+	t.Run("free lock is lost, not acquired", func(t *testing.T) {
+		l := NewLock("api", "prod", t0)
+		got, err := RefreshLease(l, 1, "r1", time.Hour, t0)
+		var lost *LeaseLostError
+		if !errors.As(err, &lost) || !lost.Released {
+			t.Fatalf("free lock must be Released lease-lost, got %v", err)
+		}
+		if got.Holder != nil {
+			t.Fatalf("refresh must not install a holder: %+v", got.Holder)
+		}
+	})
+
+	t.Run("another PR holding is lost", func(t *testing.T) {
+		l := acquire(2, "other", t0)
+		got, err := RefreshLease(l, 1, "r1", time.Hour, t0)
+		var lost *LeaseLostError
+		if !errors.As(err, &lost) {
+			t.Fatalf("want LeaseLostError, got %v", err)
+		}
+		if lost.HeldByPR != 2 || lost.HeldByOtherRun {
+			t.Fatalf("loss detail = %+v, want held by PR 2", lost)
+		}
+		if got.Holder == nil || got.Holder.PR != 2 {
+			t.Fatalf("holder must be untouched: %+v", got.Holder)
+		}
+	})
+
+	t.Run("another run of the same PR is lost", func(t *testing.T) {
+		l := acquire(1, "run-a", t0)
+		got, err := RefreshLease(l, 1, "run-b", time.Hour, t0)
+		var lost *LeaseLostError
+		if !errors.As(err, &lost) {
+			t.Fatalf("want LeaseLostError, got %v", err)
+		}
+		if lost.HeldByPR != 1 || !lost.HeldByOtherRun {
+			t.Fatalf("loss detail = %+v, want same PR other run", lost)
+		}
+		if got.Holder == nil || got.Holder.RunID != "run-a" {
+			t.Fatalf("holder must be untouched: %+v", got.Holder)
+		}
+	})
+
+	t.Run("expired lease with our own holder still refreshes", func(t *testing.T) {
+		// A scheduling stall can deliver the tick after the lease lapsed.
+		// The holder still identifies this run and the CAS write proves we
+		// wrote over live state - extending is safe. A foreign takeover
+		// would have replaced the holder; the refresh then reports loss.
+		l := NewLock("api", "prod", t0)
+		holder := Holder{PR: 1, RunID: "r1", Actor: "alice"}
+		holder.AcquiredAt = t0.UTC().Format(time.RFC3339)
+		holder.ExpiresAt = t0.UTC().Format(time.RFC3339) // already expired at t0+1s
+		l.Holder = &holder
+		got, err := RefreshLease(l, 1, "r1", time.Hour, t0.Add(time.Second))
+		if err != nil {
+			t.Fatalf("own expired lease must refresh: %v", err)
+		}
+		exp, err := time.Parse(time.RFC3339, got.Holder.ExpiresAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := t0.Add(time.Second).Add(time.Hour); !exp.Equal(want) {
+			t.Fatalf("lease expiry = %s, want %s", exp, want)
+		}
+		if l.Holder.Promoted {
+			t.Fatal("refresh must clear provenance on a promoted reservation")
+		}
+	})
+}
+
 func TestAcquireAlreadyHeldEnqueues(t *testing.T) {
 	l := NewLock("api", "prod", t0)
 	l, _, _ = TryAcquire(l, Holder{PR: 1}, time.Hour, t0)

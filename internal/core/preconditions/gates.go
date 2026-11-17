@@ -94,6 +94,10 @@ type Inputs struct {
 	// Lock acquirability.
 	LockAcquirable  bool
 	LockBlockedByPR int // if not acquirable, the holder PR number (0 if none)
+	// LockHoldReason is why the lock is held (holder PR, recorded outcome,
+	// run URL, audit record key) rendered from the lock's holder. The gate
+	// appends it to the refusal so everyone meeting the lock sees the reason.
+	LockHoldReason string
 
 	// Freeze windows: true if currently in a freeze that blocks this stack.
 	InFreeze   bool
@@ -278,7 +282,11 @@ func evalGateBase(g GateID, cfg Config, in Inputs) GateResult {
 			return pass(g, "lock is acquirable")
 		}
 		if in.LockBlockedByPR > 0 {
-			return fail(g, fmt.Sprintf("blocked by lock held by PR #%d", in.LockBlockedByPR))
+			reason := fmt.Sprintf("blocked by lock held by PR #%d", in.LockBlockedByPR)
+			if in.LockHoldReason != "" {
+				reason += " - " + in.LockHoldReason
+			}
+			return fail(g, reason)
 		}
 		return fail(g, "lock not acquirable")
 
