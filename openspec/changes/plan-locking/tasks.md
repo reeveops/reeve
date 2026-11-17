@@ -5,11 +5,11 @@
 - [ ] Record the plan artifact's SHA-256 on the manifest entry at preview time.
 - [ ] Verify the digest at apply time and fail the stack closed on missing,
       unreadable, oversized, or mismatched artifacts.
-- [ ] Add the `engine.plan_locking.allow_replan` setting (default deny) and the
-      `--replan` per-run recovery flag, both loud on timeline and audit.
+- [ ] Add sibling boolean `engine.plan_locking_allow_replan` (default deny) while keeping `engine.plan_locking` as a boolean, and add the `--replan` per-run availability-recovery flag, both loud on timeline and audit. Existing boolean YAML needs no migration.
+- [ ] Restrict direct recovery to missing, unreadable, or oversized artifacts. On digest mismatch or a key without a digest, reject `--replan` and require a new preview plus new approvals; old approvals must not authorize the replacement plan.
 - [ ] Keep the no-plan-key compatibility path narrow and loud; confirm the
       fresh-plan timeline entry names the stack and reason.
-- [ ] Malicious-corruption and digest-mismatch tests; recovery-path audit tests.
+- [ ] Malicious-corruption and digest-mismatch tests; prove replan cannot reuse old approvals after tamper or missing digests; availability-recovery audit tests; schema tests for boolean `plan_locking` plus its sibling key.
 
 ## P1 — engine contract
 
@@ -35,7 +35,7 @@
 - [x] Preview saves a plan per stack, uploads it under the run prefix, records
       `StackSummary.PlanKey`.
 - [x] Apply fetches the artifact for the previewed commit and passes it through;
-      falls back with a timeline entry when absent.
+      the original absent-artifact fallback is SUPERSEDED by the open fail-closed tasks above: a recorded-key absence must fail, and only a no-plan-key manifest retains the loud compatibility fallback.
 - [x] `run.Refresh` runner: scope, gates, locks, comment, audit.
 - [x] `engine.plan_locking` (default true) and `PlanLockingEnabled` /
       `EngineSupportsSavedPlans` resolution.

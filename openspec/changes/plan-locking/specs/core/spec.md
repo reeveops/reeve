@@ -45,20 +45,19 @@ requirement. Neither direction SHALL be silent.
 
 The manifest entry for a stored plan SHALL record the artifact's SHA-256
 digest. When a manifest records a plan key but the artifact is missing,
-unreadable, oversized (beyond the 64 MiB plan-artifact cap
-`maxPlanArtifactBytes` in `internal/run/plan_artifacts.go`), digest-less, or
-does not match the recorded digest, apply SHALL fail that stack closed
-instead of computing a fresh plan - including a key recorded with NO digest,
-which manifests written by previews predating digest binding carry. Fresh-plan
-re-planning is an explicit recovery operation: an
-`engine.plan_locking.allow_replan` configuration setting (default `false`,
-deny) and a per-run `--replan` flag - on the CLI and on `/reeve apply` in a
-PR comment (the comment parser's accepted argument set for `apply` gains it),
-each behind the same actor gates as apply - allow it, and a re-plan SHALL be
-stated on the timeline and in the audit record with the actor. A manifest
-with NO plan key remains the expressly supported compatibility path
-(manifests predating plan locking, plan locking disabled or the upload
-failing at preview time) and re-plans with the loud timeline statement.
+unreadable, oversized (beyond the 64 MiB plan-artifact cap), digest-less, or
+does not match the recorded digest, apply SHALL fail that stack closed instead
+of silently computing a fresh plan.
+
+`engine.plan_locking` SHALL remain a boolean. The sibling boolean
+`engine.plan_locking_allow_replan` (default `false`) and per-run `--replan`
+flag, on the CLI and `/reeve apply` behind apply's actor gates, SHALL provide
+explicit availability recovery only for a missing, unreadable, or oversized
+promised artifact. Each re-plan SHALL be stated on the timeline and in the
+audit record with the actor. A digest mismatch or missing digest MUST NOT use
+this direct recovery path, even when requested; it requires a new preview and
+new approvals so old approvals cannot authorize an unreviewed replacement.
+A manifest with NO plan key remains the loud compatibility re-planning path.
 
 #### Scenario: A manifest promises a plan that is missing
 
@@ -75,9 +74,10 @@ failing at preview time) and re-plans with the loud timeline statement.
 - **THEN** the apply fails that stack closed, naming the stack, the run id,
   and the reason: the preview predates digest binding, so the artifact the
   key names cannot be verified
-- **AND** the refusal names the next step - run a new preview, so the
-  manifest carries a digest - and the re-planning recovery path below
-  applies to it exactly as to any other unkept promise
+- **AND** the refusal names the next step - run a new preview so the manifest
+  carries a digest, then obtain new approvals for that reviewed plan
+- **AND** `--replan` and `engine.plan_locking_allow_replan` cannot bypass the
+  new preview and review requirement for this unverifiable artifact
 
 #### Scenario: The artifact does not match its digest
 
@@ -87,12 +87,21 @@ failing at preview time) and re-plans with the loud timeline statement.
   both digests
 - **AND** the mismatched artifact is treated as corrupt, never executed
 
+#### Scenario: Replan cannot reuse old approvals after a digest mismatch
+
+- **GIVEN** the fetched artifact does not match its recorded digest
+- **AND** the old preview has approvals
+- **WHEN** apply requests `--replan` or enables `engine.plan_locking_allow_replan`
+- **THEN** the current apply still fails closed without executing a fresh plan
+- **AND** recovery requires a new preview and new approvals of its plan and digest
+- **AND** the old approvals do not authorize the replacement plan
+
 #### Scenario: The recovery path from the CLI
 
-- **GIVEN** `engine.plan_locking.allow_replan: true` in trusted
+- **GIVEN** `engine.plan_locking_allow_replan: true` in trusted
   configuration, or `--replan` passed to `reeve apply` on the CLI
-- **WHEN** the promised plan is unavailable
-- **THEN** the apply computes a fresh plan
+- **WHEN** the promised plan is missing, unreadable, or oversized, rather than digest-less or digest-mismatched
+- **THEN** the apply computes a fresh plan through the availability recovery path
 - **AND** the timeline and the audit record state that the apply re-planned
   through the recovery path, naming the run's actor
 
@@ -100,10 +109,11 @@ failing at preview time) and re-plans with the loud timeline statement.
 
 - **GIVEN** the comment parser's accepted argument set for `apply` includes
   `--replan`
-- **WHEN** an authorized commenter runs `/reeve apply --replan` - behind the
-  same actor gates as any apply (the bot guard, the association gate, and
-  the explicit-command actor gate)
-- **THEN** the apply computes a fresh plan through the recovery path
+- **WHEN** an authorized commenter runs `/reeve apply --replan` for a missing,
+  unreadable, or oversized promised artifact - behind the same actor gates as
+  any apply (the bot guard, the association gate, and the explicit-command
+  actor gate)
+- **THEN** the apply computes a fresh plan through the availability recovery path
 - **AND** the timeline and the audit record state it, naming the commenting
   actor
 - **AND** a commenter who fails apply's actor gates re-plans nothing
@@ -171,21 +181,3 @@ therefore not use a locked plan. The run timeline SHALL say so.
 - **THEN** the artifact is not used, and the timeline records that the applied
   change set was computed after the refresh and is not the plan the PR
   previewed
-
-## MODIFIED Requirements
-
-### Requirement: Preview freshness bounds how stale an applied plan may be
-
-`preconditions.preview_freshness` SHALL default to 4 hours when the key is
-omitted. Only a literal `"0"` SHALL disable the gate. A value that is not a
-positive Go duration SHALL be a load error, never a silent disable.
-
-#### Scenario: No configuration
-
-- **WHEN** `preview_freshness` is not set
-- **THEN** the gate is active with a 4h window
-
-#### Scenario: Deliberate opt-out
-
-- **WHEN** `preview_freshness: "0"`
-- **THEN** the gate is skipped, and its trace says what is no longer checked

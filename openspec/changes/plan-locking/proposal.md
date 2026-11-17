@@ -31,7 +31,7 @@ most likely on exactly the busy repos least likely to have tuned the config.
 
 ## What
 
-**Plan locking** (`engine.plan_locking`, default `true`). Preview asks the
+**Plan locking** (`engine.plan_locking`, a boolean defaulting to `true`). Preview asks the
 engine to persist its plan (`PreviewOpts.SavePlanPath`); reeve stores the
 artifact next to the run manifest, keyed by commit SHA; apply hands that exact
 file back (`ApplyOpts.PlanPath`). Both engines gain the lifecycle:
@@ -42,9 +42,10 @@ file back (`ApplyOpts.PlanPath`). Both engines gain the lifecycle:
 | Pulumi | `preview --save-plan=<file>` | `up --plan=<file>` |
 
 An apply the world moved out from under now fails at the engine instead of
-shipping a different change set. Degradation is one-directional: a missing or
-unreadable artifact falls back to a re-plan and says so on the timeline; it
-never applies something unreviewed silently.
+shipping a different change set. Degradation is narrow: only a manifest entry
+with no plan key re-plans with a loud timeline statement. A recorded plan key
+is a promise; a missing, unreadable, oversized, digest-less, or mismatched
+artifact fails closed rather than silently replacing the reviewed plan.
 
 **Refresh** as a first-class operation: `iac.Refresher` on the engine
 contract, `/reeve refresh [--dry-run] [--all]` as a PR command, and
@@ -55,29 +56,41 @@ change set (approvals, checks, preview freshness) — it has no change set.
 
 **`preview_freshness` defaults to 4h.** Only a literal `"0"` disables it.
 
-## Digest binding and fail-closed availability (remediation 2026-11-11 delta)
+## Digest binding and fail-closed availability
 
-The original degradation rule ("a missing or unreadable artifact falls back
-to computing a plan at apply time") is deliberately reversed by this delta,
-following the 2026-11-10 review: when the manifest PROMISES a plan - records a
-plan key - the apply fails closed when that promise cannot be kept, because
-"this apply re-planned" silently breaks the whole reason plan locking exists.
+When the manifest records a plan key, apply fails closed if that promise
+cannot be kept. "This apply re-planned" must not silently replace the reviewed
+change set.
 
 - The manifest entry records the plan artifact's SHA-256 digest; apply
   verifies it before handing the file to the engine. A mismatch means corrupt
   or tampered artifacts, never a smaller plan.
 - The compatibility path stays narrow and explicit: only a manifest with NO
-  plan key (older manifests, or locking disabled at preview time) re-plans,
-  with the loud timeline statement that already exists.
-- Recovery is explicit and separate: `engine.plan_locking.allow_replan`
-  (default `false`, deny - the opt-out this delta decides on) or a per-run
-  `--replan` flag re-plans loudly, on the timeline and in the audit record.
-  The flag lets an operator recover mid-incident without leaving a standing
-  config weakening in place.
+  plan key (older manifests, locking disabled at preview time, or a preview
+  upload failure that recorded no key) re-plans with the loud timeline
+  statement.
+- Availability recovery is explicit and separate: the sibling configuration
+  key `engine.plan_locking_allow_replan` (default `false`) or per-run
+  `--replan` flag may re-plan a missing, unreadable, or oversized promised
+  artifact loudly, on the timeline and in the audit record.
+- A digest mismatch or a recorded key without a digest is not eligible for
+  direct apply-time recovery. `--replan` and `allow_replan` still fail closed
+  for those cases. Recovery requires a new preview whose artifact and digest
+  are reviewed under new approvals; approvals for the old plan cannot
+  authorize the previously unreviewed replacement.
+
+### Backward-compatible configuration shape
+
+`engine.plan_locking` remains the existing boolean (`true`, `false`, or
+omitted for the default `true`). The new `engine.plan_locking_allow_replan`
+is a sibling boolean, not a nested `allow_replan` object. Existing YAML keeps
+its current type and meaning, strict decoding needs no boolean-or-object
+union, and no migration is required. Omission of the sibling key denies
+availability recovery.
 
 Breaking as planned: applies that previously re-planned on a missing
-promised plan now fail; existing deployments must set the recovery knob or
-treat the failure as the signal it is (run a new preview).
+promised plan now fail unless the explicit availability recovery is enabled.
+Tamper and digest-binding failures always require a new preview and review.
 
 ## Trade-offs
 
