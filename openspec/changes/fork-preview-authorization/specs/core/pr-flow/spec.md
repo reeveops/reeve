@@ -1,13 +1,19 @@
 # PR flow delta
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Fork preview execution is explicitly authorized
 
 An unapproved fork MUST NOT acquire stack credentials or execute an IaC engine.
 A credentialed fork preview MUST require a trusted actor, the current
-API-resolved HEAD SHA, an unconsumed authorization, and a capable isolated
-worker.
+API-resolved HEAD SHA, an unconsumed authorization, a capable isolated worker,
+and a matching approved-fork binding with valid read-only proof. The
+deterministic consumption receipt MUST be created only immediately before the
+first authorized side effect, after worker and binding prerequisites pass and
+before credential acquisition or engine execution. Validation-only and earlier
+blocked runs MUST NOT create a receipt or consume the authorization. Terminal
+audit MUST record the authorization intent and outcome even when no receipt
+exists.
 
 #### Scenario: Unapproved fork
 
@@ -20,6 +26,20 @@ worker.
 - **WHEN** a trusted actor authorizes the current fork HEAD with a justification
 - **THEN** authorization intent is durably recorded
 - **AND** that exact SHA may run one preview on a capable isolated worker
+
+#### Scenario: Consumption occurs immediately before the first authorized side effect
+
+- **GIVEN** exact-SHA authorization, worker isolation, and approved-fork binding read-only proof have passed
+- **WHEN** preview is about to acquire the read-only source-fetch credential
+- **THEN** it creates the deterministic consumption receipt with an absent-object precondition immediately beforehand
+- **AND** no receipt exists before the worker and binding prerequisites pass
+- **AND** all credential acquisition and engine execution occur after the receipt is durable
+
+#### Scenario: A prerequisite failure leaves authorization unconsumed
+
+- **WHEN** worker isolation, approved-fork binding selection, or read-only proof fails before the first authorized side effect
+- **THEN** no consumption receipt is created and the authorization remains unconsumed
+- **AND** the terminal audit records the authorization intent and blocked outcome without a receipt
 
 #### Scenario: Worker executes the authorized source
 
@@ -51,13 +71,16 @@ worker.
 
 #### Scenario: Intent or consumption audit fails
 
-- **WHEN** authorization intent or consumption cannot be written durably
-- **THEN** preview fails before credential acquisition or engine execution
+- **WHEN** authorization intent cannot be written durably, or the consumption receipt cannot be created at the first-side-effect boundary
+- **THEN** preview fails before credential acquisition, source fetch, or engine execution
+- **AND** a validation-only run that needs no receipt still records its terminal authorization intent and outcome
 
 #### Scenario: Worker isolation is unavailable
 
 - **WHEN** a fork authorization is valid but the runtime cannot isolate the worker process and files
 - **THEN** preview records a blocked outcome without credentials or engine execution
+- **AND** no consumption receipt is created
+- **AND** the terminal audit records the authorization intent and blocked outcome without a receipt
 
 ### Requirement: Fork mutation is prohibited
 
@@ -74,8 +97,6 @@ No force or break-glass option may bypass this prohibition.
 - **WHEN** any fork PR invokes break-glass apply
 - **THEN** the operation is denied before authorization policy hooks or credentials
 
-## ADDED Requirements
-
 ### Requirement: Credentialed fork execution ships disabled
 
 The initial release MUST keep fork engine execution disabled outright: every
@@ -91,10 +112,9 @@ validated approved-fork read-only bindings.
   prerequisite exists yet)
 - **THEN** no credential provider is resolved and no IaC engine is invoked
 - **AND** the PR result states that engine execution did not run and why
-- **AND** the authorization is NOT consumed: the run executed nothing under
-  it, so the same authorization can still be spent by a later run that can
-  actually execute (the consumption is recorded when a run uses the
-  authorization to acquire credentials or start an engine)
+- **AND** no consumption receipt is created and the authorization is NOT consumed
+- **AND** the terminal audit records the authorization intent and validation-only outcome without a receipt
+- **AND** the same authorization can still be spent by a later run whose worker and binding prerequisites pass and which reaches the first authorized side effect
 
 #### Scenario: No overriding knob exists
 

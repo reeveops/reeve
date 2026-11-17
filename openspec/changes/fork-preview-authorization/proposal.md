@@ -10,9 +10,9 @@ An `issue_comment` workflow runs with base-repository privileges, so a trusted c
 - Deny engine execution and credential acquisition for unapproved forks.
 - Add a trusted-comment command that authorizes one exact fork HEAD SHA.
 - Add fork-specific preview credential bindings.
-- Persist authorization intent before engine execution and consume it once.
-- Keep fork apply and refresh denied without an override path.
-- Ship the initial release with credentialed fork preview DISABLED outright: an authorization authorizes one exact SHA, but engine execution for a fork additionally requires the worker-isolation capability and validated approved-fork read-only bindings, neither of which has an implementation. Until both exist, every fork preview is validation-only - even an authorized one - and no configuration key, flag, force, or break-glass path enables execution.
+- Persist authorization intent before any authorized side effect. Create the deterministic one-shot consumption receipt only immediately before the first authorized side effect, after worker and approved-fork binding prerequisites pass and before credentials or engine execution.
+- Keep fork apply and refresh denied without an override path, including for repositories that previously opted in to fork apply.
+- Ship the initial release with credentialed fork preview DISABLED outright: every fork preview is validation-only. Later execution requires an authorization for the exact SHA, a capable isolated worker, and a matching approved-fork binding with validated read-only proof. No configuration key, flag, force, or break-glass path enables execution in the RC.
 
 ## Scope
 
@@ -21,13 +21,12 @@ Trusted configuration loading and OS-level worker isolation remain separate prer
 
 ## Compatibility
 
-Internal PR previews and local previews keep their current behavior.
-Fork previews become validation-only until an authorization is present and the worker boundary reports that it can isolate hostile code.
+Internal PR previews and local previews keep their current behavior. Fork previews are unconditionally validation-only in the RC. Later enablement requires all three prerequisites: exact-SHA authorization, a capable isolated worker, and a matching approved-fork binding with valid read-only proof. The former repository opt-in for fork apply no longer enables fork mutation.
 
-## RC default (decision)
+## RC default
 
-The review of 2026-11-10 makes the initial release candidate decision explicit: **credentialed fork execution ships disabled - every fork preview is validation-only.** Fork previews do not run the engine until **both** a trusted commenter authorises the exact SHA **and** a capable isolated worker (whose checks the authorization consumes) is in place; and for the RC, even a fully authorized fork does not run the engine because neither prerequisite has an implementation - so the authorization alone executes nothing, and the PR result says so.
+**Credentialed fork execution ships disabled: every fork preview is validation-only.** Even a fully authorized fork runs no engine and acquires no credentials in the RC. Authorization intent and the validation-only outcome are still audited, but a run that executes nothing does not create a consumption receipt and does not consume the authorization.
 
-- The authorization command, records, and audit machinery above are specified now so enablement is a deliberate later change, not an accident of a missing gate.
-- No configuration key, CLI flag, `--force`, or break-glass path enables fork engine execution. Enablement requires a spec change that names a working isolated-worker prerequisite, not an operator toggle.
+- The authorization command, records, and audit machinery are specified now so enablement is a deliberate later change, not an accident of a missing gate.
+- No configuration key, CLI flag, `--force`, or break-glass path enables fork engine execution or fork apply. Enablement requires a spec change naming working isolated-worker and validated approved-fork binding prerequisites, not an operator toggle.
 - The action MAY render fork preview results from engine-independent validation only, and states clearly on the PR that engine execution was not run and why.

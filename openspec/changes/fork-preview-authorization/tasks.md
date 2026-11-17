@@ -2,7 +2,7 @@
 
 ## Design gate
 
-- [x] Define the command and one-shot record model.
+- [x] Define the command and one-shot record model: no receipt for validation-only or prerequisite-blocked runs; claim immediately before the first authorized side effect after worker/binding checks.
 - [x] Define early trust classification and fail-closed behavior.
 - [x] Define approved-fork credential selection.
 - [x] Define the worker-isolation prerequisite.
@@ -13,11 +13,12 @@
 
 - [ ] Add strict command parsing and action dispatch.
 - [ ] Add immutable authorization and consumption records.
-- [ ] Key the write-once consumption receipt by authorization identity and test concurrent claims under the race detector.
+- [ ] Key the write-once consumption receipt by authorization identity; create it only after worker/binding prerequisites pass and immediately before source-fetch credential acquisition; test concurrent claims under the race detector.
+- [ ] Test that validation-only and prerequisite-blocked runs create no receipt, leave authorization unconsumed, and still write terminal intent/outcome audit records.
 - [ ] Resolve PR metadata before every preview side effect.
 - [ ] Fetch, detach, and verify the authorized HEAD in the isolated worker before credential acquisition.
 - [ ] Add the approved-fork auth match dimension and fail-closed read-only proof validation.
-- [ ] Deny fork apply and refresh without override paths.
+- [ ] Deny fork apply and refresh without override paths, including repositories with the former fork-apply opt-in.
 - [ ] Add intent, consumption, and terminal audit records.
 - [ ] Add malicious fork, stale and mismatched SHA, replay, metadata failure, and audit failure tests.
 - [ ] Test unavailable worker isolation, invalid read-only proof, and secret-free validation.

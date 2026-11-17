@@ -21,11 +21,24 @@ Break-glass NEVER overrides the lock, checks, up-to-date, policy, fork-PR, or
 draft-PR gates. An ordinary missing, stale, or failed preview remains binding.
 A gate that would have passed anyway is not reported as overridden.
 
-## Fork PR gate
+## Requirements
+
+### Requirement: Fork PR gate
 
 If PR is from a fork, apply is denied unless the repo explicitly opts in.
 Preview credentials come from configured preview bindings and workflow credential availability; this gate does not reduce their IAM permissions.
 A denied apply is reported in the PR comment.
+
+#### Scenario: Repository opts in to fork apply
+
+- **GIVEN** the repository explicitly opts in to fork apply
+- **WHEN** a fork PR invokes apply
+- **THEN** the fork gate permits apply to continue to the remaining gates
+
+#### Scenario: Repository does not opt in
+
+- **WHEN** a fork PR invokes apply without the repository opt-in
+- **THEN** the fork gate denies apply and reports the denial in the PR comment
 
 ## Configuration
 
