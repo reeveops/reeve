@@ -7,6 +7,22 @@ Every PR operation snapshots that SHA once and never resolves a moving branch na
 
 The VCS adapter reads `.reeve` files at the exact base SHA through the repository contents API.
 The adapter rejects symlinks, submodules, oversized files, duplicate config types, and paths outside `.reeve`.
+A separate exact-revision capability permits only GitHub's recognized CODEOWNERS paths: `CODEOWNERS`, `.github/CODEOWNERS`, and `docs/CODEOWNERS`. It uses the same target repository and exact SHA, fails closed for outside, missing, or unreadable paths, and retains the symlink, submodule, directory, size, and revision-mismatch protections. It never broadens general trusted-file reads beyond `.reeve`.
+
+## Break-glass CODEOWNERS locking is optional
+
+The `break_glass:` block is trusted-owned, so its effective configuration always reads the base revision. CODEOWNERS revision selection is independent and explicitly opt-in through `break_glass.codeowners_from_base` (default `false`):
+
+- `false` preserves existing behavior: the break-glass `codeowners` source resolves CODEOWNERS from PR HEAD.
+- `true` resolves that CODEOWNERS content from the exact trusted base SHA. A PR's CODEOWNERS additions take effect for break-glass only after merge.
+- On a PR changing both infrastructure and CODEOWNERS, the enabled lock makes the HEAD CODEOWNERS edit inert for the run and uses the base branch as the CODEOWNERS ref. Actors authorized on the base can still approve under the ordinary approval rules and invoke Reeve on that PR.
+- `break_glass.reject_self_authorization` remains an independent setting with default `false`. When set, a PR that modifies any authorizing file is denied break-glass before source evaluation, regardless of the CODEOWNERS revision setting.
+- The authorizing-file set is `.reeve/*.yaml`, `.reeve/*.yml`, `CODEOWNERS`, `.github/CODEOWNERS`, and `docs/CODEOWNERS` in every audit and denial path.
+- The `authorizing-config-modified` audit signal stays and names every touched path. Trusted config edits are inert; CODEOWNERS edits are inert only when `codeowners_from_base` is enabled.
+
+The availability tradeoff belongs to repositories that opt in. The default does not remove the existing emergency-responder path through head-resolved CODEOWNERS.
+
+Ordinary approvals intentionally remain HEAD-resolved, including their CODEOWNERS integration. This optional hardening is scoped to emergency override authorization and does not change existing review ownership or routing in the same PR. Ordinary non-author, freshness, dismissal, and required-approval rules remain unchanged.
 
 ## Two parsed configurations
 
