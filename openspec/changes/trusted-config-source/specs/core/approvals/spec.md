@@ -4,70 +4,69 @@
 
 ### Head-resolved; self-add flagged, not forbidden (with opt-in lockdown)
 
-The head-resolved model is retired: resolving the authorization surface from
-the PR HEAD let a PR grant itself emergency override authority - the
-`reject_self_authorization` hole this proposal closes.
+**Reason**: The single head-resolved rule is replaced by trusted-resolution of the `break_glass:` block plus an independent, optional CODEOWNERS revision lock.
+
+**Migration**: Existing head-resolved CODEOWNERS behavior remains the default. Set `break_glass.codeowners_from_base: true` in trusted configuration to make PR CODEOWNERS edits inert for break-glass until merge. `break_glass.reject_self_authorization` keeps its existing independent behavior.
 
 ## ADDED Requirements
 
-### Requirement: Break-glass authorization resolves from the trusted revision
+### Requirement: Break-glass CODEOWNERS base locking is optional and off by default
 
-Break-glass authorization MUST resolve its entire surface from the trusted
-configuration revision - the `break_glass:` block in shared.yaml AND the
-CODEOWNERS content the `codeowners` source consults - and never from PR HEAD.
-A PR that adds an actor to `break_glass.authorized` or grants itself
-CODEOWNERS ownership of a changed path MUST NOT authorize its own emergency
-override: the addition takes effect only after merge. No new configuration
-keys are introduced by this change. Break-glass inside a PR is otherwise
-unchanged for actors ALREADY authorized on the base branch: they still
-resolve authority through the same sources with the same gate-override
-semantics, audit recording, and trace style - this change only moves WHERE
-the authorization surface is read from, and does not disable break-glass in
-PRs. The `authorizing-config-modified` audit
-signal stays: the modification is inert for the current run, and the audit
-record still names every touched path. `break_glass.reject_self_authorization`
-stays accepted and keeps enforceable meaning: when set, a PR that modifies
-any authorizing file is denied break-glass outright, before any source
-evaluation, with the touched paths in the trace. Source-union matching,
-narrowest-first recording, and denial traces are unchanged.
+The `break_glass:` block MUST resolve from `trusted_config_revision`. `break_glass.codeowners_from_base` MUST default to `false`: false preserves HEAD-resolved CODEOWNERS, while true resolves the break-glass `codeowners` source from the exact trusted base SHA. When true, PR CODEOWNERS edits MUST be inert until merge. Base-authorized reviewers and operators MUST remain able to approve under ordinary rules and invoke Reeve on a PR changing both infrastructure and CODEOWNERS, subject to the independent `reject_self_authorization` rule.
 
-#### Scenario: A PR grants itself break-glass authority
+#### Scenario: Default preserves head-resolved CODEOWNERS
 
-- **GIVEN** a PR whose HEAD adds the author to `break_glass.authorized`
-  under `internal_list`
-- **WHEN** the PR runs `/reeve breakglass`
-- **THEN** authorization resolves against the trusted revision, where the
-  author is not listed
-- **AND** the apply is denied with a trace naming every source consulted
-- **AND** the audit record flags that the PR modified its own authorizing
-  config
+- **GIVEN** `break_glass.codeowners_from_base` is omitted or false
+- **WHEN** the break-glass `codeowners` source evaluates a PR
+- **THEN** it resolves CODEOWNERS from PR HEAD exactly as before
+- **AND** the audit still records any authorizing-file modification
 
-#### Scenario: A PR grants itself a CODEOWNERS path
+#### Scenario: A PR grants itself a CODEOWNERS path with locking enabled
 
-- **GIVEN** a PR whose HEAD adds a CODEOWNERS entry making the author an
-  owner of a changed path
-- **WHEN** the PR runs `/reeve breakglass` relying on the `codeowners`
-  source
-- **THEN** CODEOWNERS is read from the trusted revision, where the entry is
-  absent
-- **AND** the `codeowners` source does not grant, and the apply is denied
-  unless another trusted source grants
+- **GIVEN** `break_glass.codeowners_from_base: true` in trusted configuration
+- **AND** a PR whose HEAD adds a CODEOWNERS entry making the author an owner of a changed path
+- **WHEN** the PR runs `/reeve breakglass` relying on the `codeowners` source
+- **THEN** CODEOWNERS is read from the trusted base SHA, where the entry is absent
+- **AND** the `codeowners` source does not grant, and the apply is denied unless another trusted source grants
 
-#### Scenario: reject_self_authorization distrusts the toucher
+#### Scenario: Base-authorized operator handles a mixed infrastructure and CODEOWNERS PR
+
+- **GIVEN** `break_glass.codeowners_from_base: true`
+- **AND** `break_glass.reject_self_authorization` is false
+- **AND** a PR changes both infrastructure and CODEOWNERS
+- **AND** the operator is authorized by the base revision
+- **WHEN** the operator invokes `/reeve breakglass`
+- **THEN** Reeve uses the base branch as the CODEOWNERS ref and the HEAD CODEOWNERS edit is inert until merge
+- **AND** the operator remains eligible to invoke Reeve without authority from the HEAD edit
+- **AND** reviewers authorized on the base remain eligible to approve under the ordinary approval rules
+
+### Requirement: Authorizing-file handling covers both config extensions
+
+The authorizing-file set MUST include `.reeve/*.yaml`, `.reeve/*.yml`, `CODEOWNERS`, `.github/CODEOWNERS`, and `docs/CODEOWNERS`. Every matching modification MUST produce the `authorizing-config-modified` audit signal with touched paths. `break_glass.reject_self_authorization` MUST retain its independent default `false`; when true, any such modification denies break-glass before source evaluation.
+
+#### Scenario: reject_self_authorization distrusts either YAML extension
 
 - **GIVEN** `break_glass.reject_self_authorization: true`
-- **AND** an actor listed in the trusted revision's
-  `break_glass.authorized`
-- **WHEN** that actor runs `/reeve breakglass` from a PR that modified a
-  `.reeve` config or CODEOWNERS file
+- **AND** an actor listed in the trusted revision's `break_glass.authorized`
+- **WHEN** that actor runs `/reeve breakglass` from a PR that modified a `.reeve/*.yaml` or `.reeve/*.yml` config or a recognized CODEOWNERS file
 - **THEN** the apply is denied before any source is evaluated
 - **AND** the trace names the touched paths
 
-#### Scenario: The modification flag still records the attempt
+#### Scenario: The modification flag records attempts in either CODEOWNERS mode
 
-- **GIVEN** a PR that modifies a `.reeve/*.yaml` config or any CODEOWNERS
-  file
-- **WHEN** a break-glass apply runs on that PR
-- **THEN** the audit record flags `authorizing-config-modified` with the
-  touched paths
-- **AND** the modification is inert for the current run
+- **GIVEN** a PR that modifies a `.reeve/*.yaml`, `.reeve/*.yml`, or recognized CODEOWNERS file
+- **WHEN** a break-glass apply runs on that PR with base locking either enabled or disabled
+- **THEN** the audit record flags `authorizing-config-modified` with the touched paths
+- **AND** trusted configuration edits are inert for the current run
+- **AND** CODEOWNERS edits are inert only when `break_glass.codeowners_from_base` is true
+
+### Requirement: Ordinary approvals intentionally remain HEAD-resolved
+
+Ordinary approval CODEOWNERS integration MUST continue resolving from PR HEAD, regardless of `break_glass.codeowners_from_base`. The optional lock is scoped to emergency authorization so existing review ownership and routing remain stable. Non-author, freshness, dismissal, and required-approval rules MUST remain unchanged.
+
+#### Scenario: Base locking for break-glass does not move ordinary approvals
+
+- **GIVEN** `break_glass.codeowners_from_base: true`
+- **WHEN** ordinary approvals resolve CODEOWNERS for the same PR
+- **THEN** ordinary approvals use PR HEAD
+- **AND** only the break-glass `codeowners` source uses the trusted base SHA

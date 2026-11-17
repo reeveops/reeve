@@ -7,21 +7,22 @@ Every PR operation snapshots that SHA once and never resolves a moving branch na
 
 The VCS adapter reads `.reeve` files at the exact base SHA through the repository contents API.
 The adapter rejects symlinks, submodules, oversized files, duplicate config types, and paths outside `.reeve`.
+A separate exact-revision capability permits only GitHub's recognized CODEOWNERS paths: `CODEOWNERS`, `.github/CODEOWNERS`, and `docs/CODEOWNERS`. It uses the same target repository and exact SHA, fails closed for outside, missing, or unreadable paths, and retains the symlink, submodule, directory, size, and revision-mismatch protections. It never broadens general trusted-file reads beyond `.reeve`.
 
-## Break-glass authorization resolves from the trusted revision (decision)
+## Break-glass CODEOWNERS locking is optional
 
-One semantic decision gates this design: the current break-glass model resolves its authorization surface against the PR HEAD ("Head-resolved; self-add flagged, not forbidden"), while the field ownership table makes `shared.*` - which contains `break_glass:` - trusted-owned.
-The two cannot both hold: as long as break-glass authorization resolves from HEAD, a PR that adds itself to `break_glass.authorized` or grants itself CODEOWNERS ownership of a changed path self-authorizes an emergency override of the very gates that were loaded to constrain it - the `reject_self_authorization` hole the opt-in flag documents, open by default.
+The `break_glass:` block is trusted-owned, so its effective configuration always reads the base revision. CODEOWNERS revision selection is independent and explicitly opt-in through `break_glass.codeowners_from_base` (default `false`):
 
-Decision: **the entire break-glass authorization surface is trusted-resolved.**
+- `false` preserves existing behavior: the break-glass `codeowners` source resolves CODEOWNERS from PR HEAD.
+- `true` resolves that CODEOWNERS content from the exact trusted base SHA. A PR's CODEOWNERS additions take effect for break-glass only after merge.
+- On a PR changing both infrastructure and CODEOWNERS, the enabled lock makes the HEAD CODEOWNERS edit inert for the run and uses the base branch as the CODEOWNERS ref. Actors authorized on the base can still approve under the ordinary approval rules and invoke Reeve on that PR.
+- `break_glass.reject_self_authorization` remains an independent setting with default `false`. When set, a PR that modifies any authorizing file is denied break-glass before source evaluation, regardless of the CODEOWNERS revision setting.
+- The authorizing-file set is `.reeve/*.yaml`, `.reeve/*.yml`, `CODEOWNERS`, `.github/CODEOWNERS`, and `docs/CODEOWNERS` in every audit and denial path.
+- The `authorizing-config-modified` audit signal stays and names every touched path. Trusted config edits are inert; CODEOWNERS edits are inert only when `codeowners_from_base` is enabled.
 
-- `break_glass.*` is trusted-owned: the effective configuration reads the base revision, like every other security control.
-- The CODEOWNERS consulted by the `codeowners` break-glass source reads the base revision as well: CODEOWNERS is a head-modifiable file, so head-resolved CODEOWNERS would make self-grant possible through the back door the break-glass list just closed.
-- A PR's own authorization additions therefore take effect only after merge. An operator who needs break-glass authority on the base branch lands it there first.
-- `break_glass.reject_self_authorization` stays accepted and gains a strictly enforceable meaning instead of becoming a no-op: when set, a PR that modifies ANY authorizing file (a `.reeve/*.yaml` config or any CODEOWNERS file) is denied break-glass outright - the trusted list is authoritative, but a PR reaching for the files that authorize it is the exact signal the flag distrusts. Default remains false.
-- The `AuthorizingConfigModified` audit signal stays: the modification is inert for the current run, and the audit record still names every touched path.
+The availability tradeoff belongs to repositories that opt in. The default does not remove the existing emergency-responder path through head-resolved CODEOWNERS.
 
-The emergency-responder availability story is deliberately traded away: an actor not on the base revision's authorization surface cannot grant it to themselves in the PR being broken for.
+Ordinary approvals intentionally remain HEAD-resolved, including their CODEOWNERS integration. This optional hardening is scoped to emergency override authorization and does not change existing review ownership or routing in the same PR. Ordinary non-author, freshness, dismissal, and required-approval rules remain unchanged.
 
 ## Two parsed configurations
 

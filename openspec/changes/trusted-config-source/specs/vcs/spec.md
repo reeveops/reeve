@@ -40,3 +40,26 @@ Symlinks, submodules, directories, oversized responses, and revision mismatches 
 
 - **WHEN** a `.reeve` entry at the trusted revision is a symlink or submodule
 - **THEN** the read fails without following the target
+
+### Requirement: Exact-revision CODEOWNERS reads use an explicit allowlist
+
+A separate CODEOWNERS read capability MUST accept only `CODEOWNERS`, `.github/CODEOWNERS`, and `docs/CODEOWNERS` at the caller-provided SHA in the target repository. It MUST fail closed for outside, missing, or unreadable paths and MUST NOT fall back to PR HEAD. Symlink, submodule, directory, size, and revision-mismatch protections MUST remain enforced.
+
+#### Scenario: Recognized CODEOWNERS is read at the base SHA
+
+- **GIVEN** break-glass CODEOWNERS base locking is enabled
+- **WHEN** the adapter reads `.github/CODEOWNERS` for authorization
+- **THEN** the content comes from the snapshotted target repository at the exact BaseSHA
+- **AND** no general read outside `.reeve` is granted to trusted-config loading
+
+#### Scenario: A path is outside the CODEOWNERS allowlist
+
+- **WHEN** a caller requests any path other than `CODEOWNERS`, `.github/CODEOWNERS`, or `docs/CODEOWNERS`
+- **THEN** the capability rejects the read before returning content
+- **AND** no alternate or normalized path bypasses the allowlist
+
+#### Scenario: An allowlisted CODEOWNERS path cannot be read
+
+- **WHEN** the selected allowlisted path is missing, unreadable, a directory, a symlink, a submodule, oversized, or at an unexpected revision
+- **THEN** the read fails closed
+- **AND** authorization does not fall back to PR HEAD or another unallowlisted path
