@@ -16,9 +16,11 @@ import (
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/core/approvals"
 	"github.com/reeveops/reeve/internal/core/discovery"
+	"github.com/reeveops/reeve/internal/core/redact"
 	"github.com/reeveops/reeve/internal/core/render"
 	"github.com/reeveops/reeve/internal/core/summary"
 	"github.com/reeveops/reeve/internal/iac"
+	"github.com/reeveops/reeve/internal/log"
 	"github.com/reeveops/reeve/internal/notify"
 	reeveotel "github.com/reeveops/reeve/internal/observability/otel"
 	"github.com/reeveops/reeve/internal/vcs"
@@ -139,6 +141,11 @@ type PreviewOutput struct {
 // renders a PR comment, and - if Comments is non-nil - upserts it.
 func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	start := time.Now()
+
+	// The invocation redactor covers the log sink for the whole command:
+	// registered credential values mask from the moment they resolve.
+	redactor := InstallInvocationRedactor(in.Shared)
+	defer log.SetRedactor(nil)
 
 	// A local run keyed to a real PR would write PR-scoped artifacts (the
 	// preview manifest) that apply's preview-freshness gate trusts - letting
@@ -345,7 +352,7 @@ func Preview(ctx context.Context, in PreviewInput) (*PreviewOutput, error) {
 	}
 
 	appCfg := toApprovalsConfig(in.Shared)
-	summaries := runPreviewTargets(ctx, in, otelProvider, target, runID, stateEnv, appCfg, credentialSource)
+	summaries := runPreviewTargets(ctx, in, otelProvider, target, runID, stateEnv, appCfg, credentialSource, redactor)
 
 	sort := "status_grouped"
 	if in.Shared != nil && in.Shared.Comments.Sort != "" {
@@ -476,7 +483,7 @@ type previewTarget struct {
 // runPreviewTargets previews independent project directories concurrently.
 // Stacks sharing a directory stay serial because engine working data and
 // workspace selection are scoped to that directory.
-func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, target []discovery.Stack, runID string, stateEnv map[string]string, appCfg approvals.Config, credentialSource credentialAcquirer) []summary.StackSummary {
+func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, target []discovery.Stack, runID string, stateEnv map[string]string, appCfg approvals.Config, credentialSource credentialAcquirer, redactor *redact.Redactor) []summary.StackSummary {
 	if len(target) == 0 {
 		return nil
 	}
@@ -511,7 +518,7 @@ func runPreviewTargets(ctx context.Context, in PreviewInput, otelProvider *reeve
 					s := item.stack
 					slog.Info("preview stack starting", "stack", s.Ref(), "n", item.index+1, "of", len(target))
 					stackStart := time.Now()
-					ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv, credentialSource)
+					ss := runPreviewOne(ctx, in, otelProvider, s, runID, stateEnv, credentialSource, redactor)
 					rules := approvals.Resolve(appCfg, s.Ref())
 					ss.RequiredApprovers = rules.Approvers
 					summaries[item.index] = ss
@@ -540,8 +547,7 @@ func previewParallelism(in PreviewInput) int {
 	return parallel
 }
 
-func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string, credentialSource credentialAcquirer) summary.StackSummary {
-	redactor := BuildRedactor(in.Shared)
+func runPreviewOne(ctx context.Context, in PreviewInput, otelProvider *reeveotel.Provider, s discovery.Stack, runID string, stateEnv map[string]string, credentialSource credentialAcquirer, redactor *redact.Redactor) summary.StackSummary {
 
 	authEnv, authCleanup, authErr := resolveAuthEnv(ctx, in.AuthConfig, credentialSource, s.Ref(), auth.ModePreview,
 		LocalAuth{Enabled: in.Local, Providers: in.LocalAuthProviders})
