@@ -1,7 +1,9 @@
 package run
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,5 +133,31 @@ func TestRunPolicyForStackPlanWriteFailureDenies(t *testing.T) {
 	want := "policy hooks conftest not run for proj/evil/stack: plan file could not be written"
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("refusal must name the hooks, the stack, the rule, and the failing condition:\nwant: %s\ngot:  %v", want, err)
+	}
+}
+
+func TestRunPolicyForStackPlanWriteFailureRedactsWholeRefusal(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	const hookSecret = "hook-name-secret-42"
+	const stackSecret = "stack-ref-secret-42"
+	hooks := []policy.Hook{{Name: "conftest-" + hookSecret, Command: []string{"true"}, Required: true}}
+	s := discovery.Stack{Project: "proj", Name: "stack-" + stackSecret, Env: "prod"}
+	r := redact.New()
+	r.AddSecret(hookSecret)
+	r.AddSecret(stackSecret)
+
+	_, _, err := RunPolicyForStack(context.Background(), hooks, s, summary.StackSummary{FullPlan: "{}"}, r)
+	if err == nil {
+		t.Fatal("plan write failure must deny the policy gate")
+	}
+	var logs bytes.Buffer
+	log.New(&logs, "", 0).Print(err)
+	for sink, text := range map[string]string{"returned error": err.Error(), "job log": logs.String()} {
+		if strings.Contains(text, hookSecret) || strings.Contains(text, stackSecret) {
+			t.Fatalf("%s leaked a secret-bearing hook name or stack ref: %s", sink, text)
+		}
+		if !strings.Contains(text, "conftest-[redacted]") || !strings.Contains(text, "proj/stack-[redacted]") {
+			t.Fatalf("%s must retain the refusal context with masked names: %s", sink, text)
+		}
 	}
 }

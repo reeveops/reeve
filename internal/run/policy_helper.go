@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,14 +53,14 @@ func RunPolicyForStack(ctx context.Context, hooks []policy.Hook, s discovery.Sta
 		// Refuse with the reason where the user is looking (the job log):
 		// what was refused (the hooks did not run), which rule refused it
 		// (the plan file could not be written), the failing stack, and what
-		// happens next (the apply is denied). Name-derived detail is
-		// redacted before it leaves here.
-		detail := fmt.Sprintf("%v", err)
+		// happens next (the apply is denied). Redact the complete refusal:
+		// hook names and the stack ref can carry credentials too.
+		refusal := fmt.Sprintf("policy hooks %s not run for %s: plan file could not be written (%v); apply denied",
+			hookNames(hooks), s.Ref(), err)
 		if r != nil {
-			detail = r.Redact(detail)
+			refusal = r.Redact(refusal)
 		}
-		return false, nil, fmt.Errorf("policy hooks %s not run for %s: plan file could not be written (%s); apply denied",
-			hookNames(hooks), s.Ref(), detail)
+		return false, nil, errors.New(refusal)
 	}
 	defer os.RemoveAll(planDir)
 

@@ -9,7 +9,8 @@ using slugged project and stack components, so that repo-controlled names
 cannot escape it through traversal or path separators. A plan file that
 cannot be written MUST deny the apply - no hook runs - and the refusal MUST
 name the hooks, the stack, the rule (plan file could not be written), the
-error, and the outcome. Name-derived detail in the refusal passes redaction.
+error, and the outcome. The complete refusal, including hook names, the stack
+ref, and the underlying error, MUST pass through redaction.
 
 #### Scenario: A crafted stack name
 
