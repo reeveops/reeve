@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -16,7 +15,6 @@ import (
 	"github.com/reeveops/reeve/internal/config/schemas"
 	"github.com/reeveops/reeve/internal/notify"
 	"github.com/reeveops/reeve/internal/run"
-	gh "github.com/reeveops/reeve/internal/vcs/github"
 )
 
 func newReadyCmd() *cobra.Command {
@@ -31,6 +29,7 @@ func newReadyCmd() *cobra.Command {
 	cmd.Flags().String("repo", "", "owner/repo (default: $GITHUB_REPOSITORY)")
 	cmd.Flags().String("token", "", "GitHub token (default: $GITHUB_TOKEN)")
 	cmd.Flags().String("root", "", "Repo root (default: cwd)")
+	addCommentAuthorFlag(cmd)
 	_ = cmd.MarkFlagRequired("pr")
 	return cmd
 }
@@ -57,21 +56,16 @@ func runReady(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("ready requires --repo (or $GITHUB_REPOSITORY) and --token (or $GITHUB_TOKEN)")
 	}
 
-	parts := strings.SplitN(repoFull, "/", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid --repo %q (want owner/name)", repoFull)
-	}
-	client, err := gh.New(ctx, token, parts[0], parts[1])
-	if err != nil {
-		return err
-	}
-
 	cfg, err := config.Load(root)
 	if err != nil {
 		return err
 	}
 	applyLogConfig(cfg.LogSettings())
 	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	client, err := newGitHubClient(ctx, cmd, token, repoFull, cfg.Shared)
+	if err != nil {
 		return err
 	}
 

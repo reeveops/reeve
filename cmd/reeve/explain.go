@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -14,7 +13,6 @@ import (
 	"github.com/reeveops/reeve/internal/config"
 	"github.com/reeveops/reeve/internal/iac"
 	"github.com/reeveops/reeve/internal/run"
-	gh "github.com/reeveops/reeve/internal/vcs/github"
 )
 
 func newExplainCmd() *cobra.Command {
@@ -30,6 +28,7 @@ func newExplainCmd() *cobra.Command {
 	cmd.Flags().String("repo", "", "owner/repo (default: $GITHUB_REPOSITORY)")
 	cmd.Flags().String("token", "", "GitHub token (default: $GITHUB_TOKEN)")
 	cmd.Flags().String("root", "", "Repo root (default: cwd)")
+	addCommentAuthorFlag(cmd)
 	return cmd
 }
 
@@ -55,11 +54,6 @@ func runExplain(cmd *cobra.Command, _ []string) error {
 	if pr == 0 || repoFull == "" || token == "" {
 		return fmt.Errorf("explain requires --pr, --repo (or $GITHUB_REPOSITORY), and --token (or $GITHUB_TOKEN)")
 	}
-	parts := strings.SplitN(repoFull, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return fmt.Errorf("invalid --repo %q: want owner/name", repoFull)
-	}
-
 	cfg, err := config.Load(root)
 	if err != nil {
 		return err
@@ -80,7 +74,7 @@ func runExplain(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	client, err := gh.New(ctx, token, parts[0], parts[1])
+	client, err := newGitHubClient(ctx, cmd, token, repoFull, cfg.Shared)
 	if err != nil {
 		return err
 	}

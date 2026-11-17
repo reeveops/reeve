@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -192,5 +193,51 @@ func TestBoardCommandsCarryCommentFlags(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no board command was checked; the command names must have changed")
+	}
+}
+
+// TestCommentAuthorReachesTheClientThroughTheRealWiring pins the full
+// author seam: a config comments.author reaches the env the github client
+// reads, a --comment-author flag overrides it, and the flag wins when both
+// are set. The client-side consumption of REEVE_COMMENT_AUTHOR is covered
+// by internal/vcs/github tests; this pins the command-side wiring including
+// the precedence.
+func TestCommentAuthorReachesTheClientThroughTheRealWiring(t *testing.T) {
+	prev, hadPrev := os.LookupEnv("REEVE_COMMENT_AUTHOR")
+	t.Cleanup(func() {
+		if hadPrev {
+			_ = os.Setenv("REEVE_COMMENT_AUTHOR", prev)
+		} else {
+			_ = os.Unsetenv("REEVE_COMMENT_AUTHOR")
+		}
+	})
+
+	// Config only: comments.author reaches the client seam.
+	cmd, err := flagCmd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := &schemas.Shared{Comments: schemas.CommentsConfig{Author: "cfg-author[bot]"}}
+	if err := applyCommentFlags(cmd, shared); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("REEVE_COMMENT_AUTHOR"); got != "cfg-author[bot]" {
+		t.Fatalf("the config value must reach the client seam, got %q", got)
+	}
+
+	// Flag and config together: the flag wins.
+	cmd, err = flagCmd("--comment-author", "flag-author[bot]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared = &schemas.Shared{Comments: schemas.CommentsConfig{Author: "cfg-author[bot]"}}
+	if err := applyCommentFlags(cmd, shared); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("REEVE_COMMENT_AUTHOR"); got != "flag-author[bot]" {
+		t.Fatalf("the flag must win over the config key, got %q", got)
+	}
+	if shared.Comments.Author != "flag-author[bot]" {
+		t.Fatalf("the flag must also land in the live config: %+v", shared.Comments)
 	}
 }
