@@ -121,9 +121,13 @@ jobs:
           # already have verified. The publish decision is captured jq
           # output, never gh's exit code (gh exits 0 whenever the release
           # exists - see .github/scripts/edge-publish.sh):
-          #   complete release -> skip with a visible note;
-          #   partial release  -> upload only the missing assets;
-          #   failed listing   -> fail with the reason.
+          #   complete release       -> skip with a visible note;
+          #   bundle-absent partial  -> replace the earlier-run set with this
+          #                             run's complete set (stale assets
+          #                             deleted first; bundle uploads alone
+          #                             in a second call);
+          #   bundle-present partial -> fail naming the missing assets;
+          #   failed listing         -> fail with the reason.
           "$GITHUB_WORKSPACE/.github/scripts/edge-publish.sh" "$TAG" "$GITHUB_SHA" dist
 
       # Keep the newest N per-push prereleases for this branch and delete the
