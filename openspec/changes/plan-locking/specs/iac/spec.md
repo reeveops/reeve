@@ -78,8 +78,6 @@ silently dropping either.
 - **WHEN** an apply is given a plan path and `Refresh: true`
 - **THEN** it fails before any CLI process runs, naming the conflict
 
-## MODIFIED Requirements
-
 ### Requirement: Capabilities
 
 ```go

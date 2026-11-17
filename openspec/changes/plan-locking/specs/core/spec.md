@@ -6,24 +6,124 @@
 
 When `engine.plan_locking` is enabled (the default) and the engine supports
 saved plans, preview SHALL store each stack's plan artifact under the run's own
-prefix and record its key on the stack's manifest entry. Apply SHALL fetch that
-artifact for the commit being applied and hand it to the engine.
+prefix and record its key AND SHA-256 digest on the stack's manifest entry. If
+storing or uploading the artifact fails at preview time, the manifest SHALL
+record NO plan key for that stack and the preview timeline SHALL carry the
+reason - a preview that cannot deliver its artifact keeps no promise about
+one. Apply SHALL fetch the recorded artifact for the commit being applied and
+hand it to the engine.
 
-Degradation SHALL be one-directional: a missing or unreadable artifact falls
-back to computing a plan at apply time, and SHALL be reported on the run
-timeline. It SHALL NOT be silent.
+Degradation SHALL be one-directional: the ONLY apply-time fallback is a
+manifest entry with no plan key, which re-plans with a loud timeline
+statement. A manifest entry that DOES record a plan key keeps a promise - a
+missing, unreadable, oversized, digest-less, or digest-mismatched artifact
+MUST NOT fall back to a fresh plan; it fails that stack closed per the next
+requirement. Neither direction SHALL be silent.
 
 #### Scenario: The reviewed plan is applied
 
 - **WHEN** a preview stored a plan for a stack and that commit is applied
 - **THEN** the engine receives that exact artifact
 
+#### Scenario: The preview's upload failure records no plan key
+
+- **WHEN** the preview cannot store or upload a stack's plan artifact
+- **THEN** the manifest records no plan key for that stack
+- **AND** the preview timeline carries an entry naming the stack and the
+  failure, so the run's record shows locking was unavailable, not silently
+  absent
+
 #### Scenario: No artifact exists
 
 - **WHEN** the manifest for the commit records no plan key (locking was off,
-  the upload failed, or the manifest predates the feature)
-- **THEN** the stack still applies, and the timeline carries a
+  the manifest predates the feature, or the preview's upload failed and
+  recorded no key)
+- **THEN** the stack applies with a fresh plan, and the timeline carries a
   "plan lock unavailable" entry naming the stack and the reason
+
+### Requirement: The saved plan is digest-bound and its absence fails closed
+
+The manifest entry for a stored plan SHALL record the artifact's SHA-256
+digest. When a manifest records a plan key but the artifact is missing,
+unreadable, oversized (beyond the 64 MiB plan-artifact cap), digest-less, or
+does not match the recorded digest, apply SHALL fail that stack closed instead
+of silently computing a fresh plan.
+
+`engine.plan_locking` SHALL remain a boolean. The sibling boolean
+`engine.plan_locking_allow_replan` (default `false`) and per-run `--replan`
+flag, on the CLI and `/reeve apply` behind apply's actor gates, SHALL provide
+explicit availability recovery only for a missing, unreadable, or oversized
+promised artifact. Each re-plan SHALL be stated on the timeline and in the
+audit record with the actor. A digest mismatch or missing digest MUST NOT use
+this direct recovery path, even when requested; it requires a new preview and
+new approvals so old approvals cannot authorize an unreviewed replacement.
+A manifest with NO plan key remains the loud compatibility re-planning path.
+
+#### Scenario: A manifest promises a plan that is missing
+
+- **WHEN** the manifest records a plan key and the artifact cannot be
+  fetched
+- **THEN** the apply fails that stack, naming the stack, the run id, the
+  plan key, and the failure
+- **AND** no engine runs for that stack without the explicit recovery path
+
+#### Scenario: A manifest records a key but no digest
+
+- **WHEN** the manifest records a plan key but no digest - a manifest written
+  by a preview that predates digest binding, which the current beta writes
+- **THEN** the apply fails that stack closed, naming the stack, the run id,
+  and the reason: the preview predates digest binding, so the artifact the
+  key names cannot be verified
+- **AND** the refusal names the next step - run a new preview so the manifest
+  carries a digest, then obtain new approvals for that reviewed plan
+- **AND** `--replan` and `engine.plan_locking_allow_replan` cannot bypass the
+  new preview and review requirement for this unverifiable artifact
+
+#### Scenario: The artifact does not match its digest
+
+- **WHEN** the fetched plan artifact's SHA-256 differs from the digest the
+  manifest recorded
+- **THEN** the apply fails that stack, naming the stack, the plan key, and
+  both digests
+- **AND** the mismatched artifact is treated as corrupt, never executed
+
+#### Scenario: Replan cannot reuse old approvals after a digest mismatch
+
+- **GIVEN** the fetched artifact does not match its recorded digest
+- **AND** the old preview has approvals
+- **WHEN** apply requests `--replan` or enables `engine.plan_locking_allow_replan`
+- **THEN** the current apply still fails closed without executing a fresh plan
+- **AND** recovery requires a new preview and new approvals of its plan and digest
+- **AND** the old approvals do not authorize the replacement plan
+
+#### Scenario: The recovery path from the CLI
+
+- **GIVEN** `engine.plan_locking_allow_replan: true` in trusted
+  configuration, or `--replan` passed to `reeve apply` on the CLI
+- **WHEN** the promised plan is missing, unreadable, or oversized, rather than digest-less or digest-mismatched
+- **THEN** the apply computes a fresh plan through the availability recovery path
+- **AND** the timeline and the audit record state that the apply re-planned
+  through the recovery path, naming the run's actor
+
+#### Scenario: The recovery path from a PR comment
+
+- **GIVEN** the comment parser's accepted argument set for `apply` includes
+  `--replan`
+- **WHEN** an authorized commenter runs `/reeve apply --replan` for a missing,
+  unreadable, or oversized promised artifact - behind the same actor gates as
+  any apply (the bot guard, the association gate, and the explicit-command
+  actor gate)
+- **THEN** the apply computes a fresh plan through the availability recovery path
+- **AND** the timeline and the audit record state it, naming the commenting
+  actor
+- **AND** a commenter who fails apply's actor gates re-plans nothing
+
+#### Scenario: Legacy manifest without a plan key
+
+- **WHEN** the manifest for the commit records no plan key
+- **THEN** the stack applies with a fresh plan under the compatibility path
+- **AND** the timeline carries the "plan lock unavailable" entry naming the
+  stack and the reason
 
 #### Scenario: The artifact is scoped to the run
 
@@ -81,21 +181,3 @@ therefore not use a locked plan. The run timeline SHALL say so.
 - **THEN** the artifact is not used, and the timeline records that the applied
   change set was computed after the refresh and is not the plan the PR
   previewed
-
-## MODIFIED Requirements
-
-### Requirement: Preview freshness bounds how stale an applied plan may be
-
-`preconditions.preview_freshness` SHALL default to 4 hours when the key is
-omitted. Only a literal `"0"` SHALL disable the gate. A value that is not a
-positive Go duration SHALL be a load error, never a silent disable.
-
-#### Scenario: No configuration
-
-- **WHEN** `preview_freshness` is not set
-- **THEN** the gate is active with a 4h window
-
-#### Scenario: Deliberate opt-out
-
-- **WHEN** `preview_freshness: "0"`
-- **THEN** the gate is skipped, and its trace says what is no longer checked

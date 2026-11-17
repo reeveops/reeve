@@ -47,7 +47,7 @@ comment (or merge, depending on config), reeve acquires locks and runs **apply**
   the selected commit and MUST NOT fall back to an older valid candidate.
 - Readiness MUST skip its notification when preview history is unavailable.
   Explain MUST render a fail-closed diagnostic report with the storage error.
-- Apply reuses the preview's saved engine plan by default when available. Missing or unreadable plan artifacts fall back to a fresh plan with an explicit timeline warning; `--refresh` and `engine.plan_locking: false` disable saved-plan reuse.
+- Apply reuses the preview's saved engine plan by default when its manifest records a plan key. A missing, unreadable, oversized, digest-less, or digest-mismatched promised artifact fails closed; only a manifest with no plan key or an authorized availability recovery may compute a fresh plan, with explicit timeline and audit records. A digest mismatch or missing digest always requires a new preview and new approvals, even when `--replan` is requested. `--refresh` and the boolean `engine.plan_locking: false` disable saved-plan reuse.
 - Preview-manifest integrity is separate: malformed or unreadable selected history fails closed except for the explicitly authorized recovery path below.
 - Apply on fork PRs is denied by default. The gate does not reduce preview credentials; previews use configured preview bindings subject to workflow credential availability.
 - Start and completion notifications follow their lifecycle points; delivery errors are logged without changing the engine result.
